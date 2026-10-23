@@ -20,24 +20,48 @@ You can start editing the page by modifying `app/page.tsx`. The page auto-update
 
 This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
 
-## API
+## API and local PostgreSQL
 
-The Express API is a separate development service. It currently exposes only a health endpoint and has no database, authentication, or lead endpoints. Do not expose it publicly.
+The Express API is a separate development service. It binds to `127.0.0.1` and must not be exposed publicly. It has no authentication, AI, WhatsApp integration, or frontend integration yet.
 
-Run it on port 4000 (the default):
+### Start the database
+
+PostgreSQL runs in Docker and stores data in the named volume declared as `replypilot_postgres_data` (Compose prefixes it with the project name). The host port defaults to `5433` in `.env.example` to avoid clashing with an existing PostgreSQL on `5432`. Do not run `docker compose down -v` unless you intend to delete the database data.
+
+```bash
+cp .env.example .env
+# Replace the placeholder password in .env, then:
+docker compose up -d
+docker compose ps
+```
+
+Apply migrations and optionally load the five fictional sample leads:
+
+```bash
+npm run db:migrate
+npm run db:seed
+```
+
+The seed is idempotent: running `npm run db:seed` again does not create duplicates. It uses fixed UUIDs and `ON CONFLICT DO NOTHING`, so existing records are not overwritten.
+
+Environment variables are loaded by Node.js `--env-file-if-exists=.env` in the API scripts. Values already set in the environment take precedence, and no dotenv dependency is needed. The API validates `DATABASE_URL`, `PORT`, and `NODE_ENV` at startup.
+
+### Run the API
 
 ```bash
 npm run dev:api
-curl http://localhost:4000/api/health
+curl http://127.0.0.1:4000/api/health
 ```
 
-Set `PORT` to use a different port:
+Set `PORT` inline to use a different API port:
 
 ```bash
 PORT=4100 npm run dev:api
 ```
 
-Build and type-check the API independently of the Next.js app:
+Do not put `PORT` in `.env`: Next.js loads the same file and would also try to use that port.
+
+Build, start, type-check, and test the API independently of the Next.js app:
 
 ```bash
 npm run build:api
@@ -45,6 +69,33 @@ npm run start:api
 npm run typecheck:api
 npm run test:api
 ```
+
+### API test database
+
+Integration tests require a dedicated PostgreSQL database and will refuse to run against the development database. Both `DATABASE_URL` and `TEST_DATABASE_URL` must be set; the scripts load them from `.env`.
+
+Create the test database once (it is not deleted by any script):
+
+```bash
+docker compose exec db createdb -U replypilot replypilot_test
+```
+
+Run this only once; skip it if the database already exists.
+
+The test suite runs migrations against `TEST_DATABASE_URL` and truncates only its `leads` table between tests. It fails with a clear error if `TEST_DATABASE_URL` is missing, points at the same database as `DATABASE_URL`, or points at a maintenance database. Tests are never silently skipped.
+
+### Endpoints
+
+| Method | Path | Behaviour |
+| --- | --- | --- |
+| `GET` | `/api/health` | `200 {"status":"ok"}` when PostgreSQL responds; `503 {"status":"unavailable"}` otherwise. |
+| `GET` | `/api/leads` | `200 {"leads":[...]}` ordered newest first. |
+| `POST` | `/api/leads` | Accepts `name`, `service`, and `lastMessage`; optional `channel`, `status`, and `nextFollowUpAt`. Returns `201 {"lead":{...}}`. Defaults: `Manual`, `New`. |
+| `PATCH` | `/api/leads/:id` | Accepts `{ "status": "New" \| "Contacted" \| "Quoted" \| "Booked" }`. Returns the updated lead, `400` for malformed input, or `404` for an unknown valid UUID. |
+
+Each lead response field is: `id`, `name`, `service`, `channel`, `status`, `lastMessage`, `nextFollowUpAt`, `createdAt`, and `updatedAt`. `nextFollowUpAt` is an ISO 8601 timestamp with an explicit offset or `null`.
+
+Database errors are not returned to clients. Validation responses contain field-level messages without echoing submitted values.
 
 ## Learn More
 

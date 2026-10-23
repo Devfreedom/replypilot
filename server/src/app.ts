@@ -4,18 +4,27 @@ import express, {
   type Request,
   type Response,
 } from "express";
+import type { Pool } from "pg";
+import { createLeadsRouter } from "./leads/routes.js";
 
 const JSON_BODY_LIMIT = "10kb";
 
-export function createApp(): Express {
+export function createApp({ pool }: { pool: Pool }): Express {
   const app = express();
 
   app.disable("x-powered-by");
   app.use(express.json({ limit: JSON_BODY_LIMIT }));
 
-  app.get("/api/health", (_request: Request, response: Response) => {
-    response.status(200).json({ status: "ok" });
+  app.get("/api/health", async (_request: Request, response: Response) => {
+    try {
+      await pool.query("SELECT 1");
+      response.status(200).json({ status: "ok" });
+    } catch {
+      response.status(503).json({ status: "unavailable" });
+    }
   });
+
+  app.use("/api/leads", createLeadsRouter(pool));
 
   app.use((_request: Request, response: Response) => {
     response.status(404).json({ error: "Not found" });
@@ -48,5 +57,3 @@ export function createApp(): Express {
 
   return app;
 }
-
-export const app = createApp();

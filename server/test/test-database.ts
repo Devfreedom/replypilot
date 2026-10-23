@@ -1,0 +1,88 @@
+import type { Pool } from "pg";
+import { runMigrations } from "../src/db/migrate.js";
+
+type DatabaseIdentity = Readonly<{
+  hostname: string;
+  port: string;
+  database: string;
+}>;
+
+function requireEnv(name: string): string {
+  const value = process.env[name]?.trim();
+
+  if (!value) {
+    throw new Error(
+      `${name} is required. Load .env or set it explicitly before running API tests.`,
+    );
+  }
+
+  return value;
+}
+
+function normalizeHostname(hostname: string): string {
+  const normalized = hostname.toLowerCase();
+
+  return ["localhost", "127.0.0.1", "::1", "[::1]"].includes(normalized)
+    ? "loopback"
+    : normalized;
+}
+
+function parseDatabaseUrl(name: string, value: string): DatabaseIdentity {
+  let url: URL;
+
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error(`${name} must be a valid PostgreSQL connection URL.`);
+  }
+
+  if (url.protocol !== "postgres:" && url.protocol !== "postgresql:") {
+    throw new Error(`${name} must use the postgres:// or postgresql:// protocol.`);
+  }
+
+  const database = decodeURIComponent(url.pathname.replace(/^\//, ""));
+
+  if (!database) {
+    throw new Error(`${name} must include a database name.`);
+  }
+
+  return {
+    hostname: normalizeHostname(url.hostname),
+    port: url.port || "5432",
+    database,
+  };
+}
+
+export function getTestDatabaseUrl(): string {
+  const testUrl = requireEnv("TEST_DATABASE_URL");
+  const developmentUrl = requireEnv("DATABASE_URL");
+  const test = parseDatabaseUrl("TEST_DATABASE_URL", testUrl);
+  const development = parseDatabaseUrl("DATABASE_URL", developmentUrl);
+
+  if (
+    test.hostname === development.hostname &&
+    test.port === development.port &&
+    test.database === development.database
+  ) {
+    throw new Error(
+      "Refusing to run API tests against the development database. Set TEST_DATABASE_URL to a dedicated test database.",
+    );
+  }
+
+  if (["postgres", "template0", "template1"].includes(test.database)) {
+    throw new Error(
+      "TEST_DATABASE_URL must point to a dedicated test database, not a maintenance database.",
+    );
+  }
+
+  return testUrl;
+}
+
+export async function prepareTestDatabase(pool: Pool): Promise<void> {
+  await runMigrations(pool);
+  await resetTestLeads(pool);
+}
+
+export async function resetTestLeads(pool: Pool): Promise<void> {
+  await pool.query("TRUNCATE TABLE leads");
+}

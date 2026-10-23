@@ -7,22 +7,27 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "dev:api": "tsx watch server/src/index.ts",
+    "dev:api": "node --env-file-if-exists=.env --import tsx --watch server/src/index.ts",
     "build:api": "tsc -p server/tsconfig.json",
-    "start:api": "node server/dist/index.js",
+    "start:api": "node --env-file-if-exists=.env server/dist/index.js",
     "typecheck:api": "tsc -p server/tsconfig.test.json",
-    "test:api": "tsx --test server/test/*.test.ts"
+    "test:api": "node --env-file-if-exists=.env --import tsx --test server/test/*.test.ts",
+    "db:migrate": "node --env-file-if-exists=.env --import tsx server/src/db/migrate-cli.ts",
+    "db:seed": "node --env-file-if-exists=.env --import tsx server/src/db/seed-cli.ts"
   },
   "dependencies": {
     "express": "^5.3.0",
     "next": "16.4.3",
+    "pg": "^8.23.1",
     "react": "19.3.0",
-    "react-dom": "19.3.0"
+    "react-dom": "19.3.0",
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@tailwindcss/turbopack": "^4",
     "@types/express": "^5.0.6",
     "@types/node": "^20",
+    "@types/pg": "^8.23.1",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "eslint": "^9",

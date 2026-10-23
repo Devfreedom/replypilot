@@ -1,29 +1,18 @@
-import { app } from "./app.js";
+import { createApp } from "./app.js";
+import { loadConfig } from "./config.js";
+import { createPool } from "./db/pool.js";
 
-const DEFAULT_PORT = 4000;
 const SHUTDOWN_TIMEOUT_MS = 10_000;
 
-function parsePort(value: string | undefined): number {
-  if (value === undefined || value.trim() === "") {
-    return DEFAULT_PORT;
-  }
-
-  const port = Number(value);
-
-  if (!Number.isInteger(port) || port < 1 || port > 65_535) {
-    throw new Error(
-      `Invalid PORT "${value}". Expected an integer between 1 and 65535.`,
-    );
-  }
-
-  return port;
-}
-
 function start(): void {
-  const port = parsePort(process.env.PORT);
+  const config = loadConfig();
+  const pool = createPool(config.databaseUrl);
+  const app = createApp({ pool });
 
-  const server = app.listen(port, "127.0.0.1", () => {
-    console.log(`ReplyPilot API listening on http://127.0.0.1:${port}`);
+  const server = app.listen(config.port, "127.0.0.1", () => {
+    console.log(
+      `ReplyPilot API listening on http://127.0.0.1:${config.port}`,
+    );
   });
 
   server.on("error", (error: Error) => {
@@ -31,7 +20,10 @@ function start(): void {
       "Failed to start ReplyPilot API:",
       error instanceof Error ? error.message : "Unknown error",
     );
-    process.exit(1);
+    void pool.end().then(
+      () => process.exit(1),
+      () => process.exit(1),
+    );
   });
 
   let shuttingDown = false;
@@ -50,15 +42,26 @@ function start(): void {
     }, SHUTDOWN_TIMEOUT_MS);
     forceExit.unref();
 
-    server.close((error) => {
+    server.close((serverError) => {
       clearTimeout(forceExit);
 
-      if (error) {
-        console.error("Error while closing the API server:", error.message);
-        process.exit(1);
+      if (serverError) {
+        console.error(
+          "Error while closing the API server:",
+          serverError.message,
+        );
       }
 
-      process.exit(0);
+      void pool.end().then(
+        () => process.exit(serverError ? 1 : 0),
+        (poolError: unknown) => {
+          console.error(
+            "Error while closing the database pool:",
+            poolError instanceof Error ? poolError.message : "Unknown error",
+          );
+          process.exit(1);
+        },
+      );
     });
   };
 
