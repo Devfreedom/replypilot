@@ -248,7 +248,7 @@ export default function Home() {
                         Your AI workflow starts here
                       </h2>
                       <p className="mt-1 max-w-2xl text-sm leading-6 text-slate-600">
-                        Record an enquiry today. Next, we'll teach
+                        Record an enquiry today. Next, we&apos;ll teach
                         ReplyPilot to extract customer details and prepare a
                         helpful reply for your approval.
                       </p>
