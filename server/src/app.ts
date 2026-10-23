@@ -1,0 +1,52 @@
+import express, {
+  type Express,
+  type NextFunction,
+  type Request,
+  type Response,
+} from "express";
+
+const JSON_BODY_LIMIT = "10kb";
+
+export function createApp(): Express {
+  const app = express();
+
+  app.disable("x-powered-by");
+  app.use(express.json({ limit: JSON_BODY_LIMIT }));
+
+  app.get("/api/health", (_request: Request, response: Response) => {
+    response.status(200).json({ status: "ok" });
+  });
+
+  app.use((_request: Request, response: Response) => {
+    response.status(404).json({ error: "Not found" });
+  });
+
+  app.use(
+    (
+      error: unknown,
+      _request: Request,
+      response: Response,
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars -- Express identifies error handlers by this four-argument signature.
+      _next: NextFunction,
+    ) => {
+      if (
+        error instanceof SyntaxError &&
+        "status" in error &&
+        error.status === 400
+      ) {
+        response.status(400).json({ error: "Invalid JSON body" });
+        return;
+      }
+
+      console.error(
+        "Unhandled API error:",
+        error instanceof Error ? error.stack : "Unknown error",
+      );
+      response.status(500).json({ error: "Internal server error" });
+    },
+  );
+
+  return app;
+}
+
+export const app = createApp();

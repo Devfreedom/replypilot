@@ -20,6 +20,32 @@ You can start editing the page by modifying `app/page.tsx`. The page auto-update
 
 This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
 
+## API
+
+The Express API is a separate development service. It currently exposes only a health endpoint and has no database, authentication, or lead endpoints. Do not expose it publicly.
+
+Run it on port 4000 (the default):
+
+```bash
+npm run dev:api
+curl http://localhost:4000/api/health
+```
+
+Set `PORT` to use a different port:
+
+```bash
+PORT=4100 npm run dev:api
+```
+
+Build and type-check the API independently of the Next.js app:
+
+```bash
+npm run build:api
+npm run start:api
+npm run typecheck:api
+npm run test:api
+```
+
 ## Learn More
 
 To learn more about Next.js, take a look at the following resources:
