@@ -1,5 +1,10 @@
 import { StatusSelect } from "@/components/status-select";
-import type { Lead, LeadStatus } from "@/lib/leads";
+import {
+  formatCreatedAt,
+  isFollowUpDue,
+  type Lead,
+  type LeadStatus,
+} from "@/lib/leads";
 
 function initials(name: string): string {
   return name
@@ -10,7 +15,7 @@ function initials(name: string): string {
 }
 
 function FollowUpIndicator({ lead }: { lead: Lead }) {
-  if (lead.due && lead.status !== "Booked") {
+  if (isFollowUpDue(lead)) {
     return (
       <span className="inline-flex items-center gap-2 whitespace-nowrap text-xs font-medium text-amber-700">
         <span aria-hidden="true" className="h-2 w-2 rounded-full bg-amber-500" />
@@ -43,9 +48,11 @@ function Channel({ lead }: { lead: Lead }) {
 export function LeadTable({
   leads,
   onStatusChange,
+  pendingStatusIds,
 }: {
   leads: Lead[];
-  onStatusChange: (id: number, status: LeadStatus) => void;
+  onStatusChange: (id: string, status: LeadStatus) => void;
+  pendingStatusIds: ReadonlySet<string>;
 }) {
   return (
     <>
@@ -70,7 +77,11 @@ export function LeadTable({
                   </p>
                 </div>
               </div>
-              <StatusSelect lead={lead} onStatusChange={onStatusChange} />
+              <StatusSelect
+                lead={lead}
+                onStatusChange={onStatusChange}
+                disabled={pendingStatusIds.has(lead.id)}
+              />
             </div>
 
             <p className="mt-3 text-sm leading-6 text-slate-600">
@@ -86,7 +97,7 @@ export function LeadTable({
               </div>
               <div className="flex items-center gap-1.5">
                 <dt className="sr-only">Received</dt>
-                <dd>{lead.date}</dd>
+                <dd>{formatCreatedAt(lead.createdAt)}</dd>
               </div>
               <div className="flex items-center">
                 <dt className="sr-only">Follow-up</dt>
@@ -155,7 +166,11 @@ export function LeadTable({
                 </td>
 
                 <td className="px-6 py-5">
-                  <StatusSelect lead={lead} onStatusChange={onStatusChange} />
+                  <StatusSelect
+                    lead={lead}
+                    onStatusChange={onStatusChange}
+                    disabled={pendingStatusIds.has(lead.id)}
+                  />
                 </td>
 
                 <td className="px-6 py-5">
@@ -163,7 +178,7 @@ export function LeadTable({
                 </td>
 
                 <td className="whitespace-nowrap px-6 py-5 text-xs text-slate-500">
-                  {lead.date}
+                  {formatCreatedAt(lead.createdAt)}
                 </td>
               </tr>
             ))}

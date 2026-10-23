@@ -6,6 +6,7 @@ export type NewLeadValues = {
   name: string;
   service: string;
   message: string;
+  nextFollowUpAt: string;
 };
 
 type FieldErrors = Partial<Record<keyof NewLeadValues, string>>;
@@ -46,15 +47,18 @@ export function NewLeadDialog({
 }: {
   open: boolean;
   onClose: () => void;
-  onCreate: (values: NewLeadValues) => void;
+  onCreate: (values: NewLeadValues) => Promise<void>;
 }) {
   const dialogRef = useRef<HTMLDialogElement>(null);
   const [values, setValues] = useState<NewLeadValues>({
     name: "",
     service: "",
     message: "",
+    nextFollowUpAt: "",
   });
   const [errors, setErrors] = useState<FieldErrors>({});
+  const [submitError, setSubmitError] = useState<string | null>(null);
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   useEffect(() => {
     const dialog = dialogRef.current;
@@ -62,8 +66,9 @@ export function NewLeadDialog({
     if (!dialog) return;
 
     if (open && !dialog.open) {
-      setValues({ name: "", service: "", message: "" });
+      setValues({ name: "", service: "", message: "", nextFollowUpAt: "" });
       setErrors({});
+      setSubmitError(null);
       dialog.showModal();
     } else if (!open && dialog.open) {
       dialog.close();
@@ -73,13 +78,16 @@ export function NewLeadDialog({
   function setField(field: keyof NewLeadValues, value: string) {
     setValues((current) => ({ ...current, [field]: value }));
     setErrors((current) => (current[field] ? { ...current, [field]: undefined } : current));
+    setSubmitError(null);
   }
 
-  function handleSubmit(event: FormEvent<HTMLFormElement>) {
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
 
+    if (isSubmitting) return;
+
     const nextErrors: FieldErrors = {};
-    (Object.keys(values) as (keyof NewLeadValues)[]).forEach((field) => {
+    (["name", "service", "message"] as const).forEach((field) => {
       if (!values[field].trim()) {
         nextErrors[field] = "This field is required.";
       }
@@ -90,12 +98,24 @@ export function NewLeadDialog({
       return;
     }
 
-    onCreate({
-      name: values.name.trim(),
-      service: values.service.trim(),
-      message: values.message.trim(),
-    });
-    dialogRef.current?.close();
+    setIsSubmitting(true);
+    setSubmitError(null);
+
+    try {
+      await onCreate({
+        name: values.name.trim(),
+        service: values.service.trim(),
+        message: values.message.trim(),
+        nextFollowUpAt: values.nextFollowUpAt,
+      });
+      dialogRef.current?.close();
+    } catch (error) {
+      setSubmitError(
+        error instanceof Error ? error.message : "Unable to save this lead.",
+      );
+    } finally {
+      setIsSubmitting(false);
+    }
   }
 
   function handleBackdropClick(event: React.MouseEvent<HTMLDialogElement>) {
@@ -172,19 +192,46 @@ export function NewLeadDialog({
           />
         </Field>
 
+        <Field
+          id="lead-follow-up"
+          label="Follow-up date and time (optional)"
+          error={errors.nextFollowUpAt}
+        >
+          <input
+            id="lead-follow-up"
+            name="nextFollowUpAt"
+            type="datetime-local"
+            value={values.nextFollowUpAt}
+            onChange={(event) => setField("nextFollowUpAt", event.target.value)}
+            aria-invalid={Boolean(errors.nextFollowUpAt)}
+            aria-describedby={
+              errors.nextFollowUpAt ? "lead-follow-up-error" : undefined
+            }
+            className={inputClassName}
+          />
+        </Field>
+
+        {submitError ? (
+          <p role="alert" className="rounded-xl bg-red-50 px-3.5 py-3 text-sm text-red-700">
+            {submitError}
+          </p>
+        ) : null}
+
         <div className="flex flex-col-reverse gap-3 pt-2 sm:flex-row sm:justify-end">
           <button
             type="button"
             onClick={() => dialogRef.current?.close()}
+            disabled={isSubmitting}
             className="rounded-xl border border-slate-200 px-4 py-3 text-sm font-semibold text-slate-600 hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
           >
             Cancel
           </button>
           <button
             type="submit"
-            className="rounded-xl bg-blue-600 px-5 py-3 text-sm font-semibold text-white hover:bg-blue-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
+            disabled={isSubmitting}
+            className="rounded-xl bg-blue-600 px-5 py-3 text-sm font-semibold text-white hover:bg-blue-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 disabled:cursor-not-allowed disabled:opacity-60"
           >
-            Save lead
+            {isSubmitting ? "Saving…" : "Save lead"}
           </button>
         </div>
       </form>

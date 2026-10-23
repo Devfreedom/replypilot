@@ -22,7 +22,7 @@ This project uses [`next/font`](https://nextjs.org/docs/app/building-your-applic
 
 ## API and local PostgreSQL
 
-The Express API is a separate development service. It binds to `127.0.0.1` and must not be exposed publicly. It has no authentication, AI, WhatsApp integration, or frontend integration yet.
+The Express API is a separate development service. It binds to `127.0.0.1` and must not be exposed publicly. It has no authentication, AI, or WhatsApp integration. The Next.js app proxies browser requests from `/api/*` to `API_ORIGIN`, which defaults to `http://127.0.0.1:4000`.
 
 ### Start the database
 
@@ -51,6 +51,12 @@ Environment variables are loaded by Node.js `--env-file-if-exists=.env` in the A
 ```bash
 npm run dev:api
 curl http://127.0.0.1:4000/api/health
+```
+
+In a second terminal, start the Next.js app. With the default `API_ORIGIN`, its dashboard can then use the local API through same-origin `/api/*` requests:
+
+```bash
+npm run dev
 ```
 
 Set `PORT` inline to use a different API port:

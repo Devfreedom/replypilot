@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { LeadTable } from "@/components/lead-table";
 import {
   NewLeadDialog,
@@ -10,12 +10,35 @@ import { Sidebar } from "@/components/sidebar";
 import { StatCard } from "@/components/stat-card";
 import {
   LEAD_FILTERS,
-  SAMPLE_LEADS,
+  isFollowUpDue,
+  parseLeadResponse,
+  parseLeadsResponse,
   type Lead,
   type LeadFilter,
   type LeadStatus,
   type View,
 } from "@/lib/leads";
+
+async function readJson(response: Response): Promise<unknown> {
+  try {
+    return await response.json();
+  } catch {
+    return null;
+  }
+}
+
+function errorMessage(data: unknown, fallback: string): string {
+  if (
+    typeof data === "object" &&
+    data !== null &&
+    "error" in data &&
+    typeof data.error === "string"
+  ) {
+    return data.error;
+  }
+
+  return fallback;
+}
 
 const VIEW_TITLES: Record<View, { title: string; description: string }> = {
   overview: {
@@ -41,11 +64,57 @@ const FILTER_LABELS: Record<LeadFilter, string> = {
 };
 
 export default function Home() {
-  const [leads, setLeads] = useState<Lead[]>(SAMPLE_LEADS);
+  const [leads, setLeads] = useState<Lead[]>([]);
   const [view, setView] = useState<View>("overview");
   const [filter, setFilter] = useState<LeadFilter>("All");
   const [search, setSearch] = useState("");
   const [modalOpen, setModalOpen] = useState(false);
+  const [isLoading, setIsLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [loadAttempt, setLoadAttempt] = useState(0);
+  const [pendingStatusIds, setPendingStatusIds] = useState<ReadonlySet<string>>(
+    new Set(),
+  );
+  const [operationError, setOperationError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const controller = new AbortController();
+
+    async function loadLeads() {
+      setIsLoading(true);
+      setLoadError(null);
+
+      try {
+        const response = await fetch("/api/leads", { signal: controller.signal });
+        const data = await readJson(response);
+
+        if (!response.ok) {
+          throw new Error(errorMessage(data, "Unable to load leads."));
+        }
+
+        const nextLeads = parseLeadsResponse(data);
+
+        if (!nextLeads) {
+          throw new Error("The lead service returned an unexpected response.");
+        }
+
+        setLeads(nextLeads);
+      } catch (error) {
+        if (controller.signal.aborted) return;
+
+        setLoadError(
+          error instanceof Error ? error.message : "Unable to load leads.",
+        );
+      } finally {
+        if (!controller.signal.aborted) {
+          setIsLoading(false);
+        }
+      }
+    }
+
+    void loadLeads();
+    return () => controller.abort();
+  }, [loadAttempt]);
 
   const displayedLeads = useMemo(() => {
     const query = search.trim().toLowerCase();
@@ -60,41 +129,96 @@ export default function Home() {
       const matchesFilter = filter === "All" || lead.status === filter;
 
       const matchesView =
-        view !== "follow-ups" || (lead.due && lead.status !== "Booked");
+        view !== "follow-ups" || isFollowUpDue(lead);
 
       return matchesSearch && matchesFilter && matchesView;
     });
   }, [leads, search, filter, view]);
 
   const followUpCount = leads.filter(
-    (lead) => lead.due && lead.status !== "Booked",
+    (lead) => isFollowUpDue(lead),
   ).length;
 
   const quotedCount = leads.filter((lead) => lead.status === "Quoted").length;
 
   const bookedCount = leads.filter((lead) => lead.status === "Booked").length;
 
-  function updateStatus(id: number, status: LeadStatus) {
-    setLeads((current) =>
-      current.map((lead) =>
-        lead.id === id
-          ? { ...lead, status, due: status === "Booked" ? false : lead.due }
-          : lead,
-      ),
-    );
+  async function updateStatus(id: string, status: LeadStatus) {
+    if (pendingStatusIds.has(id)) return;
+
+    setOperationError(null);
+    setPendingStatusIds((current) => new Set(current).add(id));
+
+    try {
+      const response = await fetch(`/api/leads/${id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status }),
+      });
+      const data = await readJson(response);
+
+      if (!response.ok) {
+        throw new Error(errorMessage(data, "Unable to update this lead."));
+      }
+
+      const updatedLead = parseLeadResponse(data);
+
+      if (!updatedLead) {
+        throw new Error("The lead service returned an unexpected response.");
+      }
+
+      setLeads((current) =>
+        current.map((lead) => (lead.id === id ? updatedLead : lead)),
+      );
+    } catch (error) {
+      setOperationError(
+        error instanceof Error ? error.message : "Unable to update this lead.",
+      );
+    } finally {
+      setPendingStatusIds((current) => {
+        const next = new Set(current);
+        next.delete(id);
+        return next;
+      });
+    }
   }
 
-  function createLead(values: NewLeadValues) {
-    const newLead: Lead = {
-      id: Date.now(),
-      name: values.name,
-      service: values.service,
-      channel: "Manual",
-      status: "New",
-      date: "Just now",
-      lastMessage: values.message,
-      due: true,
-    };
+  async function createLead(values: NewLeadValues) {
+    let nextFollowUpAt: string | null = null;
+
+    if (values.nextFollowUpAt) {
+      const followUpDate = new Date(values.nextFollowUpAt);
+
+      if (Number.isNaN(followUpDate.getTime())) {
+        throw new Error("Enter a valid follow-up date and time.");
+      }
+
+      nextFollowUpAt = followUpDate.toISOString();
+    }
+
+    const response = await fetch("/api/leads", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: values.name,
+        service: values.service,
+        lastMessage: values.message,
+        channel: "Manual",
+        status: "New",
+        nextFollowUpAt,
+      }),
+    });
+    const data = await readJson(response);
+
+    if (!response.ok) {
+      throw new Error(errorMessage(data, "Unable to create this lead."));
+    }
+
+    const newLead = parseLeadResponse(data);
+
+    if (!newLead) {
+      throw new Error("The lead service returned an unexpected response.");
+    }
 
     setLeads((current) => [newLead, ...current]);
     setView("leads");
@@ -158,7 +282,7 @@ export default function Home() {
                   aria-hidden="true"
                   className="h-1.5 w-1.5 rounded-full bg-amber-400"
                 />
-                Prototype · Sample data
+                Development · Local API
               </span>
               <button
                 onClick={() => setModalOpen(true)}
@@ -313,7 +437,41 @@ export default function Home() {
               </div>
             </div>
 
-            {displayedLeads.length === 0 ? (
+            {operationError ? (
+              <p role="alert" className="mx-6 mt-5 rounded-xl bg-red-50 px-4 py-3 text-sm text-red-700">
+                {operationError}
+              </p>
+            ) : null}
+
+            {isLoading ? (
+              <div role="status" className="px-6 py-16 text-center text-sm text-slate-500">
+                Loading leads…
+              </div>
+            ) : loadError ? (
+              <div role="alert" className="px-6 py-16 text-center">
+                <h3 className="font-semibold text-slate-900">Unable to load leads</h3>
+                <p className="mt-1 text-sm text-slate-500">{loadError}</p>
+                <button
+                  onClick={() => setLoadAttempt((current) => current + 1)}
+                  className="mt-4 rounded-lg text-sm font-semibold text-blue-700 hover:text-blue-800 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
+                >
+                  Try again
+                </button>
+              </div>
+            ) : leads.length === 0 ? (
+              <div className="px-6 py-16 text-center">
+                <h3 className="font-semibold text-slate-900">No leads yet</h3>
+                <p className="mt-1 text-sm text-slate-500">
+                  Add your first customer enquiry to begin tracking it here.
+                </p>
+                <button
+                  onClick={() => setModalOpen(true)}
+                  className="mt-4 rounded-lg text-sm font-semibold text-blue-700 hover:text-blue-800 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
+                >
+                  Add a lead
+                </button>
+              </div>
+            ) : displayedLeads.length === 0 ? (
               <div className="px-6 py-16 text-center">
                 <div aria-hidden="true" className="text-3xl text-slate-300">
                   ⌕
@@ -333,13 +491,17 @@ export default function Home() {
               </div>
             ) : (
               <>
-                <LeadTable leads={displayedLeads} onStatusChange={updateStatus} />
+                <LeadTable
+                  leads={displayedLeads}
+                  onStatusChange={updateStatus}
+                  pendingStatusIds={pendingStatusIds}
+                />
 
                 <div className="flex flex-col justify-between gap-2 border-t border-slate-100 px-6 py-4 text-xs text-slate-400 sm:flex-row sm:items-center">
                   <span>
                     Showing {displayedLeads.length} of {leads.length} leads
                   </span>
-                  <span>Status changes apply to this demo session only.</span>
+                  <span>Status changes are saved to the local development API.</span>
                 </div>
               </>
             )}
