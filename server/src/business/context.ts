@@ -3,19 +3,127 @@ import type { Lead } from "../leads/types.js";
 import { getBusinessProfile, listCatalogue, listKnowledge } from "./repository.js";
 import type { CatalogueEntry, KnowledgeEntry, ReplyContext } from "./types.js";
 
-function terms(value: string): Set<string> { return new Set(value.toLowerCase().match(/[a-z0-9]{3,}/g) ?? []); }
-function relevant<T>(items: T[], text: string, searchable: (item: T) => string): T[] {
-  const enquiryTerms = terms(text);
-  return items.filter((item) => [...terms(searchable(item))].some((term) => enquiryTerms.has(term)));
+/**
+ * Common words are ignored so that an unrelated entry does not become
+ * "relevant" merely by sharing words such as "the" or "you".
+ */
+const STOP_WORDS = new Set([
+  "the",
+  "and",
+  "for",
+  "you",
+  "your",
+  "are",
+  "can",
+  "with",
+  "this",
+  "that",
+  "have",
+  "from",
+  "our",
+  "about",
+  "what",
+  "when",
+  "where",
+  "does",
+  "how",
+  "much",
+  "need",
+  "want",
+  "please",
+  "thank",
+  "thanks",
+  "hello",
+  "would",
+  "could",
+  "should",
+  "will",
+  "may",
+  "any",
+  "all",
+  "not",
+  "but",
+  "his",
+  "her",
+  "its",
+  "who",
+  "why",
+  "was",
+  "were",
+  "been",
+  "being",
+  "has",
+  "had",
+  "into",
+  "out",
+  "over",
+  "under",
+  "then",
+  "than",
+  "too",
+  "very",
+  "just",
+  "also",
+  "one",
+  "two",
+  "get",
+  "got",
+  "let",
+  "make",
+  "use",
+  "using",
+]);
+
+function terms(value: string): Set<string> {
+  const matches = value.toLowerCase().match(/[a-z0-9]{3,}/g) ?? [];
+  return new Set(matches.filter((term) => !STOP_WORDS.has(term)));
 }
 
-/** Deterministic keyword matching only; it is not semantic retrieval and returns no match when wording differs. */
-export async function buildReplyContext(pool: Pool, lead: Lead): Promise<ReplyContext> {
-  const [profile, catalogue, knowledge] = await Promise.all([getBusinessProfile(pool), listCatalogue(pool, true), listKnowledge(pool, true)]);
+function relevant<T>(
+  items: T[],
+  text: string,
+  searchable: (item: T) => string,
+): T[] {
+  const enquiryTerms = terms(text);
+
+  if (enquiryTerms.size === 0) {
+    return [];
+  }
+
+  return items.filter((item) => {
+    const itemTerms = terms(searchable(item));
+    return [...itemTerms].some((term) => enquiryTerms.has(term));
+  });
+}
+
+/**
+ * Deterministic keyword matching only. It is not semantic retrieval and
+ * returns no match when the wording differs. Only active, approved entries
+ * are loaded, so deactivated facts can never reach reply context.
+ */
+export async function buildReplyContext(
+  pool: Pool,
+  lead: Lead,
+): Promise<ReplyContext> {
+  const [profile, catalogue, knowledge] = await Promise.all([
+    getBusinessProfile(pool),
+    listCatalogue(pool, true),
+    listKnowledge(pool, true),
+  ]);
+
   const enquiry = `${lead.service} ${lead.lastMessage}`;
+
   return {
     profile,
-    catalogue: relevant<CatalogueEntry>(catalogue, enquiry, (entry) => `${entry.name} ${entry.description}`),
-    knowledge: relevant<KnowledgeEntry>(knowledge, enquiry, (entry) => `${entry.title} ${entry.answer}`),
+    catalogue: relevant<CatalogueEntry>(
+      catalogue,
+      enquiry,
+      (entry) => `${entry.name} ${entry.description}`,
+    ),
+    knowledge: relevant<KnowledgeEntry>(
+      knowledge,
+      enquiry,
+      (entry) => `${entry.title} ${entry.answer}`,
+    ),
   };
 }
