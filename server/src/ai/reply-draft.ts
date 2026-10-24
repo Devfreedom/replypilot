@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { Lead } from "../leads/types.js";
+import type { ReplyContext } from "../business/types.js";
 
 export const REPLY_DRAFT_INTENTS = [
   "availability",
@@ -21,7 +22,8 @@ export const replyDraftSchema = z.object({
 export type ReplyDraft = z.infer<typeof replyDraftSchema>;
 
 export interface ReplyDraftProvider {
-  draftReply(lead: Lead): Promise<unknown>;
+  /** Context contains active, keyword-matched approved business facts for a future grounded provider. */
+  draftReply(lead: Lead, context?: ReplyContext): Promise<unknown>;
 }
 
 function getIntent(message: string): ReplyDraft["intent"] {

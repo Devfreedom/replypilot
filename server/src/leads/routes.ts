@@ -6,6 +6,7 @@ import {
   replyDraftSchema,
   type ReplyDraftProvider,
 } from "../ai/reply-draft.js";
+import { buildReplyContext } from "../business/context.js";
 import {
   createLead,
   getLeadById,
@@ -103,7 +104,10 @@ export function createLeadsRouter({
     let providerResult: unknown;
 
     try {
-      providerResult = await replyDraftProvider.draftReply(lead);
+      providerResult = await replyDraftProvider.draftReply(
+        lead,
+        await buildReplyContext(pool, lead),
+      );
     } catch {
       response.status(500).json({ error: "Internal server error" });
       return;

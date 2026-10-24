@@ -6,6 +6,7 @@ import express, {
 } from "express";
 import type { Pool } from "pg";
 import type { ReplyDraftProvider } from "./ai/reply-draft.js";
+import { createBusinessRouter } from "./business/routes.js";
 import { createLeadsRouter } from "./leads/routes.js";
 
 const JSON_BODY_LIMIT = "10kb";
@@ -32,6 +33,7 @@ export function createApp({
   });
 
   app.use("/api/leads", createLeadsRouter({ pool, replyDraftProvider }));
+  app.use("/api/business", createBusinessRouter({ pool }));
 
   app.use((_request: Request, response: Response) => {
     response.status(404).json({ error: "Not found" });
