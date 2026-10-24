@@ -156,6 +156,10 @@ function knowledgeFact(entry: KnowledgeEntry): string {
   const label = entry.entryType === "faq" ? "FAQ" : "policy";
   const answer = entry.answer.replace(/\s+/g, " ").trim();
 
+  if (answer.length > 700) {
+    return `Approved ${label} — ${entry.title}: the full approved text needs confirmation before it is quoted.`;
+  }
+
   return `Approved ${label} — ${entry.title}: ${answer}`;
 }
 
@@ -210,7 +214,10 @@ function missingInformationFor(
   const catalogue = context?.catalogue ?? [];
   const knowledge = context?.knowledge ?? [];
 
-  if (intent === "pricing" && !catalogue.some((entry) => entry.priceMinor !== null)) {
+  if (
+    intent === "pricing" &&
+    !catalogue.some((entry) => entry.priceMinor !== null)
+  ) {
     missing.push("An approved price for the requested service");
   }
 

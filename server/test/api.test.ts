@@ -1313,6 +1313,19 @@ test("reply context selects only active relevant business facts", async () => {
   assert.ok(
     !context.knowledge.some((entry) => entry.id === fixture.unrelatedFaq.id),
   );
+
+  await jsonRequest(
+    `/api/business/catalogue/${fixture.activeCatalogue.id}`,
+    "DELETE",
+  );
+  await jsonRequest(
+    `/api/business/knowledge/${fixture.activeFaq.id}`,
+    "DELETE",
+  );
+
+  const afterDeactivation = await buildReplyContext(pool, makeLead());
+  assert.deepEqual(afterDeactivation.catalogue, []);
+  assert.deepEqual(afterDeactivation.knowledge, []);
 });
 
 test("unrelated enquiries receive no unrelated business facts", async () => {
@@ -1407,6 +1420,16 @@ test("mock provider does not invent policies or availability", async () => {
   assert.ok(
     availabilityDraft.missingInformation.includes("Preferred date and time"),
   );
+
+  const bookingDraft = await provider.draftReply(
+    makeLead({ lastMessage: "Can I book 12 December?" }),
+    makeContext(),
+  );
+
+  assert.doesNotMatch(
+    bookingDraft.draftReply,
+    /confirmed|reserved|deposit|booking terms/i,
+  );
 });
 
 test("mock provider includes an approved policy when one is supplied", async () => {
@@ -1430,6 +1453,25 @@ test("mock provider includes an approved policy when one is supplied", async () 
   assert.ok(
     !draft.missingInformation.some((item) => /refund policy/i.test(item)),
   );
+});
+
+test("mock provider does not truncate an overlong approved answer", async () => {
+  const provider = new MockReplyDraftProvider();
+  const draft = await provider.draftReply(
+    makeLead({ lastMessage: "What is your refund policy?" }),
+    makeContext({
+      knowledge: [
+        makeKnowledgeEntry({
+          title: "Refund policy",
+          answer: `Refund details: ${"a".repeat(800)}`,
+          entryType: "policy",
+        }),
+      ],
+    }),
+  );
+
+  assert.match(draft.draftReply, /full approved text needs confirmation/i);
+  assert.doesNotMatch(draft.draftReply, /a{700}/);
 });
 
 test("draft-reply uses active approved context and does not persist drafts", async () => {
@@ -1484,4 +1526,3 @@ test("re-running migrations preserves existing lead data", async () => {
   const list = await readJson<LeadsPayload>(await fetch(`${baseUrl}/api/leads`));
   assert.ok(list.leads.some((lead) => lead.id === created.lead.id));
 });
-

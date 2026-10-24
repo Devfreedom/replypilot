@@ -1,5 +1,6 @@
 -- Keep catalogue prices within JavaScript's safe integer range because the
--- API transports priceMinor as a JSON number.
+-- API transports priceMinor as a JSON number. If an older build stored a
+-- larger value, this constraint fails rather than deleting or rounding it.
 ALTER TABLE catalogue_entries
   ADD CONSTRAINT catalogue_entries_price_minor_safe
   CHECK (
