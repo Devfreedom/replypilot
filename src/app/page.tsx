@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import { LeadTable } from "@/components/lead-table";
 import { DraftReplyDialog } from "@/components/draft-reply-dialog";
 import {
@@ -316,6 +317,12 @@ export default function Home() {
                 {VIEW_TITLES[navView].title}
               </button>
             ))}
+            <Link
+              href="/settings"
+              className="whitespace-nowrap rounded-lg bg-white px-3 py-2 text-sm font-medium text-slate-600 ring-1 ring-slate-200 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
+            >
+              Settings
+            </Link>
           </nav>
 
           <div className="mb-8">
