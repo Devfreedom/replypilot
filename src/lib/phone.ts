@@ -109,9 +109,10 @@ export function restorePhoneState(
   savedCountry: string | null,
 ): RestoredPhoneState {
   const rawPhone = savedPhone?.trim() ?? "";
-  const validSavedCountry = isCuratedPhoneCountryCode(savedCountry ?? "")
-    ? savedCountry
-    : "";
+  const validSavedCountry: CuratedPhoneCountryCode | "" =
+    savedCountry && isCuratedPhoneCountryCode(savedCountry)
+      ? savedCountry
+      : "";
 
   if (!rawPhone) {
     return {
