@@ -20,6 +20,11 @@ import { createPool } from "../src/db/pool.js";
 import { runMigrations } from "../src/db/migrate.js";
 import { seedLeads } from "../src/db/seed.js";
 import {
+  openingHoursFromSchedule,
+  scheduleFromOpeningHours,
+  setDayOpen,
+} from "../../src/lib/opening-hours.js";
+import {
   getTestDatabaseUrl,
   prepareTestDatabase,
   resetTestData,

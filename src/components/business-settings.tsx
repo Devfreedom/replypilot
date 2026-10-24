@@ -22,7 +22,6 @@ import {
   type OpeningHoursEntry,
   type ScheduleErrors,
   type WeeklySchedule,
-  WEEKDAYS,
   WEEKDAY_LABELS,
   createEmptyWeeklySchedule,
   hasScheduleErrors,
