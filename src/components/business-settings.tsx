@@ -5,6 +5,7 @@ import {
   type FormEvent,
   type ReactNode,
   useEffect,
+  useMemo,
   useState,
 } from "react";
 import {
@@ -19,6 +20,11 @@ import {
   parseProfileResponse,
 } from "@/lib/business";
 import {
+  CURRENCY_OPTIONS,
+  defaultCatalogueCurrency,
+  isSupportedCurrencyCode,
+} from "@/lib/currencies";
+import {
   type OpeningHoursEntry,
   type ScheduleErrors,
   type WeeklySchedule,
@@ -29,7 +35,17 @@ import {
   scheduleFromOpeningHours,
   validateWeeklySchedule,
 } from "@/lib/opening-hours";
+import {
+  restorePhoneState,
+  validatePhoneInput,
+} from "@/lib/phone";
+import {
+  buildTimezoneOptions,
+  isValidTimezone,
+} from "@/lib/timezones";
 import { OpeningHoursEditor } from "./opening-hours-editor";
+import { PhoneNumberField } from "./phone-number-field";
+import { SearchableCombobox } from "./searchable-combobox";
 
 const inputClass =
   "mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-800 outline-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600";
@@ -115,6 +131,13 @@ export function BusinessSettings() {
   >(null);
   const [scheduleValidationAttempted, setScheduleValidationAttempted] =
     useState(false);
+  const [phoneCountry, setPhoneCountry] = useState("");
+  const [phoneNational, setPhoneNational] = useState("");
+  const [phoneWarning, setPhoneWarning] = useState<string | null>(null);
+  const [timezone, setTimezone] = useState("");
+  const [businessCurrency, setBusinessCurrency] = useState("");
+  const [profileValidationAttempted, setProfileValidationAttempted] =
+    useState(false);
 
   useEffect(() => {
     let active = true;
@@ -162,6 +185,10 @@ export function BusinessSettings() {
         const loadedSchedule = scheduleFromOpeningHours(
           nextProfile?.openingHours ?? [],
         );
+        const restoredPhone = restorePhoneState(
+          nextProfile?.contactPhone ?? null,
+          nextProfile?.contactPhoneCountry ?? null,
+        );
 
         setProfile(nextProfile);
         setCatalogue(nextCatalogue);
@@ -176,6 +203,12 @@ export function BusinessSettings() {
         );
         setScheduleErrors({});
         setScheduleValidationAttempted(false);
+        setPhoneCountry(restoredPhone.countryCode);
+        setPhoneNational(restoredPhone.nationalNumber);
+        setPhoneWarning(restoredPhone.warning);
+        setTimezone(nextProfile?.timezone ?? "");
+        setBusinessCurrency(nextProfile?.currencyCode ?? "");
+        setProfileValidationAttempted(false);
       } catch (cause) {
         if (!active) return;
 
@@ -231,6 +264,12 @@ export function BusinessSettings() {
     setScheduleIssues([]);
     setLegacyOpeningHours(null);
     setScheduleValidationAttempted(false);
+    setPhoneCountry("");
+    setPhoneNational("");
+    setPhoneWarning(null);
+    setTimezone("");
+    setBusinessCurrency("");
+    setProfileValidationAttempted(false);
   }
 
   async function saveProfile(event: FormEvent<HTMLFormElement>) {
