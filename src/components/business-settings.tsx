@@ -139,6 +139,30 @@ export function BusinessSettings() {
   const [profileValidationAttempted, setProfileValidationAttempted] =
     useState(false);
 
+  const timezoneOptions = useMemo(
+    () => buildTimezoneOptions(timezone),
+    [timezone],
+  );
+  const phoneValidation = validatePhoneInput(phoneCountry, phoneNational);
+  const timezoneValidationError = timezone
+    ? isValidTimezone(timezone)
+      ? undefined
+      : "Choose a valid IANA timezone."
+    : "Choose the timezone that matches the business.";
+  const currencyValidationError =
+    businessCurrency && !isSupportedCurrencyCode(businessCurrency)
+      ? "Choose a valid ISO 4217 currency."
+      : undefined;
+  const profileErrors = profileValidationAttempted
+    ? {
+        phoneCountry: phoneValidation.errors.country,
+        phoneNumber: phoneValidation.errors.number,
+        timezone: timezoneValidationError,
+        currency: currencyValidationError,
+      }
+    : {};
+  const hasProfileErrors = Object.values(profileErrors).some(Boolean);
+
   useEffect(() => {
     let active = true;
 
