@@ -218,9 +218,19 @@ export function BusinessSettings() {
     setScheduleIssues([]);
     setScheduleErrors({});
     setScheduleValidationAttempted(false);
+    setError(null);
     setNotice(
       "You can now edit the weekly schedule. Save the profile to replace the unsupported saved hours.",
     );
+  }
+
+  function cancelProfileSetup() {
+    setShowProfileForm(false);
+    setSchedule(createEmptyWeeklySchedule());
+    setScheduleErrors({});
+    setScheduleIssues([]);
+    setLegacyOpeningHours(null);
+    setScheduleValidationAttempted(false);
   }
 
   async function saveProfile(event: FormEvent<HTMLFormElement>) {
@@ -735,7 +745,7 @@ export function BusinessSettings() {
                       {!profile ? (
                         <button
                           type="button"
-                          onClick={() => setShowProfileForm(false)}
+                          onClick={cancelProfileSetup}
                           className={secondaryButtonClass}
                         >
                           Cancel
