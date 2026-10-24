@@ -8,9 +8,11 @@ import { KNOWLEDGE_ENTRY_TYPES } from "./types.js";
 export const MAX_SAFE_PRICE_MINOR = Number.MAX_SAFE_INTEGER;
 
 /**
- * Current ISO 4217 currency codes known to the runtime's ICU data. This is a
- * maintained, dependency-free list of active currencies; it intentionally
- * excludes historical, fund, and non-currency codes such as XXX. Matching is
+ * ISO 4217 currency codes supported by the runtime's ICU data. This is a
+ * maintained, dependency-free list derived from Node.js rather than a
+ * hand-written regex. It excludes non-currency codes such as XXX and XTS, but
+ * the exact set follows the installed ICU version, which may include a
+ * recently replaced currency while that data is being updated. Matching is
  * case-sensitive, so only uppercase three-letter codes are accepted.
  */
 const SUPPORTED_CURRENCY_CODES = new Set(
