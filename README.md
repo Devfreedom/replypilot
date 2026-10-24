@@ -98,10 +98,28 @@ The test suite runs migrations against `TEST_DATABASE_URL` and truncates only it
 | `GET` | `/api/leads` | `200 {"leads":[...]}` ordered newest first. |
 | `POST` | `/api/leads` | Accepts `name`, `service`, and `lastMessage`; optional `channel`, `status`, and `nextFollowUpAt`. Returns `201 {"lead":{...}}`. Defaults: `Manual`, `New`. |
 | `PATCH` | `/api/leads/:id` | Accepts `{ "status": "New" \| "Contacted" \| "Quoted" \| "Booked" }`. Returns the updated lead, `400` for malformed input, or `404` for an unknown valid UUID. |
+| `POST` | `/api/leads/:id/draft-reply` | Returns a non-persistent mock demonstration analysis and suggested reply for an existing lead. Returns `400` for a malformed ID or `404` for an unknown valid UUID. |
 
 Each lead response field is: `id`, `name`, `service`, `channel`, `status`, `lastMessage`, `nextFollowUpAt`, `createdAt`, and `updatedAt`. `nextFollowUpAt` is an ISO 8601 timestamp with an explicit offset or `null`.
 
 Database errors are not returned to clients. Validation responses contain field-level messages without echoing submitted values.
+
+### Reply draft demonstration
+
+`POST /api/leads/:id/draft-reply` uses a local deterministic mock provider only. It does not call an AI service, require credentials, or store the draft. Its response is:
+
+```json
+{
+  "intent": "availability",
+  "summary": "...",
+  "missingInformation": ["Preferred date and time", "Event location"],
+  "draftReply": "...",
+  "provider": "mock",
+  "isDemo": true
+}
+```
+
+Allowed `intent` values are `availability`, `pricing`, `service-details`, `booking`, and `general-enquiry`. The dashboard labels all drafts as mock demonstration output; copying is manual and never sends a customer message.
 
 ## Learn More
 

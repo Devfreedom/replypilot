@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { LeadTable } from "@/components/lead-table";
+import { DraftReplyDialog } from "@/components/draft-reply-dialog";
 import {
   NewLeadDialog,
   type NewLeadValues,
@@ -76,6 +77,7 @@ export default function Home() {
     new Set(),
   );
   const [operationError, setOperationError] = useState<string | null>(null);
+  const [draftLead, setDraftLead] = useState<Lead | null>(null);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -494,6 +496,7 @@ export default function Home() {
                 <LeadTable
                   leads={displayedLeads}
                   onStatusChange={updateStatus}
+                  onDraftReply={setDraftLead}
                   pendingStatusIds={pendingStatusIds}
                 />
 
@@ -518,6 +521,7 @@ export default function Home() {
         onClose={() => setModalOpen(false)}
         onCreate={createLead}
       />
+      <DraftReplyDialog lead={draftLead} onClose={() => setDraftLead(null)} />
     </div>
   );
 }

@@ -48,10 +48,12 @@ function Channel({ lead }: { lead: Lead }) {
 export function LeadTable({
   leads,
   onStatusChange,
+  onDraftReply,
   pendingStatusIds,
 }: {
   leads: Lead[];
   onStatusChange: (id: string, status: LeadStatus) => void;
+  onDraftReply: (lead: Lead) => void;
   pendingStatusIds: ReadonlySet<string>;
 }) {
   return (
@@ -87,6 +89,14 @@ export function LeadTable({
             <p className="mt-3 text-sm leading-6 text-slate-600">
               {lead.lastMessage}
             </p>
+
+            <button
+              type="button"
+              onClick={() => onDraftReply(lead)}
+              className="mt-3 rounded-lg text-sm font-semibold text-blue-700 hover:text-blue-800 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
+            >
+              Draft reply
+            </button>
 
             <dl className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-500">
               <div className="flex items-center gap-1.5">
@@ -131,6 +141,9 @@ export function LeadTable({
               </th>
               <th scope="col" className="px-6 py-4">
                 Received
+              </th>
+              <th scope="col" className="px-6 py-4">
+                Action
               </th>
             </tr>
           </thead>
@@ -179,6 +192,16 @@ export function LeadTable({
 
                 <td className="whitespace-nowrap px-6 py-5 text-xs text-slate-500">
                   {formatCreatedAt(lead.createdAt)}
+                </td>
+
+                <td className="px-6 py-5">
+                  <button
+                    type="button"
+                    onClick={() => onDraftReply(lead)}
+                    className="whitespace-nowrap rounded-lg text-sm font-semibold text-blue-700 hover:text-blue-800 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
+                  >
+                    Draft reply
+                  </button>
                 </td>
               </tr>
             ))}

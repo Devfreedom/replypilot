@@ -29,6 +29,23 @@ export async function listLeads(pool: Pool): Promise<Lead[]> {
   return result.rows.map(mapLeadRow);
 }
 
+export async function getLeadById(
+  pool: Pool,
+  id: string,
+): Promise<Lead | null> {
+  const result = await pool.query<LeadRow>(
+    `
+      SELECT ${LEAD_COLUMNS}
+      FROM leads
+      WHERE id = $1
+    `,
+    [id],
+  );
+
+  const row = result.rows[0];
+  return row ? mapLeadRow(row) : null;
+}
+
 export async function createLead(
   pool: Pool,
   input: CreateLeadInput,
