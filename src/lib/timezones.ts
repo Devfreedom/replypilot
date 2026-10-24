@@ -34,6 +34,13 @@ const FALLBACK_TIMEZONE_IDS = [
   "Pacific/Auckland",
 ];
 
+/**
+ * Some ICU versions return an older canonical spelling. Include the modern
+ * identifiers people recognize and keep both values selectable when both are
+ * valid.
+ */
+const ADDITIONAL_TIMEZONE_IDS = ["Asia/Kolkata"];
+
 export function isValidTimezone(value: string): boolean {
   if (!value.trim()) {
     return false;
@@ -60,7 +67,11 @@ function getSupportedTimezoneIds(): string[] {
 }
 
 const BASE_TIMEZONE_IDS = Array.from(
-  new Set([...getSupportedTimezoneIds(), "UTC"]),
+  new Set([
+    ...getSupportedTimezoneIds(),
+    ...ADDITIONAL_TIMEZONE_IDS,
+    "UTC",
+  ]),
 ).sort((left, right) => left.localeCompare(right));
 
 function timezoneGroup(identifier: string): string {

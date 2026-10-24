@@ -123,7 +123,7 @@ The `/settings` page in the dashboard manages one development business profile, 
 
 #### Business profile
 
-The profile stores `businessName`, `businessDescription`, optional `contactEmail`, `contactPhone`, and `businessAddress`, an IANA `timezone` (default `Africa/Lagos`), and `openingHours`. Create it with:
+The profile stores `businessName`, `businessDescription`, optional `contactEmail`, `contactPhone`, and `contactPhoneCountry`, an optional `businessAddress`, an IANA `timezone` (default `Africa/Lagos`), `openingHours`, and an optional profile-level `currencyCode`. Create it with:
 
 ```http
 POST /api/business/profile
@@ -135,12 +135,14 @@ Content-Type: application/json
   "businessName": "Lagos Light Studio",
   "businessDescription": "Wedding and portrait photography.",
   "contactEmail": "hello@example.com",
-  "contactPhone": "+234 800 000 0000",
+  "contactPhone": "+2348031234567",
+  "contactPhoneCountry": "NG",
   "businessAddress": "12 Example Road, Lagos",
   "timezone": "Africa/Lagos",
   "openingHours": [
     { "day": "monday", "opensAt": "09:00", "closesAt": "17:00" }
-  ]
+  ],
+  "currencyCode": "NGN"
 }
 ```
 
@@ -153,12 +155,14 @@ A successful response wraps the stored record:
     "businessName": "Lagos Light Studio",
     "businessDescription": "Wedding and portrait photography.",
     "contactEmail": "hello@example.com",
-    "contactPhone": "+234 800 000 0000",
+    "contactPhone": "+2348031234567",
+    "contactPhoneCountry": "NG",
     "businessAddress": "12 Example Road, Lagos",
     "timezone": "Africa/Lagos",
     "openingHours": [
       { "day": "monday", "opensAt": "09:00", "closesAt": "17:00" }
     ],
+    "currencyCode": "NGN",
     "createdAt": "2026-01-01T08:00:00.000Z",
     "updatedAt": "2026-01-01T08:00:00.000Z"
   }
@@ -169,7 +173,13 @@ A successful response wraps the stored record:
 
 The `/settings` page edits this same array through a Monday–Sunday visual schedule with Open/Closed toggles and native time inputs. Closed days are omitted from the saved payload; their times remain in the form only while the current edit session is open. A new profile starts with every day closed and no assumed hours. The optional **Copy Monday to weekdays** action updates Tuesday through Friday locally and does not save by itself. Duplicate saved days are shown explicitly and preserved until you choose to replace them; malformed or overnight saved times are flagged for correction rather than silently replaced.
 
-Timezones must be valid IANA identifiers. Invalid timezones, duplicate weekdays, malformed times, and closing times before opening times are rejected with `400`.
+The contact-phone control offers exactly 50 curated countries. Calling codes come from `libphonenumber-js` metadata, and the user enters only the national number; the dashboard parses and normalizes it before saving the E.164 value in `contactPhone`. The selected ISO alpha-2 code is stored separately in `contactPhoneCountry` so shared calling codes such as `+1` can be restored reliably. A blank phone remains valid. Existing international numbers are parsed when reliable; unreadable or mismatched saved values stay visible with a warning and must be confirmed or replaced before the profile can be saved. The API validates and normalizes phone numbers too, rejects invalid values, and rejects a phone-country code that does not match the number.
+
+The timezone field is a searchable, grouped combobox populated from `Intl.supportedValuesOf("timeZone")` plus `UTC`, with a small fallback list and any valid saved alias. Search matches region and city text. The dashboard does not infer a timezone from the device, locale, phone country, or estimated location; a new profile requires an explicit selection. The API still accepts the existing `Africa/Lagos` default when `timezone` is omitted for backward compatibility.
+
+The profile-level `currencyCode` is nullable. Migration `004` adds it without a default or backfill, so existing profiles show an honest **Not configured** state. The dashboard builds one selectable option per supported ISO 4217 code from the runtime currency list, with readable names and country search using `country-to-currency`; it does not guess a currency from locale, phone country, or location. Changing the business currency never rewrites existing catalogue prices or currencies. New catalogue entries start with the profile currency as their default; when the profile has no currency configured, the catalogue's existing `NGN` API fallback remains.
+
+Timezones must be valid IANA identifiers. Invalid timezones, invalid phone numbers, invalid phone countries, invalid currency codes, duplicate weekdays, malformed times, and closing times before opening times are rejected with `400`.
 
 #### Products and services
 
@@ -210,7 +220,7 @@ Price rules:
 - `priceMinor` is an optional integer in minor currency units, stored as PostgreSQL `BIGINT`. It is never a floating-point value and no floating-point money arithmetic is used.
 - Because the API transports prices as JSON numbers, values must be safe integers. The accepted range is `0` through `9007199254740991` (`Number.MAX_SAFE_INTEGER`); larger, negative, fractional, or non-numeric values are rejected with `400`. The database also enforces the safe limit. If a database created by an earlier build already contains a larger price, migration `003` refuses to apply rather than deleting or rounding it; correct that row manually first.
 - Omit `priceMinor` or send `null` when the price is not fixed. The API returns `null` and the dashboard displays “Price on request”; no price is invented.
-- `currencyCode` defaults to `NGN`. It must be an **uppercase ISO 4217 currency code** present in the runtime's ICU currency list (for example `NGN`, `USD`, `GBP`, `KES`, `JPY`). The list is maintained with Node.js ICU data rather than a hand-written regex; it excludes non-currency codes such as `ZZZ`, `XXX`, and `XTS`, though it may still include a recently replaced currency until the ICU data is updated. Lowercase and malformed values are rejected. The same validation applies to create and update.
+- `currencyCode` defaults to `NGN` in the API. The dashboard pre-fills new catalogue entries with the profile-level business currency when one is configured, otherwise with `NGN`; existing entries keep their saved currency. It must be an **uppercase ISO 4217 currency code** present in the runtime's ICU currency list (for example `NGN`, `USD`, `GBP`, `KES`, `JPY`). The list is maintained with Node.js ICU data rather than a hand-written regex; it excludes non-currency codes such as `ZZZ`, `XXX`, and `XTS`, though it may still include a recently replaced currency until the ICU data is updated. Lowercase and malformed values are rejected. The same validation applies to create and update.
 
 #### FAQs and policies
 

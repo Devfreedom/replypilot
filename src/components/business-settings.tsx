@@ -353,7 +353,9 @@ export function BusinessSettings() {
       setBusy(false);
       requestAnimationFrame(() => {
         formElement
-          .querySelector<HTMLElement>('[aria-invalid="true"]')
+          .querySelector<HTMLElement>(
+            '[data-invalid="true"], [aria-invalid="true"]',
+          )
           ?.focus();
       });
       return;

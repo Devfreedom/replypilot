@@ -214,8 +214,6 @@ export function SearchableCombobox({
     }
   }
 
-  let previousGroup: string | undefined;
-
   return (
     <div ref={containerRef} className={`relative min-w-0 ${className}`}>
       <div className="flex items-start justify-between gap-2">
@@ -250,7 +248,7 @@ export function SearchableCombobox({
         aria-expanded={isOpen}
         aria-controls={isOpen ? listboxId : undefined}
         aria-describedby={describedBy || undefined}
-        aria-invalid={error ? true : undefined}
+        data-invalid={error ? true : undefined}
         onClick={() => {
           if (isOpen) {
             closeMenu(true);
@@ -317,9 +315,9 @@ export function SearchableCombobox({
             >
               {filteredOptions.map((option, index) => {
                 const showGroup = Boolean(
-                  option.group && option.group !== previousGroup,
+                  option.group &&
+                    option.group !== filteredOptions[index - 1]?.group,
                 );
-                previousGroup = option.group;
 
                 return (
                   <Fragment key={option.value}>

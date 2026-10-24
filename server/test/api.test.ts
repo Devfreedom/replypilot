@@ -875,6 +875,130 @@ test("business profile handles absence, creation, retrieval, and update", async 
   );
 });
 
+test("phone input is normalized and unconfigured profile fields stay null", async () => {
+  const formatted = await createProfile({
+    contactPhone: "+234 803 123 4567",
+    contactPhoneCountry: "NG",
+    currencyCode: undefined,
+  });
+
+  assert.equal(formatted.contactPhone, "+2348031234567");
+  assert.equal(formatted.contactPhoneCountry, "NG");
+  assert.equal(formatted.currencyCode, null);
+
+  const blankResponse = await jsonRequest(
+    "/api/business/profile",
+    "PATCH",
+    {
+      ...validProfileBody,
+      contactPhone: null,
+      contactPhoneCountry: null,
+      currencyCode: null,
+    },
+  );
+  assert.equal(blankResponse.status, 200);
+  const blank = await readJson<ProfilePayload>(blankResponse);
+
+  assert.equal(blank.profile?.contactPhone, null);
+  assert.equal(blank.profile?.contactPhoneCountry, null);
+  assert.equal(blank.profile?.currencyCode, null);
+});
+
+test("business profile rejects invalid phone, country, and currency values", async () => {
+  const cases = [
+    {
+      body: {
+        ...validProfileBody,
+        contactPhone: "not-a-phone",
+        contactPhoneCountry: "NG",
+      },
+      field: "body.contactPhone",
+    },
+    {
+      body: {
+        ...validProfileBody,
+        contactPhone: "+2348031234567",
+        contactPhoneCountry: "XX",
+      },
+      field: "body.contactPhoneCountry",
+    },
+    {
+      body: {
+        ...validProfileBody,
+        contactPhone: "+2348031234567",
+        contactPhoneCountry: "US",
+      },
+      field: "body.contactPhoneCountry",
+    },
+    {
+      body: {
+        ...validProfileBody,
+        contactPhone: "+2348031234567",
+        contactPhoneCountry: "ng",
+      },
+      field: "body.contactPhoneCountry",
+    },
+    {
+      body: {
+        ...validProfileBody,
+        currencyCode: "ZZZ",
+      },
+      field: "body.currencyCode",
+    },
+  ];
+
+  for (const testCase of cases) {
+    const response = await jsonRequest(
+      "/api/business/profile",
+      "POST",
+      testCase.body,
+    );
+    const payload = await readJson<ErrorPayload>(response);
+
+    assert.equal(response.status, 400);
+    assert.ok(
+      payload.details?.some(
+        (detail) =>
+          typeof detail === "object" &&
+          detail !== null &&
+          "field" in detail &&
+          detail.field === testCase.field,
+      ),
+      `expected a ${testCase.field} validation error`,
+    );
+  }
+});
+
+test("changing the profile currency does not rewrite catalogue entries", async () => {
+  const profile = await createProfile();
+  const catalogue = await createCatalogue({
+    name: "Currency-safe service",
+    priceMinor: 150_000,
+    currencyCode: "NGN",
+  });
+  const updateResponse = await jsonRequest(
+    "/api/business/profile",
+    "PATCH",
+    {
+      ...validProfileBody,
+      currencyCode: "USD",
+    },
+  );
+
+  assert.equal(updateResponse.status, 200);
+  const updated = await readJson<ProfilePayload>(updateResponse);
+  assert.equal(updated.profile?.currencyCode, "USD");
+
+  const listResponse = await fetch(`${baseUrl}/api/business/catalogue`);
+  const list = await readJson<CatalogueListPayload>(listResponse);
+  const stored = list.entries.find((entry) => entry.id === catalogue.id);
+
+  assert.ok(stored);
+  assert.equal(stored.currencyCode, "NGN");
+  assert.equal(stored.priceMinor, 150_000);
+  assert.equal(profile.currencyCode, "NGN");
+});
+
 test("opening-hours schedule round-trips through persistence and reload", async () => {
   const savedSchedule = scheduleFromOpeningHours([
     { day: "monday", opensAt: "08:30", closesAt: "17:30" },
