@@ -1,0 +1,133 @@
+import type { ReactNode } from "react";
+import type { View } from "@/lib/leads";
+
+function Icon({ path }: { path: string }) {
+  return (
+    <svg
+      aria-hidden="true"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className="h-4 w-4 shrink-0"
+    >
+      <path d={path} />
+    </svg>
+  );
+}
+
+const NAV_ITEMS: { view: View; label: string; icon: ReactNode }[] = [
+  {
+    view: "overview",
+    label: "Overview",
+    icon: <Icon path="M3 3h7v7H3zM14 3h7v7h-7zM3 14h7v7H3zM14 14h7v7h-7z" />,
+  },
+  {
+    view: "leads",
+    label: "All leads",
+    icon: (
+      <Icon path="M17 20v-2a4 4 0 0 0-4-4H7a4 4 0 0 0-4 4v2M10 10a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM21 20v-2a4 4 0 0 0-3-3.87M15 3.13a4 4 0 0 1 0 7.75" />
+    ),
+  },
+  {
+    view: "follow-ups",
+    label: "Follow-ups",
+    icon: <Icon path="M12 6v6l4 2M12 22a10 10 0 1 1 0-20 10 10 0 0 1 0 20z" />,
+  },
+];
+
+export function Sidebar({
+  view,
+  onSelectView,
+  leadCount,
+  followUpCount,
+}: {
+  view: View;
+  onSelectView: (view: View) => void;
+  leadCount: number;
+  followUpCount: number;
+}) {
+  return (
+    <aside className="hidden w-64 shrink-0 flex-col border-r border-slate-200 bg-white px-5 py-6 lg:flex">
+      <div className="flex items-center gap-3 px-2">
+        <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-blue-600 text-lg font-bold text-white">
+          R
+        </div>
+        <div>
+          <p className="text-lg font-bold tracking-tight">ReplyPilot</p>
+          <p className="text-xs text-slate-500">Customer workflow</p>
+        </div>
+      </div>
+
+      <div className="mt-10">
+        <p className="mb-3 px-3 text-xs font-semibold uppercase tracking-widest text-slate-400">
+          Workspace
+        </p>
+
+        <nav className="space-y-1" aria-label="Main navigation">
+          {NAV_ITEMS.map((item) => {
+            const active = view === item.view;
+            const count =
+              item.view === "leads"
+                ? leadCount
+                : item.view === "follow-ups"
+                  ? followUpCount
+                  : null;
+
+            return (
+              <button
+                key={item.view}
+                onClick={() => onSelectView(item.view)}
+                aria-current={active ? "page" : undefined}
+                className={`flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left text-sm font-medium focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 ${
+                  active
+                    ? "bg-blue-50 text-blue-700"
+                    : "text-slate-600 hover:bg-slate-50"
+                }`}
+              >
+                {item.icon}
+                {item.label}
+                {item.view === "follow-ups" && followUpCount > 0 ? (
+                  <span className="ml-auto rounded-full bg-amber-100 px-2 py-0.5 text-xs font-semibold text-amber-800">
+                    {followUpCount}
+                  </span>
+                ) : count !== null ? (
+                  <span className="ml-auto text-xs text-slate-400">
+                    {count}
+                  </span>
+                ) : null}
+              </button>
+            );
+          })}
+        </nav>
+      </div>
+
+      <div className="mt-auto rounded-2xl border border-blue-100 bg-blue-50/70 p-4">
+        <div className="mb-2 flex h-9 w-9 items-center justify-center rounded-xl bg-white text-blue-700">
+          <Icon path="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3z" />
+        </div>
+        <p className="text-sm font-semibold text-slate-800">AI assistant</p>
+        <p className="mt-1 text-xs leading-5 text-slate-600">
+          AI-generated replies are coming next. For now, manage your customer
+          enquiries here.
+        </p>
+        <span className="mt-3 inline-flex items-center gap-1.5 rounded-full bg-white px-2.5 py-1 text-xs font-medium text-blue-700 ring-1 ring-blue-100">
+          <span aria-hidden="true" className="h-1.5 w-1.5 rounded-full bg-blue-400" />
+          In development
+        </span>
+      </div>
+
+      <div className="mt-5 flex items-center gap-3 border-t border-slate-100 pt-5">
+        <div className="flex h-10 w-10 items-center justify-center rounded-full bg-slate-900 text-sm font-semibold text-white">
+          F
+        </div>
+        <div className="min-w-0">
+          <p className="truncate text-sm font-semibold">Your business</p>
+          <p className="text-xs text-slate-500">Workspace owner</p>
+        </div>
+      </div>
+    </aside>
+  );
+}

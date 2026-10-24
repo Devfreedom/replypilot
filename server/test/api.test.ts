@@ -4,6 +4,7 @@ import { once } from "node:events";
 import type { Server } from "node:http";
 import { after, before, beforeEach, test } from "node:test";
 import { Pool } from "pg";
+import type { ReplyDraftProvider } from "../src/ai/reply-draft.js";
 import { createApp } from "../src/app.js";
 import { createPool } from "../src/db/pool.js";
 import { runMigrations } from "../src/db/migrate.js";
@@ -36,11 +37,17 @@ let pool: Pool;
 let server: Server;
 let baseUrl: string;
 
-async function startServer(poolToUse: Pool): Promise<{
+async function startServer(
+  poolToUse: Pool,
+  replyDraftProvider?: ReplyDraftProvider,
+): Promise<{
   server: Server;
   baseUrl: string;
 }> {
-  const appServer = createApp({ pool: poolToUse }).listen(0, "127.0.0.1");
+  const appServer = createApp({
+    pool: poolToUse,
+    replyDraftProvider,
+  }).listen(0, "127.0.0.1");
   await once(appServer, "listening");
 
   const address = appServer.address();
@@ -88,6 +95,10 @@ function patchLead(id: string, body: unknown): Promise<Response> {
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
   });
+}
+
+function draftReply(id: string): Promise<Response> {
+  return fetch(`${baseUrl}/api/leads/${id}/draft-reply`, { method: "POST" });
 }
 
 before(async () => {
@@ -342,6 +353,128 @@ test("PATCH /api/leads/:id returns 404 for a valid unknown UUID", async () => {
 
   assert.equal(response.status, 404);
   assert.deepEqual(await readJson(response), { error: "Lead not found" });
+});
+
+test("POST /api/leads/:id/draft-reply returns a mock draft without persisting it", async () => {
+  const createResponse = await postLead({
+    name: "Sarah Musa",
+    service: "Wedding photography",
+    lastMessage: "Are you available for a wedding in Jos this December?",
+  });
+  const created = await readJson<LeadPayload>(createResponse);
+
+  const response = await draftReply(created.lead.id);
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(await readJson(response), {
+    intent: "availability",
+    summary:
+      "Enquiry from Sarah Musa about Wedding photography: Are you available for a wedding in Jos this December?",
+    missingInformation: ["Preferred date and time", "Event location"],
+    draftReply:
+      "Hi Sarah Musa, thanks for reaching out about Wedding photography. Could you please share your preferred date, time, and location so we can understand your enquiry better?",
+    provider: "mock",
+    isDemo: true,
+  });
+
+  const stored = await pool.query<{ count: number }>(
+    "SELECT count(*)::int AS count FROM leads",
+  );
+  assert.equal(stored.rows[0]?.count, 1);
+});
+
+test("POST /api/leads/:id/draft-reply returns 404 for an unknown lead", async () => {
+  const response = await draftReply(randomUUID());
+
+  assert.equal(response.status, 404);
+  assert.deepEqual(await readJson(response), { error: "Lead not found" });
+});
+
+test("POST /api/leads/:id/draft-reply rejects an invalid lead ID", async () => {
+  const response = await draftReply("not-a-uuid");
+
+  assert.equal(response.status, 400);
+  const payload = await readJson<ErrorPayload>(response);
+  assert.equal(payload.error, "Invalid request");
+  assert.deepEqual(payload.details?.[0], {
+    field: "id",
+    message: "Invalid UUID",
+  });
+});
+
+test("drafting passes the stored lead to the configured provider", async () => {
+  const created = await readJson<LeadPayload>(
+    await postLead({
+      name: "Amina Yakubu",
+      service: "Portrait photography",
+      lastMessage: "I would like a portrait session next week.",
+    }),
+  );
+  let receivedLead: Lead | null = null;
+  const provider: ReplyDraftProvider = {
+    async draftReply(lead) {
+      receivedLead = lead;
+      return {
+        intent: "general-enquiry",
+        summary: "A neutral summary.",
+        missingInformation: [],
+        draftReply: "A safe reply.",
+        provider: "mock",
+        isDemo: true,
+      };
+    },
+  };
+  const configured = await startServer(pool, provider);
+
+  try {
+    const response = await fetch(
+      `${configured.baseUrl}/api/leads/${created.lead.id}/draft-reply`,
+      { method: "POST" },
+    );
+
+    assert.equal(response.status, 200);
+    assert.deepEqual(receivedLead, created.lead);
+  } finally {
+    await stopServer(configured.server);
+  }
+});
+
+test("drafting safely handles invalid provider output and provider failures", async () => {
+  const created = await readJson<LeadPayload>(
+    await postLead({
+      name: "Grace John",
+      service: "Event decoration",
+      lastMessage: "Please send details.",
+    }),
+  );
+  const invalidProvider: ReplyDraftProvider = {
+    async draftReply() {
+      return { intent: "not-an-intent" };
+    },
+  };
+  const failingProvider: ReplyDraftProvider = {
+    async draftReply() {
+      throw new Error("Provider unavailable");
+    },
+  };
+
+  for (const provider of [invalidProvider, failingProvider]) {
+    const configured = await startServer(pool, provider);
+
+    try {
+      const response = await fetch(
+        `${configured.baseUrl}/api/leads/${created.lead.id}/draft-reply`,
+        { method: "POST" },
+      );
+
+      assert.equal(response.status, 500);
+      assert.deepEqual(await readJson(response), {
+        error: "Internal server error",
+      });
+    } finally {
+      await stopServer(configured.server);
+    }
+  }
 });
 
 test("SQL-injection-shaped input is stored literally", async () => {

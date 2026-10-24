@@ -2,7 +2,13 @@ import { Router, type Response } from "express";
 import type { Pool } from "pg";
 import type { ZodError } from "zod";
 import {
+  MockReplyDraftProvider,
+  replyDraftSchema,
+  type ReplyDraftProvider,
+} from "../ai/reply-draft.js";
+import {
   createLead,
+  getLeadById,
   listLeads,
   updateLeadStatus,
 } from "./repository.js";
@@ -28,7 +34,13 @@ function sendValidationError(
   });
 }
 
-export function createLeadsRouter(pool: Pool): Router {
+export function createLeadsRouter({
+  pool,
+  replyDraftProvider = new MockReplyDraftProvider(),
+}: {
+  pool: Pool;
+  replyDraftProvider?: ReplyDraftProvider;
+}): Router {
   const router = Router();
 
   router.get("/", async (_request, response) => {
@@ -71,6 +83,40 @@ export function createLeadsRouter(pool: Pool): Router {
     }
 
     response.status(200).json({ lead });
+  });
+
+  router.post("/:id/draft-reply", async (request, response) => {
+    const id = leadIdSchema.safeParse(request.params.id);
+
+    if (!id.success) {
+      sendValidationError(response, id.error, "id");
+      return;
+    }
+
+    const lead = await getLeadById(pool, id.data);
+
+    if (!lead) {
+      response.status(404).json({ error: "Lead not found" });
+      return;
+    }
+
+    let providerResult: unknown;
+
+    try {
+      providerResult = await replyDraftProvider.draftReply(lead);
+    } catch {
+      response.status(500).json({ error: "Internal server error" });
+      return;
+    }
+
+    const draft = replyDraftSchema.safeParse(providerResult);
+
+    if (!draft.success) {
+      response.status(500).json({ error: "Internal server error" });
+      return;
+    }
+
+    response.status(200).json(draft.data);
   });
 
   return router;

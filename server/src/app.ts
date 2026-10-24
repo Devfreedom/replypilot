@@ -5,11 +5,18 @@ import express, {
   type Response,
 } from "express";
 import type { Pool } from "pg";
+import type { ReplyDraftProvider } from "./ai/reply-draft.js";
 import { createLeadsRouter } from "./leads/routes.js";
 
 const JSON_BODY_LIMIT = "10kb";
 
-export function createApp({ pool }: { pool: Pool }): Express {
+export function createApp({
+  pool,
+  replyDraftProvider,
+}: {
+  pool: Pool;
+  replyDraftProvider?: ReplyDraftProvider;
+}): Express {
   const app = express();
 
   app.disable("x-powered-by");
@@ -24,7 +31,7 @@ export function createApp({ pool }: { pool: Pool }): Express {
     }
   });
 
-  app.use("/api/leads", createLeadsRouter(pool));
+  app.use("/api/leads", createLeadsRouter({ pool, replyDraftProvider }));
 
   app.use((_request: Request, response: Response) => {
     response.status(404).json({ error: "Not found" });
