@@ -53,6 +53,7 @@ type BusinessProfile = {
   businessDescription: string;
   contactEmail: string | null;
   contactPhone: string | null;
+  contactPhoneCountry: string | null;
   businessAddress: string | null;
   timezone: string;
   openingHours: Array<{
@@ -60,6 +61,7 @@ type BusinessProfile = {
     opensAt: string;
     closesAt: string;
   }>;
+  currencyCode: string | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -180,10 +182,12 @@ const validProfileBody = {
   businessName: "Lagos Light Studio",
   businessDescription: "Wedding and portrait photography.",
   contactEmail: "hello@example.test",
-  contactPhone: "+234 800 000 0000",
+  contactPhone: "+2348031234567",
+  contactPhoneCountry: "NG",
   businessAddress: "12 Example Road, Lagos",
   timezone: "Africa/Lagos",
   openingHours: [{ day: "monday", opensAt: "09:00", closesAt: "17:00" }],
+  currencyCode: "NGN",
 };
 
 async function createProfile(
@@ -344,6 +348,36 @@ after(async () => {
 test("migrations are repeatable and already-applied files are skipped", async () => {
   const applied = await runMigrations(pool);
   assert.deepEqual(applied, []);
+});
+
+test("profile migration adds nullable phone-country and currency columns", async () => {
+  const result = await pool.query<{
+    column_name: string;
+    is_nullable: string;
+    column_default: string | null;
+  }>(
+    `
+      SELECT column_name, is_nullable, column_default
+      FROM information_schema.columns
+      WHERE table_schema = 'public'
+        AND table_name = 'business_profiles'
+        AND column_name IN ('contact_phone_country', 'currency_code')
+      ORDER BY column_name
+    `,
+  );
+
+  assert.deepEqual(result.rows, [
+    {
+      column_name: "contact_phone_country",
+      is_nullable: "YES",
+      column_default: null,
+    },
+    {
+      column_name: "currency_code",
+      is_nullable: "YES",
+      column_default: null,
+    },
+  ]);
 });
 
 test("GET /api/health returns 200 when PostgreSQL is reachable", async () => {
@@ -794,9 +828,14 @@ test("business profile handles absence, creation, retrieval, and update", async 
   );
   assert.equal(profile.contactEmail, validProfileBody.contactEmail);
   assert.equal(profile.contactPhone, validProfileBody.contactPhone);
+  assert.equal(
+    profile.contactPhoneCountry,
+    validProfileBody.contactPhoneCountry,
+  );
   assert.equal(profile.businessAddress, validProfileBody.businessAddress);
   assert.equal(profile.timezone, validProfileBody.timezone);
   assert.deepEqual(profile.openingHours, validProfileBody.openingHours);
+  assert.equal(profile.currencyCode, validProfileBody.currencyCode);
   assert.ok(Number.isFinite(Date.parse(profile.createdAt)));
   assert.ok(Number.isFinite(Date.parse(profile.updatedAt)));
 
