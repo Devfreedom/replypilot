@@ -232,6 +232,7 @@ export function SearchableCombobox({
               closeMenu(true);
             }}
             disabled={disabled}
+            aria-label={`Clear ${label}`}
             className="text-xs font-semibold text-slate-500 underline-offset-2 hover:text-slate-800 hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 disabled:opacity-60"
           >
             Clear

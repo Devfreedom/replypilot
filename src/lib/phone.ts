@@ -156,8 +156,9 @@ export function restorePhoneState(
   if (savedCountry && !validSavedCountry) {
     return {
       countryCode: detectedCountry,
-      nationalNumber:
-        detectedCountry === parsed.country ? rawPhone : parsed.formatNational(),
+      nationalNumber: detectedCountry
+        ? parsed.formatNational()
+        : rawPhone,
       warning:
         "The saved phone country is not one of the available choices. Choose a country and confirm the number before saving.",
     };
