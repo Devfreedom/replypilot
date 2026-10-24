@@ -1,4 +1,7 @@
 import { z } from "zod";
+import { WEEKDAYS } from "./opening-hours";
+
+export type { OpeningHoursEntry } from "./opening-hours";
 
 export const KNOWLEDGE_ENTRY_TYPES = ["faq", "policy"] as const;
 
@@ -10,15 +13,7 @@ export const MAX_SAFE_PRICE_MINOR = Number.MAX_SAFE_INTEGER;
 
 const openingHoursSchema = z.array(
   z.object({
-    day: z.enum([
-      "monday",
-      "tuesday",
-      "wednesday",
-      "thursday",
-      "friday",
-      "saturday",
-      "sunday",
-    ]),
+    day: z.enum(WEEKDAYS),
     opensAt: z.string(),
     closesAt: z.string(),
   }),
@@ -67,7 +62,6 @@ const knowledgeEntrySchema = z.object({
 export type BusinessProfile = z.infer<typeof profileSchema>;
 export type CatalogueEntry = z.infer<typeof catalogueEntrySchema>;
 export type KnowledgeEntry = z.infer<typeof knowledgeEntrySchema>;
-export type OpeningHoursEntry = z.infer<typeof openingHoursSchema>[number];
 
 export function parseProfileResponse(value: unknown): BusinessProfile | null {
   const parsed = z.object({ profile: profileSchema.nullable() }).safeParse(value);
