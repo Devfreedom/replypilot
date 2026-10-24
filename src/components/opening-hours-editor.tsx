@@ -98,125 +98,128 @@ export function OpeningHoursEditor({
           const dayLabelId = `${idPrefix}-${row.day}-label`;
 
           return (
-            <li
-              key={row.day}
-              role="group"
-              aria-labelledby={dayLabelId}
-              className="grid gap-3 py-4 sm:grid-cols-[7rem_7.5rem_minmax(0,1fr)] sm:items-start"
-            >
-              <p
-                id={dayLabelId}
-                className="text-sm font-semibold text-slate-800"
+            <li key={row.day} className="py-4">
+              <div
+                role="group"
+                aria-labelledby={dayLabelId}
+                className="grid gap-3 sm:grid-cols-[7rem_7.5rem_minmax(0,1fr)] sm:items-start"
               >
-                {label}
-              </p>
-
-              <label
-                htmlFor={toggleId}
-                className="inline-flex w-fit cursor-pointer items-center gap-2 text-sm font-medium text-slate-700"
-              >
-                <input
-                  id={toggleId}
-                  type="checkbox"
-                  checked={row.isOpen}
-                  onChange={(event) =>
-                    onChange(setDayOpen(schedule, row.day, event.target.checked))
-                  }
-                  aria-label={`${label} open`}
-                  className="h-4 w-4 rounded border-slate-300 text-blue-600 accent-blue-600 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
-                />
-                {row.isOpen ? "Open" : "Closed"}
-              </label>
-
-              {row.isOpen ? (
-                <div className="grid min-w-0 grid-cols-1 gap-3 sm:grid-cols-2">
-                  <div className="min-w-0">
-                    <label
-                      htmlFor={fieldId(row.day, "opensAt")}
-                      className="block text-xs font-medium text-slate-600"
-                    >
-                      Opens
-                    </label>
-                    <input
-                      id={fieldId(row.day, "opensAt")}
-                      type="time"
-                      value={row.opensAt}
-                      onChange={(event) =>
-                        onChange(
-                          setDayTime(
-                            schedule,
-                            row.day,
-                            "opensAt",
-                            event.target.value,
-                          ),
-                        )
-                      }
-                      aria-invalid={dayErrors?.opensAt ? true : undefined}
-                      aria-describedby={
-                        dayErrors?.opensAt
-                          ? errorId(row.day, "opensAt")
-                          : undefined
-                      }
-                      className={`${timeInputClass} ${
-                        dayErrors?.opensAt ? "border-red-300 bg-red-50" : ""
-                      }`}
-                    />
-                    {dayErrors?.opensAt ? (
-                      <p
-                        id={errorId(row.day, "opensAt")}
-                        className="mt-1 text-xs font-medium text-red-700"
-                      >
-                        {dayErrors.opensAt}
-                      </p>
-                    ) : null}
-                  </div>
-
-                  <div className="min-w-0">
-                    <label
-                      htmlFor={fieldId(row.day, "closesAt")}
-                      className="block text-xs font-medium text-slate-600"
-                    >
-                      Closes
-                    </label>
-                    <input
-                      id={fieldId(row.day, "closesAt")}
-                      type="time"
-                      value={row.closesAt}
-                      onChange={(event) =>
-                        onChange(
-                          setDayTime(
-                            schedule,
-                            row.day,
-                            "closesAt",
-                            event.target.value,
-                          ),
-                        )
-                      }
-                      aria-invalid={dayErrors?.closesAt ? true : undefined}
-                      aria-describedby={
-                        dayErrors?.closesAt
-                          ? errorId(row.day, "closesAt")
-                          : undefined
-                      }
-                      className={`${timeInputClass} ${
-                        dayErrors?.closesAt ? "border-red-300 bg-red-50" : ""
-                      }`}
-                    />
-                    {dayErrors?.closesAt ? (
-                      <p
-                        id={errorId(row.day, "closesAt")}
-                        className="mt-1 text-xs font-medium text-red-700"
-                      >
-                        {dayErrors.closesAt}
-                      </p>
-                    ) : null}
-                  </div>
-                </div>
-              ) : (
-                <p className="self-center text-sm text-slate-500">
-                  Closed all day
+                <p
+                  id={dayLabelId}
+                  className="text-sm font-semibold text-slate-800"
+                >
+                  {label}
                 </p>
-              )}
+
+                <label
+                  htmlFor={toggleId}
+                  className="inline-flex w-fit cursor-pointer items-center gap-2 text-sm font-medium text-slate-700"
+                >
+                  <input
+                    id={toggleId}
+                    type="checkbox"
+                    checked={row.isOpen}
+                    onChange={(event) =>
+                      onChange(
+                        setDayOpen(schedule, row.day, event.target.checked),
+                      )
+                    }
+                    aria-label={`${label} open`}
+                    className="h-4 w-4 rounded border-slate-300 text-blue-600 accent-blue-600 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
+                  />
+                  {row.isOpen ? "Open" : "Closed"}
+                </label>
+
+                {row.isOpen ? (
+                  <div className="grid min-w-0 grid-cols-1 gap-3 sm:grid-cols-2">
+                    <div className="min-w-0">
+                      <label
+                        htmlFor={fieldId(row.day, "opensAt")}
+                        className="block text-xs font-medium text-slate-600"
+                      >
+                        Opens
+                      </label>
+                      <input
+                        id={fieldId(row.day, "opensAt")}
+                        type="time"
+                        value={row.opensAt}
+                        onChange={(event) =>
+                          onChange(
+                            setDayTime(
+                              schedule,
+                              row.day,
+                              "opensAt",
+                              event.target.value,
+                            ),
+                          )
+                        }
+                        aria-invalid={dayErrors?.opensAt ? true : undefined}
+                        aria-describedby={
+                          dayErrors?.opensAt
+                            ? errorId(row.day, "opensAt")
+                            : undefined
+                        }
+                        className={`${timeInputClass} ${
+                          dayErrors?.opensAt ? "border-red-300 bg-red-50" : ""
+                        }`}
+                      />
+                      {dayErrors?.opensAt ? (
+                        <p
+                          id={errorId(row.day, "opensAt")}
+                          className="mt-1 text-xs font-medium text-red-700"
+                        >
+                          {dayErrors.opensAt}
+                        </p>
+                      ) : null}
+                    </div>
+
+                    <div className="min-w-0">
+                      <label
+                        htmlFor={fieldId(row.day, "closesAt")}
+                        className="block text-xs font-medium text-slate-600"
+                      >
+                        Closes
+                      </label>
+                      <input
+                        id={fieldId(row.day, "closesAt")}
+                        type="time"
+                        value={row.closesAt}
+                        onChange={(event) =>
+                          onChange(
+                            setDayTime(
+                              schedule,
+                              row.day,
+                              "closesAt",
+                              event.target.value,
+                            ),
+                          )
+                        }
+                        aria-invalid={dayErrors?.closesAt ? true : undefined}
+                        aria-describedby={
+                          dayErrors?.closesAt
+                            ? errorId(row.day, "closesAt")
+                            : undefined
+                        }
+                        className={`${timeInputClass} ${
+                          dayErrors?.closesAt ? "border-red-300 bg-red-50" : ""
+                        }`}
+                      />
+                      {dayErrors?.closesAt ? (
+                        <p
+                          id={errorId(row.day, "closesAt")}
+                          className="mt-1 text-xs font-medium text-red-700"
+                        >
+                          {dayErrors.closesAt}
+                        </p>
+                      ) : null}
+                    </div>
+                  </div>
+                ) : (
+                  <p className="self-center text-sm text-slate-500">
+                    Closed all day
+                  </p>
+                )}
+              </div>
             </li>
           );
         })}

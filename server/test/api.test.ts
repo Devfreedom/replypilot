@@ -835,6 +835,54 @@ test("business profile handles absence, creation, retrieval, and update", async 
   );
 });
 
+test("opening-hours schedule round-trips through persistence and reload", async () => {
+  const savedSchedule = scheduleFromOpeningHours([
+    { day: "monday", opensAt: "08:30", closesAt: "17:30" },
+    { day: "wednesday", opensAt: "10:00", closesAt: "19:00" },
+    { day: "friday", opensAt: "09:00", closesAt: "16:00" },
+  ]);
+
+  const profile = await createProfile({
+    openingHours: openingHoursFromSchedule(savedSchedule.schedule),
+  });
+
+  const getResponse = await fetch(`${baseUrl}/api/business/profile`);
+  assert.equal(getResponse.status, 200);
+  const payload = await readJson<ProfilePayload>(getResponse);
+  assert.ok(payload.profile);
+
+  const reloaded = scheduleFromOpeningHours(payload.profile.openingHours);
+  assert.deepEqual(reloaded.schedule, savedSchedule.schedule);
+  assert.deepEqual(reloaded.issues, []);
+  assert.deepEqual(payload.profile.openingHours, profile.openingHours);
+
+  const withoutTuesday = setDayOpen(reloaded.schedule, "tuesday", false);
+  const updateResponse = await jsonRequest(
+    "/api/business/profile",
+    "PATCH",
+    {
+      ...validProfileBody,
+      openingHours: openingHoursFromSchedule(withoutTuesday),
+    },
+  );
+  assert.equal(updateResponse.status, 200);
+
+  const updated = await readJson<ProfilePayload>(updateResponse);
+  assert.ok(updated.profile);
+  const updatedSchedule = scheduleFromOpeningHours(updated.profile.openingHours);
+  const tuesday = updatedSchedule.schedule.find(
+    (entry) => entry.day === "tuesday",
+  );
+  const monday = updatedSchedule.schedule.find(
+    (entry) => entry.day === "monday",
+  );
+
+  assert.equal(tuesday?.isOpen, false);
+  assert.equal(monday?.isOpen, true);
+  assert.equal(monday?.opensAt, "08:30");
+  assert.deepEqual(updatedSchedule.issues, []);
+});
+
 test("creating a second business profile returns a conflict", async () => {
   await createProfile();
 
