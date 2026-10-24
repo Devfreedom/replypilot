@@ -11,7 +11,6 @@ import {
   type BusinessProfile,
   type CatalogueEntry,
   type KnowledgeEntry,
-  type OpeningHoursEntry,
   MAX_SAFE_PRICE_MINOR,
   parseCatalogueEntryResponse,
   parseCatalogueResponse,
@@ -19,6 +18,19 @@ import {
   parseKnowledgeResponse,
   parseProfileResponse,
 } from "@/lib/business";
+import {
+  type OpeningHoursEntry,
+  type ScheduleErrors,
+  type WeeklySchedule,
+  WEEKDAYS,
+  WEEKDAY_LABELS,
+  createEmptyWeeklySchedule,
+  hasScheduleErrors,
+  openingHoursFromSchedule,
+  scheduleFromOpeningHours,
+  validateWeeklySchedule,
+} from "@/lib/opening-hours";
+import { OpeningHoursEditor } from "./opening-hours-editor";
 
 const inputClass =
   "mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-800 outline-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600";
@@ -94,6 +106,16 @@ export function BusinessSettings() {
   const [showProfileForm, setShowProfileForm] = useState(false);
   const [busy, setBusy] = useState(false);
   const [reloadToken, setReloadToken] = useState(0);
+  const [schedule, setSchedule] = useState<WeeklySchedule>(() =>
+    createEmptyWeeklySchedule(),
+  );
+  const [scheduleErrors, setScheduleErrors] = useState<ScheduleErrors>({});
+  const [scheduleIssues, setScheduleIssues] = useState<string[]>([]);
+  const [legacyOpeningHours, setLegacyOpeningHours] = useState<
+    OpeningHoursEntry[] | null
+  >(null);
+  const [scheduleValidationAttempted, setScheduleValidationAttempted] =
+    useState(false);
 
   useEffect(() => {
     let active = true;
@@ -138,10 +160,23 @@ export function BusinessSettings() {
           );
         }
 
+        const loadedSchedule = scheduleFromOpeningHours(
+          nextProfile?.openingHours ?? [],
+        );
+
         setProfile(nextProfile);
         setCatalogue(nextCatalogue);
         setKnowledge(nextKnowledge);
         setShowProfileForm(nextProfile !== null);
+        setSchedule(loadedSchedule.schedule);
+        setScheduleIssues(loadedSchedule.issues);
+        setLegacyOpeningHours(
+          loadedSchedule.hasUneditableEntries
+            ? (nextProfile?.openingHours ?? [])
+            : null,
+        );
+        setScheduleErrors({});
+        setScheduleValidationAttempted(false);
       } catch (cause) {
         if (!active) return;
 
@@ -170,6 +205,25 @@ export function BusinessSettings() {
     setReloadToken((token) => token + 1);
   }
 
+  function updateSchedule(nextSchedule: WeeklySchedule) {
+    setSchedule(nextSchedule);
+    setScheduleIssues([]);
+
+    if (scheduleValidationAttempted) {
+      setScheduleErrors(validateWeeklySchedule(nextSchedule));
+    }
+  }
+
+  function replaceLegacySchedule() {
+    setLegacyOpeningHours(null);
+    setScheduleIssues([]);
+    setScheduleErrors({});
+    setScheduleValidationAttempted(false);
+    setNotice(
+      "You can now edit the weekly schedule. Save the profile to replace the unsupported saved hours.",
+    );
+  }
+
   async function saveProfile(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setBusy(true);
@@ -177,17 +231,28 @@ export function BusinessSettings() {
     setError(null);
 
     const form = new FormData(event.currentTarget);
-    let openingHours: OpeningHoursEntry[] = [];
+    let openingHours: OpeningHoursEntry[];
 
-    try {
-      const raw = String(form.get("openingHours") ?? "[]").trim() || "[]";
-      openingHours = JSON.parse(raw) as OpeningHoursEntry[];
-    } catch {
-      setError(
-        "Opening hours must be valid JSON using the documented day, opensAt, and closesAt fields.",
-      );
-      setBusy(false);
-      return;
+    if (legacyOpeningHours) {
+      openingHours = legacyOpeningHours;
+    } else {
+      const nextErrors = validateWeeklySchedule(schedule);
+      setScheduleErrors(nextErrors);
+      setScheduleValidationAttempted(true);
+
+      if (hasScheduleErrors(nextErrors)) {
+        setBusy(false);
+        requestAnimationFrame(() => {
+          document
+            .querySelector<HTMLInputElement>(
+              'input[type="time"][aria-invalid="true"]',
+            )
+            ?.focus();
+        });
+        return;
+      }
+
+      openingHours = openingHoursFromSchedule(schedule);
     }
 
     const payload = {
@@ -222,8 +287,17 @@ export function BusinessSettings() {
         );
       }
 
+      const loadedSchedule = scheduleFromOpeningHours(saved.openingHours);
+
       setProfile(saved);
       setShowProfileForm(true);
+      setSchedule(loadedSchedule.schedule);
+      setScheduleIssues(loadedSchedule.issues);
+      setLegacyOpeningHours(
+        loadedSchedule.hasUneditableEntries ? saved.openingHours : null,
+      );
+      setScheduleErrors({});
+      setScheduleValidationAttempted(false);
       setNotice("Business profile saved.");
     } catch (cause) {
       setError(
@@ -580,33 +654,78 @@ export function BusinessSettings() {
                         className={inputClass}
                       />
                     </label>
-                    <label className={`${labelClass} sm:col-span-2`}>
-                      Opening hours (JSON)
-                      <textarea
-                        name="openingHours"
-                        defaultValue={JSON.stringify(
-                          profile?.openingHours ?? [],
-                          null,
-                          2,
-                        )}
-                        rows={5}
-                        className={`${inputClass} font-mono text-xs`}
-                        aria-describedby="hours-help"
-                      />
-                    </label>
-                    <p
-                      id="hours-help"
-                      className="-mt-2 text-xs text-slate-500 sm:col-span-2"
-                    >
-                      Use an array such as{" "}
-                      <code>
-                        {
-                          '[{"day":"monday","opensAt":"09:00","closesAt":"17:00"}]'
-                        }
-                      </code>
-                      . One same-day interval per weekday is supported. Leave
-                      empty for no published hours.
-                    </p>
+                    {legacyOpeningHours !== null ? (
+                      <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 sm:col-span-2 sm:p-5">
+                        <h3 className="text-sm font-semibold text-amber-950">
+                          Opening hours
+                        </h3>
+                        <div
+                          role="alert"
+                          className="mt-2 text-sm leading-6 text-amber-900"
+                        >
+                          <p>
+                            This saved schedule cannot be shown safely in the
+                            weekly editor, so it has been preserved unchanged.
+                            It will be sent back as-is if you save the profile.
+                          </p>
+                          <ul className="mt-2 list-disc space-y-1 pl-5">
+                            {scheduleIssues.map((issue, index) => (
+                              <li key={`${issue}-${index}`}>{issue}</li>
+                            ))}
+                          </ul>
+                        </div>
+
+                        <p className="mt-4 text-sm font-medium text-amber-950">
+                          Saved entries
+                        </p>
+                        <ul className="mt-1 space-y-1 text-sm text-amber-900">
+                          {legacyOpeningHours.map((entry, index) => (
+                            <li key={`${entry.day}-${index}`}>
+                              {WEEKDAY_LABELS[entry.day] ?? entry.day}:{" "}
+                              {entry.opensAt}–{entry.closesAt}
+                            </li>
+                          ))}
+                        </ul>
+
+                        <button
+                          type="button"
+                          onClick={replaceLegacySchedule}
+                          className={`mt-4 ${secondaryButtonClass}`}
+                        >
+                          Replace with weekly schedule
+                        </button>
+                        <p className="mt-2 text-xs text-amber-800">
+                          The editor starts with the first saved interval for
+                          each day. Nothing is replaced until you save the
+                          profile.
+                        </p>
+                      </div>
+                    ) : (
+                      <>
+                        {scheduleIssues.length > 0 ? (
+                          <div
+                            role="status"
+                            className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900 sm:col-span-2"
+                          >
+                            <p className="font-medium">
+                              Some saved opening hours need review:
+                            </p>
+                            <ul className="mt-1 list-disc space-y-1 pl-5">
+                              {scheduleIssues.map((issue, index) => (
+                                <li key={`${issue}-${index}`}>{issue}</li>
+                              ))}
+                            </ul>
+                          </div>
+                        ) : null}
+
+                        <OpeningHoursEditor
+                          schedule={schedule}
+                          errors={scheduleErrors}
+                          disabled={busy}
+                          onChange={updateSchedule}
+                        />
+                      </>
+                    )}
                     <div className="flex gap-3 sm:col-span-2">
                       <button
                         disabled={busy}
