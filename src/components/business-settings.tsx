@@ -161,7 +161,6 @@ export function BusinessSettings() {
         currency: currencyValidationError,
       }
     : {};
-  const hasProfileErrors = Object.values(profileErrors).some(Boolean);
 
   useEffect(() => {
     let active = true;
@@ -302,7 +301,8 @@ export function BusinessSettings() {
     setNotice(null);
     setError(null);
 
-    const form = new FormData(event.currentTarget);
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
     let openingHours: OpeningHoursEntry[];
 
     if (legacyOpeningHours) {
@@ -315,7 +315,7 @@ export function BusinessSettings() {
       if (hasScheduleErrors(nextErrors)) {
         setBusy(false);
         requestAnimationFrame(() => {
-          document
+          formElement
             .querySelector<HTMLInputElement>(
               'input[type="time"][aria-invalid="true"]',
             )
@@ -327,14 +327,48 @@ export function BusinessSettings() {
       openingHours = openingHoursFromSchedule(schedule);
     }
 
+    const nextPhoneValidation = validatePhoneInput(
+      phoneCountry,
+      phoneNational,
+    );
+    const nextTimezoneError = timezone
+      ? isValidTimezone(timezone)
+        ? null
+        : "Choose a valid IANA timezone."
+      : "Choose the timezone that matches the business.";
+    const nextCurrencyError =
+      businessCurrency && !isSupportedCurrencyCode(businessCurrency)
+        ? "Choose a valid ISO 4217 currency."
+        : null;
+    const nextProfileErrors = {
+      phoneCountry: nextPhoneValidation.errors.country,
+      phoneNumber: nextPhoneValidation.errors.number,
+      timezone: nextTimezoneError,
+      currency: nextCurrencyError,
+    };
+
+    setProfileValidationAttempted(true);
+
+    if (Object.values(nextProfileErrors).some(Boolean)) {
+      setBusy(false);
+      requestAnimationFrame(() => {
+        formElement
+          .querySelector<HTMLElement>('[aria-invalid="true"]')
+          ?.focus();
+      });
+      return;
+    }
+
     const payload = {
       businessName: String(form.get("businessName") ?? ""),
       businessDescription: String(form.get("businessDescription") ?? ""),
       contactEmail: emptyToNull(form.get("contactEmail")),
-      contactPhone: emptyToNull(form.get("contactPhone")),
+      contactPhone: nextPhoneValidation.phone,
+      contactPhoneCountry: nextPhoneValidation.countryCode,
       businessAddress: emptyToNull(form.get("businessAddress")),
-      timezone: String(form.get("timezone") ?? ""),
+      timezone,
       openingHours,
+      currencyCode: businessCurrency || null,
     };
 
     try {
@@ -360,6 +394,10 @@ export function BusinessSettings() {
       }
 
       const loadedSchedule = scheduleFromOpeningHours(saved.openingHours);
+      const restoredPhone = restorePhoneState(
+        saved.contactPhone,
+        saved.contactPhoneCountry,
+      );
 
       setProfile(saved);
       setShowProfileForm(true);
@@ -370,6 +408,12 @@ export function BusinessSettings() {
       );
       setScheduleErrors({});
       setScheduleValidationAttempted(false);
+      setPhoneCountry(restoredPhone.countryCode);
+      setPhoneNational(restoredPhone.nationalNumber);
+      setPhoneWarning(restoredPhone.warning);
+      setTimezone(saved.timezone);
+      setBusinessCurrency(saved.currencyCode ?? "");
+      setProfileValidationAttempted(false);
       setNotice("Business profile saved.");
     } catch (cause) {
       setError(
@@ -676,22 +720,17 @@ export function BusinessSettings() {
                         className={inputClass}
                       />
                     </label>
-                    <label className={labelClass}>
-                      Timezone
-                      <input
-                        required
-                        name="timezone"
-                        defaultValue={profile?.timezone ?? "Africa/Lagos"}
-                        className={inputClass}
-                        aria-describedby="timezone-help"
-                      />
-                    </label>
-                    <p
-                      id="timezone-help"
-                      className="-mt-2 text-xs text-slate-500 sm:col-span-2"
-                    >
-                      Use an IANA timezone, for example Africa/Lagos.
-                    </p>
+                    <SearchableCombobox
+                      id="profile-timezone"
+                      label="Timezone"
+                      value={timezone}
+                      options={timezoneOptions}
+                      onChange={setTimezone}
+                      placeholder="Select a timezone"
+                      helpText="Search by region or city. The business owner must choose the timezone; it is not guessed from this device."
+                      error={profileErrors.timezone}
+                      disabled={busy}
+                    />
                     <label className={`${labelClass} sm:col-span-2`}>
                       Business description
                       <textarea
@@ -710,14 +749,38 @@ export function BusinessSettings() {
                         className={inputClass}
                       />
                     </label>
-                    <label className={labelClass}>
-                      Contact phone
-                      <input
-                        name="contactPhone"
-                        defaultValue={profile?.contactPhone ?? ""}
-                        className={inputClass}
-                      />
-                    </label>
+                    <SearchableCombobox
+                      id="profile-currency"
+                      label="Business currency"
+                      value={businessCurrency}
+                      options={CURRENCY_OPTIONS}
+                      onChange={setBusinessCurrency}
+                      placeholder="Not configured"
+                      helpText={
+                        businessCurrency
+                          ? "Used as the default for new services. Existing service currencies and prices are not changed."
+                          : "No business currency is saved yet. Choose one to set the default for new services."
+                      }
+                      error={profileErrors.currency}
+                      disabled={busy}
+                      allowClear
+                    />
+                    <PhoneNumberField
+                      countryCode={phoneCountry}
+                      nationalNumber={phoneNational}
+                      countryError={profileErrors.phoneCountry}
+                      numberError={profileErrors.phoneNumber}
+                      warning={phoneWarning}
+                      disabled={busy}
+                      onCountryChange={(value) => {
+                        setPhoneCountry(value);
+                        setPhoneWarning(null);
+                      }}
+                      onNationalNumberChange={(value) => {
+                        setPhoneNational(value);
+                        setPhoneWarning(null);
+                      }}
+                    />
                     <label className={`${labelClass} sm:col-span-2`}>
                       Business address
                       <input
@@ -843,8 +906,14 @@ export function BusinessSettings() {
                   <input
                     required
                     name="currencyCode"
-                    key={`currency-${editingCatalogue?.id ?? "new"}`}
-                    defaultValue={editingCatalogue?.currencyCode ?? "NGN"}
+                    key={`currency-${
+                      editingCatalogue?.id ??
+                      `new-${profile?.currencyCode ?? "unconfigured"}`
+                    }`}
+                    defaultValue={
+                      editingCatalogue?.currencyCode ??
+                      defaultCatalogueCurrency(profile?.currencyCode)
+                    }
                     maxLength={3}
                     pattern="[A-Z]{3}"
                     title="A three-letter uppercase ISO 4217 currency code, for example NGN or USD"
@@ -857,7 +926,9 @@ export function BusinessSettings() {
                   className="-mt-2 text-xs text-slate-500 sm:col-span-2"
                 >
                   Use a current ISO 4217 code in uppercase, for example NGN or
-                  USD.
+                  USD. New services default to the business currency (
+                  {defaultCatalogueCurrency(profile?.currencyCode)}
+                  ); existing services keep their own currency and prices.
                 </p>
                 <label className={labelClass}>
                   Price (minor units)
