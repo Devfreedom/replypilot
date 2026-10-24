@@ -143,11 +143,7 @@ export function scheduleFromOpeningHours(
     const opensAt = isValidTime(saved.opensAt) ? saved.opensAt : "";
     const closesAt = isValidTime(saved.closesAt) ? saved.closesAt : "";
 
-    if (
-      opensAt &&
-      closesAt &&
-      closesAt <= opensAt
-    ) {
+    if (opensAt && closesAt && closesAt <= opensAt) {
       issues.push(
         `${WEEKDAY_LABELS[day]} closes at or before it opens (${opensAt}–${closesAt}). Overnight hours are not supported.`,
       );

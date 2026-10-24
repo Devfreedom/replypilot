@@ -654,7 +654,7 @@ export function BusinessSettings() {
                       />
                     </label>
                     {legacyOpeningHours !== null ? (
-                      <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 sm:col-span-2 sm:p-5">
+                      <div className="min-w-0 rounded-2xl border border-amber-200 bg-amber-50 p-4 sm:col-span-2 sm:p-5">
                         <h3 className="text-sm font-semibold text-amber-950">
                           Opening hours
                         </h3>
@@ -704,7 +704,7 @@ export function BusinessSettings() {
                         {scheduleIssues.length > 0 ? (
                           <div
                             role="status"
-                            className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900 sm:col-span-2"
+                            className="min-w-0 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900 sm:col-span-2"
                           >
                             <p className="font-medium">
                               Some saved opening hours need review:

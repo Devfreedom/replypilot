@@ -42,7 +42,7 @@ export function OpeningHoursEditor({
 
   return (
     <fieldset
-      className="rounded-2xl border border-slate-200 bg-slate-50/60 p-4 sm:col-span-2 sm:p-5"
+      className="min-w-0 rounded-2xl border border-slate-200 bg-slate-50/60 p-4 sm:col-span-2 sm:p-5"
       disabled={disabled}
     >
       <legend className="px-1 text-sm font-semibold text-slate-800">
@@ -58,15 +58,17 @@ export function OpeningHoursEditor({
           type="button"
           onClick={() => onChange(copyMondayToWeekdays(schedule))}
           disabled={disabled || !copyEnabled}
+          aria-describedby={`${idPrefix}-copy-help`}
           className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 disabled:cursor-not-allowed disabled:opacity-50"
         >
           Copy Monday to weekdays
         </button>
       </div>
 
-      <p className="mt-1 text-xs text-slate-500">
-        This copies Monday&apos;s hours to Tuesday–Friday only. It does not save
-        the profile.
+      <p id={`${idPrefix}-copy-help`} className="mt-1 text-xs text-slate-500">
+        {copyEnabled
+          ? "This copies Monday's hours to Tuesday–Friday only. It does not save the profile."
+          : "Set valid Monday opening and closing times to enable copying to Tuesday–Friday."}
       </p>
 
       <p className="mt-2 text-xs text-slate-500">

@@ -35,6 +35,8 @@ test("an empty editor is valid and serializes to no opening hours", () => {
 
   assert.equal(schedule.length, 7);
   assert.ok(schedule.every((entry) => !entry.isOpen));
+  assert.ok(schedule.every((entry) => entry.opensAt === ""));
+  assert.ok(schedule.every((entry) => entry.closesAt === ""));
   assert.deepEqual(validateWeeklySchedule(schedule), {});
   assert.deepEqual(openingHoursFromSchedule(schedule), []);
 });

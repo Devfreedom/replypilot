@@ -20,6 +20,7 @@ import { createPool } from "../src/db/pool.js";
 import { runMigrations } from "../src/db/migrate.js";
 import { seedLeads } from "../src/db/seed.js";
 import {
+  type Weekday,
   openingHoursFromSchedule,
   scheduleFromOpeningHours,
   setDayOpen,
@@ -55,7 +56,7 @@ type BusinessProfile = {
   businessAddress: string | null;
   timezone: string;
   openingHours: Array<{
-    day: string;
+    day: Weekday;
     opensAt: string;
     closesAt: string;
   }>;
