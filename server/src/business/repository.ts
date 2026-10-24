@@ -19,9 +19,11 @@ type ProfileRow = {
   business_description: string;
   contact_email: string | null;
   contact_phone: string | null;
+  contact_phone_country: string | null;
   business_address: string | null;
   timezone: string;
   opening_hours: OpeningHoursEntry[];
+  currency_code: string | null;
   created_at: Date;
   updated_at: Date;
 };
@@ -54,9 +56,11 @@ const PROFILE_COLUMNS = `
   business_description,
   contact_email,
   contact_phone,
+  contact_phone_country,
   business_address,
   timezone,
   opening_hours,
+  currency_code,
   created_at,
   updated_at
 `;
@@ -90,9 +94,11 @@ function mapProfile(row: ProfileRow): BusinessProfile {
     businessDescription: row.business_description,
     contactEmail: row.contact_email,
     contactPhone: row.contact_phone,
+    contactPhoneCountry: row.contact_phone_country,
     businessAddress: row.business_address,
     timezone: row.timezone,
     openingHours: row.opening_hours,
+    currencyCode: row.currency_code,
     createdAt: row.created_at.toISOString(),
     updatedAt: row.updated_at.toISOString(),
   };
@@ -170,11 +176,13 @@ export async function createBusinessProfile(
         business_description,
         contact_email,
         contact_phone,
+        contact_phone_country,
         business_address,
         timezone,
-        opening_hours
+        opening_hours,
+        currency_code
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
       ON CONFLICT (singleton) DO NOTHING
       RETURNING ${PROFILE_COLUMNS}
     `,
@@ -183,9 +191,11 @@ export async function createBusinessProfile(
       input.businessDescription,
       input.contactEmail ?? null,
       input.contactPhone ?? null,
+      input.contactPhoneCountry ?? null,
       input.businessAddress ?? null,
       input.timezone,
       JSON.stringify(input.openingHours),
+      input.currencyCode ?? null,
     ],
   );
 
@@ -204,9 +214,11 @@ export async function updateBusinessProfile(
           business_description = $2,
           contact_email = $3,
           contact_phone = $4,
-          business_address = $5,
-          timezone = $6,
-          opening_hours = $7,
+          contact_phone_country = $5,
+          business_address = $6,
+          timezone = $7,
+          opening_hours = $8,
+          currency_code = $9,
           updated_at = now()
       WHERE singleton = true
       RETURNING ${PROFILE_COLUMNS}
@@ -216,9 +228,11 @@ export async function updateBusinessProfile(
       input.businessDescription,
       input.contactEmail ?? null,
       input.contactPhone ?? null,
+      input.contactPhoneCountry ?? null,
       input.businessAddress ?? null,
       input.timezone,
       JSON.stringify(input.openingHours),
+      input.currencyCode ?? null,
     ],
   );
 

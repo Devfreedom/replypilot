@@ -1,4 +1,6 @@
+import { parsePhoneNumberFromString } from "libphonenumber-js";
 import { z } from "zod";
+import { SUPPORTED_PHONE_COUNTRY_SET } from "./phone-countries.js";
 import { KNOWLEDGE_ENTRY_TYPES } from "./types.js";
 
 /**
@@ -91,6 +93,72 @@ const timezoneSchema = z
     }
   }, "Use a valid IANA timezone");
 
+const contactPhoneSchema = z
+  .string()
+  .trim()
+  .max(60)
+  .nullable()
+  .optional()
+  .superRefine((value, context) => {
+    if (!value) {
+      return;
+    }
+
+    if (!parsePhoneNumberFromString(value)?.isValid()) {
+      context.addIssue({
+        code: "custom",
+        message:
+          "Use a valid international phone number, for example +2348031234567",
+      });
+    }
+  })
+  .transform((value) => {
+    if (!value) {
+      return null;
+    }
+
+    return parsePhoneNumberFromString(value)?.number ?? value;
+  });
+
+const contactPhoneCountrySchema = z
+  .string()
+  .trim()
+  .nullable()
+  .optional()
+  .superRefine((value, context) => {
+    if (!value) {
+      return;
+    }
+
+    if (!SUPPORTED_PHONE_COUNTRY_SET.has(value)) {
+      context.addIssue({
+        code: "custom",
+        message: "Choose a supported phone country",
+      });
+    }
+  })
+  .transform((value) => value || null);
+
+const profileCurrencyCodeSchema = z
+  .string()
+  .trim()
+  .nullable()
+  .optional()
+  .superRefine((value, context) => {
+    if (!value) {
+      return;
+    }
+
+    if (!SUPPORTED_CURRENCY_CODES.has(value)) {
+      context.addIssue({
+        code: "custom",
+        message:
+          "Use a current ISO 4217 currency code in uppercase (for example NGN or USD)",
+      });
+    }
+  })
+  .transform((value) => value || null);
+
 export const businessProfileSchema = z
   .object({
     businessName: z
@@ -103,12 +171,33 @@ export const businessProfileSchema = z
       (value) => value === null || z.email().safeParse(value).success,
       "Use a valid email address",
     ),
-    contactPhone: optionalText(60),
+    contactPhone: contactPhoneSchema,
+    contactPhoneCountry: contactPhoneCountrySchema,
     businessAddress: optionalText(500),
     timezone: timezoneSchema.default("Africa/Lagos"),
     openingHours: openingHoursSchema.default([]),
+    currencyCode: profileCurrencyCodeSchema,
   })
-  .strict();
+  .strict()
+  .superRefine((value, context) => {
+    if (!value.contactPhone || !value.contactPhoneCountry) {
+      return;
+    }
+
+    const parsed = parsePhoneNumberFromString(value.contactPhone);
+
+    if (
+      parsed?.isValid() &&
+      parsed.country &&
+      parsed.country !== value.contactPhoneCountry
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["contactPhoneCountry"],
+        message: "The selected country does not match the phone number",
+      });
+    }
+  });
 
 export type BusinessProfileInput = z.infer<typeof businessProfileSchema>;
 

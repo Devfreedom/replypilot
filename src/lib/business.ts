@@ -25,9 +25,11 @@ const profileSchema = z.object({
   businessDescription: z.string(),
   contactEmail: z.string().nullable(),
   contactPhone: z.string().nullable(),
+  contactPhoneCountry: z.string().nullable().default(null),
   businessAddress: z.string().nullable(),
   timezone: z.string(),
   openingHours: openingHoursSchema,
+  currencyCode: z.string().nullable().default(null),
   createdAt: z.string(),
   updatedAt: z.string(),
 });

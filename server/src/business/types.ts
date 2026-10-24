@@ -13,9 +13,11 @@ export type BusinessProfile = Readonly<{
   businessDescription: string;
   contactEmail: string | null;
   contactPhone: string | null;
+  contactPhoneCountry: string | null;
   businessAddress: string | null;
   timezone: string;
   openingHours: OpeningHoursEntry[];
+  currencyCode: string | null;
   createdAt: string;
   updatedAt: string;
 }>;
