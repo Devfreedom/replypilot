@@ -72,6 +72,12 @@ export function legacyReplyDraft(draft: ReplyDraft): Omit<
   ReplyDraft,
   "sources"
 > {
-  const { sources: _sources, ...legacy } = draft;
-  return legacy;
+  return {
+    intent: draft.intent,
+    summary: draft.summary,
+    missingInformation: draft.missingInformation,
+    draftReply: draft.draftReply,
+    provider: draft.provider,
+    isDemo: draft.isDemo,
+  };
 }

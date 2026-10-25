@@ -52,7 +52,7 @@ function getIntent(message: string): ReplyDraft["intent"] {
     return "availability";
   }
 
-  if (/price|pricing|cost|package|quote/.test(normalized)) {
+  if (/price|pricing|cost|package|quote|how much/.test(normalized)) {
     return "pricing";
   }
 

@@ -22,7 +22,7 @@ This project uses [`next/font`](https://nextjs.org/docs/app/building-your-applic
 
 ## API and local PostgreSQL
 
-> **Development-only warning:** the API has no authentication or tenant isolation. The business-profile, catalogue, and knowledge-base endpoints expose and accept business data without access control. Do not expose this application publicly or use it with real customer or business data until authentication and tenant isolation are implemented.
+> **Development-only warning:** the API has no authentication or tenant isolation. The business-profile, catalogue, knowledge-base, and reply-draft endpoints expose and accept business data without access control. Do not expose this application publicly or use it with real customer or business data until authentication and tenant isolation are implemented.
 
 The Express API is a separate development service. It binds to `127.0.0.1` and must not be exposed publicly. It has no authentication or WhatsApp integration. The browser dashboard is a separate Next.js app; it proxies `/api/*` requests to `API_ORIGIN`, which defaults to `http://127.0.0.1:4000`.
 
@@ -44,7 +44,7 @@ npm run db:migrate
 npm run db:seed
 ```
 
-The migrations create the `leads` table plus the business-profile, catalogue, and knowledge-base tables. Migration `003_limit_catalogue_price.sql` adds the safe-integer price constraint without changing existing leads. Migration `004_add_profile_phone_country_currency.sql` adds nullable profile phone-country and currency columns without defaults or backfills, so existing profiles remain unconfigured until the owner saves a choice. Running migrations again is a no-op; existing data is preserved. The seed is idempotent: running `npm run db:seed` again does not create duplicates. It uses fixed UUIDs and `ON CONFLICT DO NOTHING`, so existing records are not overwritten.
+The migrations create the `leads` table plus the business-profile, catalogue, and knowledge-base tables. Migration `003_limit_catalogue_price.sql` adds the safe-integer price constraint without changing existing leads. Migration `004_add_profile_phone_country_currency.sql` adds nullable profile phone-country and currency columns without defaults or backfills, so existing profiles remain unconfigured until the owner saves a choice. Migration `005_create_reply_drafts.sql` adds the `reply_drafts` table for saved drafts and their server-generated business-fact snapshots; it does not alter existing leads or business records. Running migrations again is a no-op; existing data is preserved. The seed is idempotent: running `npm run db:seed` again does not create duplicates. It uses fixed UUIDs and `ON CONFLICT DO NOTHING`, so existing records are not overwritten.
 
 Environment variables are loaded by Node.js `--env-file-if-exists=.env` in the API scripts. Values already set in the environment take precedence, and no dotenv dependency is needed. The API validates `DATABASE_URL`, `PORT`, and `NODE_ENV` at startup.
 
@@ -90,7 +90,7 @@ docker compose exec db createdb -U replypilot replypilot_test
 
 Run this only once; skip it if the database already exists.
 
-The test suite runs migrations against `TEST_DATABASE_URL` and truncates its `leads`, `business_profiles`, `catalogue_entries`, and `knowledge_entries` tables before each test. It fails with a clear error if `TEST_DATABASE_URL` is missing, points at the same database as `DATABASE_URL`, or points at a maintenance database. Tests are never silently skipped.
+The test suite runs migrations against `TEST_DATABASE_URL` and truncates its `reply_drafts`, `leads`, `business_profiles`, `catalogue_entries`, and `knowledge_entries` tables before each test. It fails with a clear error if `TEST_DATABASE_URL` is missing, points at the same database as `DATABASE_URL`, or points at a maintenance database. Tests are never silently skipped.
 
 ### Endpoints
 
@@ -100,7 +100,10 @@ The test suite runs migrations against `TEST_DATABASE_URL` and truncates its `le
 | `GET` | `/api/leads` | `200 {"leads":[...]}` ordered newest first. |
 | `POST` | `/api/leads` | Accepts `name`, `service`, and `lastMessage`; optional `channel`, `status`, and `nextFollowUpAt`. Returns `201 {"lead":{...}}`. Defaults: `Manual`, `New`. |
 | `PATCH` | `/api/leads/:id` | Accepts `{ "status": "New" \| "Contacted" \| "Quoted" \| "Booked" }`. Returns the updated lead, `400` for malformed input, or `404` for an unknown valid UUID. |
-| `POST` | `/api/leads/:id/draft-reply` | Returns a non-persistent mock demonstration analysis and suggested reply for an existing lead. Returns `400` for a malformed ID or `404` for an unknown valid UUID. |
+| `POST` | `/api/leads/:id/draft-reply` | Returns a non-persistent mock demonstration analysis and suggested reply for an existing lead. Kept for compatibility; the response omits the saved-draft fields and sources. Returns `400` for a malformed ID or `404` for an unknown valid UUID. |
+| `POST` | `/api/leads/:id/reply-drafts` | Generates and saves a mock draft with a server-generated business-fact snapshot. Returns `201 {"draft":{...}}`. Optional body `{"draftId":"..."}` regenerates that saved draft in place and returns `200`; it must belong to the lead. |
+| `GET` | `/api/leads/:id/reply-drafts` | `200 {"drafts":[...]}` for that lead, newest first. Returns `404` for an unknown lead. |
+| `PATCH` | `/api/leads/:leadId/reply-drafts/:draftId` | Accepts `{"draftReply":"..."}` to save edited text, or `{"status":"approved"\|"draft"}` to change review status. Text edits return the draft to `draft`; approving records `approvedAt`. Returns `200 {"draft":{...}}`, `400`, or `404`. |
 | `GET` | `/api/business/profile` | `200 {"profile":{...}}`, or `200 {"profile":null}` when no profile has been created. |
 | `POST` | `/api/business/profile` | Creates the single development business profile. Returns `201 {"profile":{...}}`, `400` for invalid data, or `409` if a profile already exists. |
 | `PATCH` | `/api/business/profile` | Replaces the profile's editable fields using the same body shape as creation. Returns the updated profile, `400`, or `404` when no profile exists. |
@@ -240,28 +243,64 @@ Content-Type: application/json
 
 `entryType` is `faq` or `policy`. Answers are approved business text and are limited to 4,000 characters. Deactivating an entry keeps it for review but removes it from future reply context. Editing an inactive entry with `isActive: true` reactivates it.
 
-### Reply draft demonstration
+### Reply drafts, provenance, and owner approval
 
-`POST /api/leads/:id/draft-reply` uses a local deterministic mock provider only. It does not call an AI service, require credentials, or store the draft. Its response is:
+Draft generation uses a local deterministic mock provider only. It does not call a live AI service, require credentials, or send a customer message. The legacy `POST /api/leads/:id/draft-reply` endpoint keeps its original non-persistent response contract and shares the same generation logic.
+
+The saved-draft endpoints persist reviewable drafts:
+
+- `POST /api/leads/:id/reply-drafts` generates and saves a new draft, or regenerates an existing one when the optional body is `{"draftId":"<uuid>"}`.
+- `GET /api/leads/:id/reply-drafts` lists that lead's saved drafts, newest first.
+- `PATCH /api/leads/:leadId/reply-drafts/:draftId` saves edited text or changes the review status.
+
+A saved draft response is wrapped as `{"draft":{...}}`:
 
 ```json
 {
-  "intent": "availability",
-  "summary": "...",
-  "missingInformation": ["Preferred date and time", "Event location"],
-  "draftReply": "...",
-  "provider": "mock",
-  "isDemo": true
+  "draft": {
+    "id": "d0000000-0000-4000-8000-000000000001",
+    "leadId": "10000000-0000-4000-8000-000000000001",
+    "intent": "pricing",
+    "summary": "Enquiry from Sarah Musa about Wedding photography: How much is wedding photography?",
+    "missingInformation": ["Event date", "Event location", "What the customer needs"],
+    "draftReply": "Hi Sarah Musa, ...",
+    "provider": "mock",
+    "isDemo": true,
+    "status": "draft",
+    "sources": [
+      {
+        "id": "c0000000-0000-4000-8000-000000000001",
+        "type": "catalogue",
+        "title": "Wedding photography",
+        "content": "Full-day wedding coverage.\nPrice: NGN 1,500.00\nAvailability: Weekends by arrangement.",
+        "reason": "Keyword match on \"wedding\" and \"photography\". Keyword matching only, not semantic retrieval; verify that this fact is relevant.",
+        "priceMinor": 150000,
+        "currencyCode": "NGN"
+      }
+    ],
+    "approvedAt": null,
+    "createdAt": "2026-03-01T09:00:00.000Z",
+    "updatedAt": "2026-03-01T09:00:00.000Z"
+  }
 }
 ```
 
-Allowed `intent` values are `availability`, `pricing`, `service-details`, `booking`, and `general-enquiry`. The dashboard labels all drafts as mock demonstration output; copying is manual and never sends a customer message.
+`source.type` is `catalogue`, `faq`, or `policy`. The `sources` snapshot is generated server-side from the active approved facts selected for that generation. Draft creation and regeneration requests do not accept source facts from the browser; any extra body keys are rejected. The provider reports which context facts it used, but the API replaces provider-supplied titles, text, prices, and reasons with canonical values from the server-side context. A provider cannot claim a fact from outside the selected context.
 
-#### How business facts are selected
+Draft status starts as `draft` with `approvedAt: null`. Approval with `{"status":"approved"}` records the timestamp. Saving edited text returns the draft to `draft` and clears approval. Regeneration updates the same draft in place, refreshes the business-fact snapshot, and resets approval because the content changed. `{"status":"draft"}` explicitly returns an approved draft to draft status. Editing and approving in the same request is rejected; save the edited text first, then approve it as a separate review action.
 
-Before drafting, `server/src/business/context.ts` loads the business profile, only **active** catalogue entries, and only **active** FAQ/policy entries. It builds the enquiry text from the lead's `service` and `lastMessage` and keeps entries whose name/description or title/answer share a word of at least three characters, after ignoring common stop words. The selection is deterministic keyword matching, **not semantic AI retrieval**: different wording can miss a relevant entry, and shared wording can produce a false match.
+Approval is a review status only. It is not a legal signature, does not prove that edited text is factually correct, and does not send a WhatsApp, email, Instagram, or other customer message. The owner must still copy and send any message manually.
 
-The mock provider includes matched approved catalogue facts and FAQ/policy answers in the suggested reply. It never invents a price, availability, opening hours, refund right, booking term, or other policy: if a matching entry has no price, it says the price needs confirmation; if no approved policy is supplied, it asks for the missing detail or adds it to `missingInformation`. This remains demonstration behavior, not a live AI integration.
+#### How business facts are selected and snapshotted
+
+Before drafting, `server/src/business/context.ts` loads the business profile, only **active** catalogue entries, and only **active** FAQ/policy entries. It builds enquiry text from the lead's `service` and `lastMessage` and keeps entries whose name/description or title/answer share a word of at least three characters, after ignoring common stop words. The selection is deterministic keyword matching, **not semantic AI retrieval**: different wording can miss a relevant entry, and shared wording can produce a false match. Reasons in `sources` describe that keyword match; they do not prove that a claim is supported.
+
+The mock provider includes matched approved catalogue facts and FAQ/policy answers in the suggested reply and reports only the facts actually appended to that reply. It never invents a price, availability, opening hours, refund right, booking term, or other policy: if a matching entry has no price, it says the price needs confirmation; if no approved policy is supplied, it asks for the missing detail or adds it to `missingInformation`.
+
+The saved `sources` snapshot preserves the original approved values even if a catalogue or knowledge entry is later edited or deactivated. It is evidence of what was used at generation time, not a claim that those facts are still current. The dashboard labels it accordingly. Snapshots do not contain API credentials or unnecessary customer information.
+
+The Draft Reply dialog shows the enquiry summary, missing information, **Business information used**, editable text, demo labeling, review status, save/regenerate/copy/approve actions, and previously saved drafts for the lead. Reopening it restores the latest saved text, snapshot, and status; if the lead has no saved draft, it generates and saves one. Editing warns that changes may no longer be supported by the original facts.
+
 
 
 ## Learn More

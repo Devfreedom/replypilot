@@ -47,6 +47,40 @@ type LeadPayload = { lead: Lead };
 type LeadsPayload = { leads: Lead[] };
 type ErrorPayload = { error: string; details?: unknown[] };
 
+type ReplyDraftSourcePayload = {
+  id: string;
+  type: "catalogue" | "faq" | "policy";
+  title: string;
+  content: string;
+  reason: string;
+  priceMinor: number | null;
+  currencyCode: string | null;
+};
+
+type SavedReplyDraftPayload = {
+  id: string;
+  leadId: string;
+  intent:
+    | "availability"
+    | "pricing"
+    | "service-details"
+    | "booking"
+    | "general-enquiry";
+  summary: string;
+  missingInformation: string[];
+  draftReply: string;
+  provider: "mock";
+  isDemo: true;
+  status: "draft" | "approved";
+  sources: ReplyDraftSourcePayload[];
+  approvedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+type ReplyDraftPayload = { draft: SavedReplyDraftPayload };
+type ReplyDraftsPayload = { drafts: SavedReplyDraftPayload[] };
+
 type BusinessProfile = {
   id: string;
   businessName: string;
@@ -163,6 +197,43 @@ function patchLead(id: string, body: unknown): Promise<Response> {
 
 function draftReply(id: string): Promise<Response> {
   return fetch(`${baseUrl}/api/leads/${id}/draft-reply`, { method: "POST" });
+}
+
+function createSavedDraft(
+  leadId: string,
+  body?: unknown,
+): Promise<Response> {
+  return jsonRequest(`/api/leads/${leadId}/reply-drafts`, "POST", body);
+}
+
+function listSavedDrafts(leadId: string): Promise<Response> {
+  return jsonRequest(`/api/leads/${leadId}/reply-drafts`, "GET");
+}
+
+function patchSavedDraft(
+  leadId: string,
+  draftId: string,
+  body: unknown,
+): Promise<Response> {
+  return jsonRequest(
+    `/api/leads/${leadId}/reply-drafts/${draftId}`,
+    "PATCH",
+    body,
+  );
+}
+
+async function createDraftLead(
+  overrides: Record<string, unknown> = {},
+): Promise<Lead> {
+  const response = await postLead({
+    name: "Sarah Musa",
+    service: "Wedding photography",
+    lastMessage: "How much is wedding photography, and do you travel?",
+    ...overrides,
+  });
+
+  assert.equal(response.status, 201);
+  return (await readJson<LeadPayload>(response)).lead;
 }
 
 function jsonRequest(
@@ -631,6 +702,11 @@ test("POST /api/leads/:id/draft-reply returns a mock draft without persisting it
     "SELECT count(*)::int AS count FROM leads",
   );
   assert.equal(stored.rows[0]?.count, 1);
+
+  const storedDrafts = await pool.query<{ count: number }>(
+    "SELECT count(*)::int AS count FROM reply_drafts",
+  );
+  assert.equal(storedDrafts.rows[0]?.count, 0);
 });
 
 test("POST /api/leads/:id/draft-reply returns 404 for an unknown lead", async () => {
@@ -1580,9 +1656,11 @@ test("mock provider uses approved catalogue prices and FAQ answers", async () =>
   const lead = makeLead({
     lastMessage: "How much is wedding photography, and do you travel?",
   });
+  const catalogue = makeCatalogueEntry({ priceMinor: 150_000 });
+  const knowledge = makeKnowledgeEntry();
   const context = makeContext({
-    catalogue: [makeCatalogueEntry({ priceMinor: 150_000 })],
-    knowledge: [makeKnowledgeEntry()],
+    catalogue: [catalogue],
+    knowledge: [knowledge],
   });
 
   const draft = await provider.draftReply(lead, context);
@@ -1591,6 +1669,13 @@ test("mock provider uses approved catalogue prices and FAQ answers", async () =>
   assert.equal(draft.isDemo, true);
   assert.match(draft.draftReply, /NGN 1,500\.00/);
   assert.match(draft.draftReply, /Travel within the city is included\./);
+  assert.deepEqual(
+    draft.sources.map((source) => [source.type, source.id]),
+    [
+      ["catalogue", catalogue.id],
+      ["faq", knowledge.id],
+    ],
+  );
   assert.deepEqual(await provider.draftReply(lead, context), draft);
 });
 
@@ -1689,6 +1774,10 @@ test("mock provider does not truncate an overlong approved answer", async () => 
 
   assert.match(draft.draftReply, /full approved text needs confirmation/i);
   assert.doesNotMatch(draft.draftReply, /a{700}/);
+  assert.equal(
+    draft.sources[0]?.content,
+    `Refund details: ${"a".repeat(800)}`,
+  );
 });
 
 test("draft-reply uses active approved context and does not persist drafts", async () => {
@@ -1728,18 +1817,633 @@ test("draft-reply uses active approved context and does not persist drafts", asy
   assert.equal(storedLeads.rows[0]?.count, 1);
 });
 
-test("re-running migrations preserves existing lead data", async () => {
-  const created = await readJson<LeadPayload>(
-    await postLead({
-      name: "Migration Survivor",
-      service: "Portrait photography",
-      lastMessage: "Please keep my enquiry.",
-    }),
+test("saved reply drafts include only active relevant facts and a server snapshot", async () => {
+  const fixture = await createBusinessFixture();
+  const lead = await createDraftLead();
+  const response = await createSavedDraft(lead.id);
+
+  assert.equal(response.status, 201);
+  const draft = (await readJson<ReplyDraftPayload>(response)).draft;
+
+  assert.equal(draft.leadId, lead.id);
+  assert.equal(draft.intent, "pricing");
+  assert.equal(draft.status, "draft");
+  assert.equal(draft.approvedAt, null);
+  assert.equal(draft.provider, "mock");
+  assert.equal(draft.isDemo, true);
+  assert.match(draft.draftReply, /NGN 1,500\.00/);
+  assert.match(draft.draftReply, /Travel within the city is included\./);
+  assert.doesNotMatch(draft.draftReply, /99,900\.00/);
+  assert.doesNotMatch(draft.draftReply, /14 days before the event/);
+  assert.ok(draft.missingInformation.length > 0);
+
+  assert.deepEqual(
+    draft.sources.map((source) => [source.type, source.id]),
+    [
+      ["catalogue", fixture.activeCatalogue.id],
+      ["faq", fixture.activeFaq.id],
+    ],
   );
+
+  const catalogueSource = draft.sources[0];
+  assert.equal(catalogueSource?.title, "Wedding photography");
+  assert.equal(catalogueSource?.priceMinor, 150_000);
+  assert.equal(catalogueSource?.currencyCode, "NGN");
+  assert.match(catalogueSource?.content ?? "", /NGN 1,500\.00/);
+  assert.match(catalogueSource?.reason ?? "", /keyword match/i);
+  assert.match(catalogueSource?.reason ?? "", /not semantic retrieval/i);
+
+  const faqSource = draft.sources[1];
+  assert.equal(faqSource?.title, "Travel for weddings");
+  assert.equal(
+    faqSource?.content,
+    "Travel within the city is included.",
+  );
+  assert.match(faqSource?.reason ?? "", /keyword match/i);
+
+  assert.ok(
+    !draft.sources.some(
+      (source) => source.id === fixture.inactiveCatalogue.id,
+    ),
+  );
+  assert.ok(
+    !draft.sources.some((source) => source.id === fixture.unrelatedFaq.id),
+  );
+  assert.ok(
+    !draft.sources.some((source) => source.id === fixture.inactivePolicy.id),
+  );
+
+  const stored = await pool.query<{
+    lead_id: string;
+    status: string;
+    approved_at: Date | null;
+    missing_information: unknown;
+    sources: unknown;
+    draft_reply: string;
+  }>(
+    `
+      SELECT lead_id, status, approved_at, missing_information, sources,
+             draft_reply
+      FROM reply_drafts
+    `,
+  );
+
+  assert.equal(stored.rows.length, 1);
+  assert.equal(stored.rows[0]?.lead_id, lead.id);
+  assert.equal(stored.rows[0]?.status, "draft");
+  assert.equal(stored.rows[0]?.approved_at, null);
+  assert.equal(stored.rows[0]?.draft_reply, draft.draftReply);
+  assert.deepEqual(
+    stored.rows[0]?.missing_information,
+    draft.missingInformation,
+  );
+  assert.deepEqual(stored.rows[0]?.sources, draft.sources);
+
+  const listed = await readJson<ReplyDraftsPayload>(
+    await listSavedDrafts(lead.id),
+  );
+  assert.equal(listed.drafts.length, 1);
+  assert.equal(listed.drafts[0]?.id, draft.id);
+});
+
+test("saved drafts do not report unrelated facts or invent business commitments", async () => {
+  await createBusinessFixture();
+  const lead = await createDraftLead({
+    name: "Tunde Okafor",
+    service: "Podcast editing",
+    lastMessage: "How much for audio cleanup?",
+  });
+  const response = await createSavedDraft(lead.id);
+
+  assert.equal(response.status, 201);
+  const draft = (await readJson<ReplyDraftPayload>(response)).draft;
+
+  assert.deepEqual(draft.sources, []);
+  assert.doesNotMatch(
+    draft.draftReply,
+    /NGN|USD|99,900|14 days|Travel within the city|free/i,
+  );
+  assert.ok(draft.missingInformation.length > 0);
+  assert.ok(
+    draft.missingInformation.some((item) => /approved price/i.test(item)),
+  );
+});
+
+test("browser-supplied source snapshots are rejected", async () => {
+  const fixture = await createBusinessFixture();
+  const lead = await createDraftLead();
+  const response = await createSavedDraft(lead.id, {
+    sources: [
+      {
+        id: fixture.activeCatalogue.id,
+        type: "catalogue",
+        title: "Free wedding photography",
+        content: "Everything is free.",
+        reason: "Browser supplied",
+        priceMinor: 0,
+        currencyCode: "NGN",
+      },
+    ],
+  });
+
+  assert.equal(response.status, 400);
+  const payload = await readJson<ErrorPayload>(response);
+  assert.equal(payload.error, "Invalid request");
+
+  const stored = await pool.query<{ count: number }>(
+    "SELECT count(*)::int AS count FROM reply_drafts",
+  );
+  assert.equal(stored.rows[0]?.count, 0);
+});
+
+test("saved drafts are isolated by lead and cannot be changed through another lead", async () => {
+  const firstLead = await createDraftLead({
+    name: "Sarah Musa",
+    lastMessage: "Are you available for a wedding in Jos?",
+  });
+  const secondLead = await createDraftLead({
+    name: "Daniel James",
+    lastMessage: "Please share your decoration packages.",
+  });
+
+  const firstDraft = (
+    await readJson<ReplyDraftPayload>(await createSavedDraft(firstLead.id))
+  ).draft;
+  const secondDraft = (
+    await readJson<ReplyDraftPayload>(await createSavedDraft(secondLead.id))
+  ).draft;
+
+  const firstList = await readJson<ReplyDraftsPayload>(
+    await listSavedDrafts(firstLead.id),
+  );
+  const secondList = await readJson<ReplyDraftsPayload>(
+    await listSavedDrafts(secondLead.id),
+  );
+
+  assert.deepEqual(
+    firstList.drafts.map((draft) => draft.id),
+    [firstDraft.id],
+  );
+  assert.deepEqual(
+    secondList.drafts.map((draft) => draft.id),
+    [secondDraft.id],
+  );
+
+  const unrelatedPatch = await patchSavedDraft(
+    secondLead.id,
+    firstDraft.id,
+    { draftReply: "This must not be saved." },
+  );
+  assert.equal(unrelatedPatch.status, 404);
+  assert.deepEqual(await readJson(unrelatedPatch), {
+    error: "Reply draft not found",
+  });
+
+  const unrelatedRegenerate = await createSavedDraft(secondLead.id, {
+    draftId: firstDraft.id,
+  });
+  assert.equal(unrelatedRegenerate.status, 404);
+
+  const unchanged = await readJson<ReplyDraftsPayload>(
+    await listSavedDrafts(firstLead.id),
+  );
+  assert.equal(unchanged.drafts[0]?.draftReply, firstDraft.draftReply);
+
+  const stored = await pool.query<{ count: number }>(
+    "SELECT count(*)::int AS count FROM reply_drafts",
+  );
+  assert.equal(stored.rows[0]?.count, 2);
+});
+
+test("approval and editing transitions persist safely", async () => {
+  const lead = await createDraftLead();
+  const created = (
+    await readJson<ReplyDraftPayload>(await createSavedDraft(lead.id))
+  ).draft;
+
+  assert.equal(created.status, "draft");
+  assert.equal(created.approvedAt, null);
+
+  const approveResponse = await patchSavedDraft(lead.id, created.id, {
+    status: "approved",
+  });
+  assert.equal(approveResponse.status, 200);
+  const approved = (
+    await readJson<ReplyDraftPayload>(approveResponse)
+  ).draft;
+
+  assert.equal(approved.status, "approved");
+  assert.ok(approved.approvedAt);
+  assert.ok(Number.isFinite(Date.parse(approved.approvedAt ?? "")));
+
+  const editAndApprove = await patchSavedDraft(lead.id, created.id, {
+    draftReply: "I have edited this reply.",
+    status: "approved",
+  });
+  assert.equal(editAndApprove.status, 400);
+  const invalid = await readJson<ErrorPayload>(editAndApprove);
+  assert.equal(invalid.error, "Invalid request");
+
+  const stillApproved = await readJson<ReplyDraftsPayload>(
+    await listSavedDrafts(lead.id),
+  );
+  assert.equal(stillApproved.drafts[0]?.status, "approved");
+  assert.equal(stillApproved.drafts[0]?.draftReply, created.draftReply);
+
+  const editResponse = await patchSavedDraft(lead.id, created.id, {
+    draftReply: "Thanks for your enquiry. I will confirm the details.",
+  });
+  assert.equal(editResponse.status, 200);
+  const edited = (await readJson<ReplyDraftPayload>(editResponse)).draft;
+
+  assert.equal(edited.status, "draft");
+  assert.equal(edited.approvedAt, null);
+  assert.equal(
+    edited.draftReply,
+    "Thanks for your enquiry. I will confirm the details.",
+  );
+
+  const reapproveResponse = await patchSavedDraft(lead.id, created.id, {
+    status: "approved",
+  });
+  assert.equal(reapproveResponse.status, 200);
+
+  const returnResponse = await patchSavedDraft(lead.id, created.id, {
+    status: "draft",
+  });
+  assert.equal(returnResponse.status, 200);
+  const returned = (await readJson<ReplyDraftPayload>(returnResponse)).draft;
+
+  assert.equal(returned.status, "draft");
+  assert.equal(returned.approvedAt, null);
+
+  const refetched = await readJson<ReplyDraftsPayload>(
+    await listSavedDrafts(lead.id),
+  );
+  assert.equal(refetched.drafts[0]?.status, "draft");
+  assert.equal(refetched.drafts[0]?.draftReply, edited.draftReply);
+});
+
+test("regeneration updates the same draft, refreshes facts, and resets approval", async () => {
+  const fixture = await createBusinessFixture();
+  const lead = await createDraftLead();
+  const created = (
+    await readJson<ReplyDraftPayload>(await createSavedDraft(lead.id))
+  ).draft;
+
+  const approved = await patchSavedDraft(lead.id, created.id, {
+    status: "approved",
+  });
+  assert.equal(approved.status, 200);
+
+  const catalogueUpdate = await jsonRequest(
+    `/api/business/catalogue/${fixture.activeCatalogue.id}`,
+    "PATCH",
+    {
+      name: "Wedding photography",
+      description: "Full-day wedding coverage with a second photographer.",
+      priceMinor: 200_000,
+      currencyCode: "NGN",
+      availabilityNotes: "Weekends by arrangement.",
+      isActive: true,
+    },
+  );
+  assert.equal(catalogueUpdate.status, 200);
+
+  const knowledgeUpdate = await jsonRequest(
+    `/api/business/knowledge/${fixture.activeFaq.id}`,
+    "PATCH",
+    {
+      title: "Travel for weddings",
+      answer: "Travel within 50km is included.",
+      entryType: "faq",
+      isActive: true,
+    },
+  );
+  assert.equal(knowledgeUpdate.status, 200);
+
+  const regenerateResponse = await createSavedDraft(lead.id, {
+    draftId: created.id,
+  });
+  assert.equal(regenerateResponse.status, 200);
+  const regenerated = (
+    await readJson<ReplyDraftPayload>(regenerateResponse)
+  ).draft;
+
+  assert.equal(regenerated.id, created.id);
+  assert.equal(regenerated.createdAt, created.createdAt);
+  assert.equal(regenerated.status, "draft");
+  assert.equal(regenerated.approvedAt, null);
+  assert.match(regenerated.draftReply, /NGN 2,000\.00/);
+  assert.match(regenerated.draftReply, /Travel within 50km is included\./);
+
+  const catalogueSource = regenerated.sources.find(
+    (source) => source.type === "catalogue",
+  );
+  assert.equal(catalogueSource?.priceMinor, 200_000);
+  assert.match(catalogueSource?.content ?? "", /NGN 2,000\.00/);
+  assert.match(
+    catalogueSource?.content ?? "",
+    /second photographer/,
+  );
+
+  const faqSource = regenerated.sources.find(
+    (source) => source.type === "faq",
+  );
+  assert.equal(faqSource?.content, "Travel within 50km is included.");
+
+  const stored = await pool.query<{ count: number }>(
+    "SELECT count(*)::int AS count FROM reply_drafts",
+  );
+  assert.equal(stored.rows[0]?.count, 1);
+});
+
+test("saved source snapshots survive later business edits and deactivation", async () => {
+  const fixture = await createBusinessFixture();
+  const lead = await createDraftLead();
+  const created = (
+    await readJson<ReplyDraftPayload>(await createSavedDraft(lead.id))
+  ).draft;
+  const originalSources = JSON.parse(
+    JSON.stringify(created.sources),
+  ) as ReplyDraftSourcePayload[];
+
+  const catalogueUpdate = await jsonRequest(
+    `/api/business/catalogue/${fixture.activeCatalogue.id}`,
+    "PATCH",
+    {
+      name: "Wedding cinematography",
+      description: "A completely rewritten description.",
+      priceMinor: 999_000,
+      currencyCode: "NGN",
+      availabilityNotes: "Limited dates.",
+      isActive: true,
+    },
+  );
+  assert.equal(catalogueUpdate.status, 200);
+
+  const knowledgeDelete = await jsonRequest(
+    `/api/business/knowledge/${fixture.activeFaq.id}`,
+    "DELETE",
+  );
+  assert.equal(knowledgeDelete.status, 200);
+
+  const refetched = await readJson<ReplyDraftsPayload>(
+    await listSavedDrafts(lead.id),
+  );
+  const draft = refetched.drafts[0];
+
+  assert.equal(draft?.id, created.id);
+  assert.equal(draft?.draftReply, created.draftReply);
+  assert.equal(draft?.createdAt, created.createdAt);
+  assert.deepEqual(draft?.sources, originalSources);
+  assert.match(
+    draft?.sources[0]?.content ?? "",
+    /NGN 1,500\.00/,
+  );
+  assert.doesNotMatch(
+    draft?.sources[0]?.content ?? "",
+    /999,000|completely rewritten/i,
+  );
+  assert.equal(
+    draft?.sources[1]?.content,
+    "Travel within the city is included.",
+  );
+});
+
+test("reply draft routes return safe errors for invalid and missing records", async () => {
+  const invalidLead = await createSavedDraft("not-a-uuid");
+  assert.equal(invalidLead.status, 400);
+  assert.deepEqual((await readJson<ErrorPayload>(invalidLead)).details?.[0], {
+    field: "id",
+    message: "Invalid UUID",
+  });
+
+  const unknownLeadCreate = await createSavedDraft(randomUUID());
+  assert.equal(unknownLeadCreate.status, 404);
+  assert.deepEqual(await readJson(unknownLeadCreate), {
+    error: "Lead not found",
+  });
+
+  const unknownLeadList = await listSavedDrafts(randomUUID());
+  assert.equal(unknownLeadList.status, 404);
+  assert.deepEqual(await readJson(unknownLeadList), {
+    error: "Lead not found",
+  });
+
+  const lead = await createDraftLead();
+  const created = (
+    await readJson<ReplyDraftPayload>(await createSavedDraft(lead.id))
+  ).draft;
+
+  const invalidDraftId = await patchSavedDraft(
+    lead.id,
+    "not-a-uuid",
+    { status: "approved" },
+  );
+  assert.equal(invalidDraftId.status, 400);
+  const invalidDraftPayload = await readJson<ErrorPayload>(invalidDraftId);
+  assert.ok(
+    invalidDraftPayload.details?.some(
+      (detail) =>
+        typeof detail === "object" &&
+        detail !== null &&
+        "field" in detail &&
+        detail.field === "draftId",
+    ),
+  );
+
+  const unknownDraft = await patchSavedDraft(lead.id, randomUUID(), {
+    status: "approved",
+  });
+  assert.equal(unknownDraft.status, 404);
+  assert.deepEqual(await readJson(unknownDraft), {
+    error: "Reply draft not found",
+  });
+
+  const emptyPatch = await patchSavedDraft(lead.id, created.id, {});
+  assert.equal(emptyPatch.status, 400);
+
+  const invalidStatus = await patchSavedDraft(lead.id, created.id, {
+    status: "sent",
+  });
+  assert.equal(invalidStatus.status, 400);
+
+  const invalidRegeneration = await createSavedDraft(lead.id, {
+    draftId: randomUUID(),
+  });
+  assert.equal(invalidRegeneration.status, 404);
+  assert.deepEqual(await readJson(invalidRegeneration), {
+    error: "Reply draft not found",
+  });
+
+  const wrongLead = await patchSavedDraft(randomUUID(), created.id, {
+    status: "approved",
+  });
+  assert.equal(wrongLead.status, 404);
+  assert.deepEqual(await readJson(wrongLead), { error: "Lead not found" });
+
+  const stored = await pool.query<{ count: number }>(
+    "SELECT count(*)::int AS count FROM reply_drafts",
+  );
+  assert.equal(stored.rows[0]?.count, 1);
+});
+
+test("saved draft generation handles provider failures and ungrounded sources", async () => {
+  const fixture = await createBusinessFixture();
+  const lead = await createDraftLead();
+
+  const failingProvider: ReplyDraftProvider = {
+    async draftReply() {
+      throw new Error("Provider unavailable");
+    },
+  };
+
+  const failingServer = await startServer(pool, failingProvider);
+
+  try {
+    const response = await fetch(
+      `${failingServer.baseUrl}/api/leads/${lead.id}/reply-drafts`,
+      { method: "POST" },
+    );
+    assert.equal(response.status, 500);
+    assert.deepEqual(await readJson(response), {
+      error: "Internal server error",
+    });
+  } finally {
+    await stopServer(failingServer.server);
+  }
+
+  const ungroundedSource = {
+    id: randomUUID(),
+    type: "catalogue",
+    title: "Invented package",
+    content: "Everything is free.",
+    reason: "Invented source",
+    priceMinor: 0,
+    currencyCode: "NGN",
+  };
+  const ungroundedProvider: ReplyDraftProvider = {
+    async draftReply() {
+      return {
+        intent: "pricing",
+        summary: "A pricing enquiry.",
+        missingInformation: [],
+        draftReply: "A safe reply.",
+        provider: "mock",
+        isDemo: true,
+        sources: [ungroundedSource],
+      };
+    },
+  };
+
+  const ungroundedServer = await startServer(pool, ungroundedProvider);
+
+  try {
+    const response = await fetch(
+      `${ungroundedServer.baseUrl}/api/leads/${lead.id}/reply-drafts`,
+      { method: "POST" },
+    );
+    assert.equal(response.status, 500);
+    assert.deepEqual(await readJson(response), {
+      error: "Internal server error",
+    });
+  } finally {
+    await stopServer(ungroundedServer.server);
+  }
+
+  const stored = await pool.query<{ count: number }>(
+    "SELECT count(*)::int AS count FROM reply_drafts",
+  );
+  assert.equal(stored.rows[0]?.count, 0);
+
+  const misleadingProvider: ReplyDraftProvider = {
+    async draftReply() {
+      return {
+        intent: "pricing",
+        summary: "A pricing enquiry.",
+        missingInformation: [],
+        draftReply: "A safe reply.",
+        provider: "mock",
+        isDemo: true,
+        sources: [
+          {
+            id: fixture.activeCatalogue.id,
+            type: "catalogue",
+            title: "Free wedding photography",
+            content: "Everything is free.",
+            reason: "Fabricated content",
+            priceMinor: 0,
+            currencyCode: "NGN",
+          },
+        ],
+      };
+    },
+  };
+
+  const misleadingServer = await startServer(pool, misleadingProvider);
+
+  try {
+    const response = await fetch(
+      `${misleadingServer.baseUrl}/api/leads/${lead.id}/reply-drafts`,
+      { method: "POST" },
+    );
+    assert.equal(response.status, 201);
+    const draft = (await readJson<ReplyDraftPayload>(response)).draft;
+    const source = draft.sources[0];
+
+    assert.equal(source?.id, fixture.activeCatalogue.id);
+    assert.equal(source?.title, "Wedding photography");
+    assert.equal(source?.priceMinor, 150_000);
+    assert.match(source?.content ?? "", /NGN 1,500\.00/);
+    assert.doesNotMatch(source?.content ?? "", /Everything is free/i);
+    assert.match(source?.reason ?? "", /keyword match/i);
+  } finally {
+    await stopServer(misleadingServer.server);
+  }
+});
+
+test("re-running migrations preserves existing leads, business data, and reply drafts", async () => {
+  await createBusinessFixture();
+  const lead = await createDraftLead();
+  const draft = (
+    await readJson<ReplyDraftPayload>(await createSavedDraft(lead.id))
+  ).draft;
 
   const applied = await runMigrations(pool);
   assert.deepEqual(applied, []);
 
+  const migration = await pool.query<{ version: string }>(
+    "SELECT version FROM schema_migrations WHERE version = $1",
+    ["005_create_reply_drafts.sql"],
+  );
+  assert.equal(migration.rows.length, 1);
+
   const list = await readJson<LeadsPayload>(await fetch(`${baseUrl}/api/leads`));
-  assert.ok(list.leads.some((lead) => lead.id === created.lead.id));
+  assert.ok(list.leads.some((item) => item.id === lead.id));
+
+  const drafts = await readJson<ReplyDraftsPayload>(
+    await listSavedDrafts(lead.id),
+  );
+  assert.equal(drafts.drafts[0]?.id, draft.id);
+  assert.deepEqual(drafts.drafts[0]?.sources, draft.sources);
+
+  const counts = await pool.query<{
+    leads: number;
+    reply_drafts: number;
+    catalogue_entries: number;
+    knowledge_entries: number;
+  }>(`
+    SELECT
+      (SELECT count(*) FROM leads)::int AS leads,
+      (SELECT count(*) FROM reply_drafts)::int AS reply_drafts,
+      (SELECT count(*) FROM catalogue_entries)::int AS catalogue_entries,
+      (SELECT count(*) FROM knowledge_entries)::int AS knowledge_entries
+  `);
+  assert.deepEqual(counts.rows[0], {
+    leads: 1,
+    reply_drafts: 1,
+    catalogue_entries: 2,
+    knowledge_entries: 3,
+  });
 });

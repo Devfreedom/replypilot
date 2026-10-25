@@ -40,6 +40,3 @@ export const updateReplyDraftSchema = z
       });
     }
   });
-
-export type CreateReplyDraftInput = z.infer<typeof createReplyDraftSchema>;
-export type UpdateReplyDraftInput = z.infer<typeof updateReplyDraftSchema>;

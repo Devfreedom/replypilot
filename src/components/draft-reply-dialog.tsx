@@ -610,6 +610,7 @@ export function DraftReplyDialog({
               }}
               rows={8}
               maxLength={2000}
+              aria-invalid={validationError ? true : undefined}
               aria-describedby="draft-reply-edit-warning"
               className="mt-2 w-full resize-y rounded-xl border border-slate-200 bg-white px-3.5 py-3 text-sm leading-6 text-slate-700 outline-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
             />
@@ -693,9 +694,10 @@ export function DraftReplyDialog({
             )}
           </div>
 
-          {hasUnsavedChanges && selectedDraft.status !== "approved" ? (
+          {hasUnsavedChanges ? (
             <p className="-mt-3 text-right text-xs text-slate-500">
-              Save your edits before approving them.
+              Save your edits before approving them. Saving returns the draft
+              to draft status for a separate review.
             </p>
           ) : null}
 

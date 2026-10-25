@@ -1,5 +1,4 @@
 import type { ReplyDraft } from "../ai/reply-draft.js";
-import type { ReplyDraftSource } from "../business/provenance.js";
 
 export const REPLY_DRAFT_REVIEW_STATUSES = ["draft", "approved"] as const;
 export type ReplyDraftReviewStatus =
@@ -31,5 +30,3 @@ export type ReplyDraftRow = Readonly<{
   created_at: Date;
   updated_at: Date;
 }>;
-
-export type ReplyDraftSourceRow = ReplyDraftSource;
