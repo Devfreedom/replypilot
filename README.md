@@ -22,7 +22,9 @@ This project uses [`next/font`](https://nextjs.org/docs/app/building-your-applic
 
 ## API and local PostgreSQL
 
-The Express API is a separate development service. It binds to `127.0.0.1` and must not be exposed publicly. It has no authentication, AI, or WhatsApp integration. The Next.js app proxies browser requests from `/api/*` to `API_ORIGIN`, which defaults to `http://127.0.0.1:4000`.
+> **Development-only warning:** the API has no authentication or tenant isolation. The business-profile, catalogue, knowledge-base, and reply-draft endpoints expose and accept business data without access control. Do not expose this application publicly or use it with real customer or business data until authentication and tenant isolation are implemented.
+
+The Express API is a separate development service. It binds to `127.0.0.1` and must not be exposed publicly. It has no authentication or WhatsApp integration. The browser dashboard is a separate Next.js app; it proxies `/api/*` requests to `API_ORIGIN`, which defaults to `http://127.0.0.1:4000`.
 
 ### Start the database
 
@@ -42,7 +44,7 @@ npm run db:migrate
 npm run db:seed
 ```
 
-The seed is idempotent: running `npm run db:seed` again does not create duplicates. It uses fixed UUIDs and `ON CONFLICT DO NOTHING`, so existing records are not overwritten.
+The migrations create the `leads` table plus the business-profile, catalogue, and knowledge-base tables. Migration `003_limit_catalogue_price.sql` adds the safe-integer price constraint without changing existing leads. Migration `004_add_profile_phone_country_currency.sql` adds nullable profile phone-country and currency columns without defaults or backfills, so existing profiles remain unconfigured until the owner saves a choice. Migration `005_create_reply_drafts.sql` adds the `reply_drafts` table for saved drafts and their server-generated business-fact snapshots; it does not alter existing leads or business records. Running migrations again is a no-op; existing data is preserved. The seed is idempotent: running `npm run db:seed` again does not create duplicates. It uses fixed UUIDs and `ON CONFLICT DO NOTHING`, so existing records are not overwritten.
 
 Environment variables are loaded by Node.js `--env-file-if-exists=.env` in the API scripts. Values already set in the environment take precedence, and no dotenv dependency is needed. The API validates `DATABASE_URL`, `PORT`, and `NODE_ENV` at startup.
 
@@ -88,7 +90,7 @@ docker compose exec db createdb -U replypilot replypilot_test
 
 Run this only once; skip it if the database already exists.
 
-The test suite runs migrations against `TEST_DATABASE_URL` and truncates only its `leads` table between tests. It fails with a clear error if `TEST_DATABASE_URL` is missing, points at the same database as `DATABASE_URL`, or points at a maintenance database. Tests are never silently skipped.
+The test suite runs migrations against `TEST_DATABASE_URL` and truncates its `reply_drafts`, `leads`, `business_profiles`, `catalogue_entries`, and `knowledge_entries` tables before each test. It fails with a clear error if `TEST_DATABASE_URL` is missing, points at the same database as `DATABASE_URL`, or points at a maintenance database. Tests are never silently skipped.
 
 ### Endpoints
 
@@ -98,28 +100,208 @@ The test suite runs migrations against `TEST_DATABASE_URL` and truncates only it
 | `GET` | `/api/leads` | `200 {"leads":[...]}` ordered newest first. |
 | `POST` | `/api/leads` | Accepts `name`, `service`, and `lastMessage`; optional `channel`, `status`, and `nextFollowUpAt`. Returns `201 {"lead":{...}}`. Defaults: `Manual`, `New`. |
 | `PATCH` | `/api/leads/:id` | Accepts `{ "status": "New" \| "Contacted" \| "Quoted" \| "Booked" }`. Returns the updated lead, `400` for malformed input, or `404` for an unknown valid UUID. |
-| `POST` | `/api/leads/:id/draft-reply` | Returns a non-persistent mock demonstration analysis and suggested reply for an existing lead. Returns `400` for a malformed ID or `404` for an unknown valid UUID. |
+| `POST` | `/api/leads/:id/draft-reply` | Returns a non-persistent mock demonstration analysis and suggested reply for an existing lead. Kept for compatibility; the response omits the saved-draft fields and sources. Returns `400` for a malformed ID or `404` for an unknown valid UUID. |
+| `POST` | `/api/leads/:id/reply-drafts` | Generates and saves a mock draft with a server-generated business-fact snapshot. Returns `201 {"draft":{...}}`. Optional body `{"draftId":"..."}` regenerates that saved draft in place and returns `200`; it must belong to the lead. |
+| `GET` | `/api/leads/:id/reply-drafts` | `200 {"drafts":[...]}` for that lead, newest first. Returns `404` for an unknown lead. |
+| `PATCH` | `/api/leads/:leadId/reply-drafts/:draftId` | Accepts `{"draftReply":"..."}` to save edited text, or `{"status":"approved"\|"draft"}` to change review status. Text edits return the draft to `draft`; approving records `approvedAt`. Returns `200 {"draft":{...}}`, `400`, or `404`. |
+| `GET` | `/api/business/profile` | `200 {"profile":{...}}`, or `200 {"profile":null}` when no profile has been created. |
+| `POST` | `/api/business/profile` | Creates the single development business profile. Returns `201 {"profile":{...}}`, `400` for invalid data, or `409` if a profile already exists. |
+| `PATCH` | `/api/business/profile` | Replaces the profile's editable fields using the same body shape as creation. Returns the updated profile, `400`, or `404` when no profile exists. |
+| `GET` | `/api/business/catalogue` | `200 {"entries":[...]}` including active and inactive entries, newest first. |
+| `POST` | `/api/business/catalogue` | Creates a catalogue entry. Returns `201 {"entry":{...}}` or `400`. |
+| `PATCH` | `/api/business/catalogue/:id` | Replaces the entry's editable fields. Returns the updated entry, `400`, or `404`. |
+| `DELETE` | `/api/business/catalogue/:id` | Deactivates the entry rather than deleting it. Returns `200 {"entry":{...}}` with `isActive:false`, or `404`. |
+| `GET` | `/api/business/knowledge` | `200 {"entries":[...]}` including active and inactive entries, newest first. |
+| `POST` | `/api/business/knowledge` | Creates an FAQ or policy entry. Returns `201 {"entry":{...}}` or `400`. |
+| `PATCH` | `/api/business/knowledge/:id` | Replaces the entry's editable fields. Returns the updated entry, `400`, or `404`. |
+| `DELETE` | `/api/business/knowledge/:id` | Deactivates the entry rather than deleting it. Returns `200 {"entry":{...}}` with `isActive:false`, or `404`. |
 
 Each lead response field is: `id`, `name`, `service`, `channel`, `status`, `lastMessage`, `nextFollowUpAt`, `createdAt`, and `updatedAt`. `nextFollowUpAt` is an ISO 8601 timestamp with an explicit offset or `null`.
 
-Database errors are not returned to clients. Validation responses contain field-level messages without echoing submitted values.
+Database errors are not returned to clients. Validation responses contain field-level messages without echoing submitted values. Malformed IDs and bodies return `400`.
 
-### Reply draft demonstration
+### Business profile and knowledge base
 
-`POST /api/leads/:id/draft-reply` uses a local deterministic mock provider only. It does not call an AI service, require credentials, or store the draft. Its response is:
+The `/settings` page in the dashboard manages one development business profile, its product/service catalogue, and its approved FAQs and policies. Every displayed action uses the API; no sample business details are inserted automatically.
+
+#### Business profile
+
+The profile stores `businessName`, `businessDescription`, optional `contactEmail`, `contactPhone`, and `contactPhoneCountry`, an optional `businessAddress`, an IANA `timezone` (default `Africa/Lagos`), `openingHours`, and an optional profile-level `currencyCode`. Create it with:
+
+```http
+POST /api/business/profile
+Content-Type: application/json
+```
 
 ```json
 {
-  "intent": "availability",
-  "summary": "...",
-  "missingInformation": ["Preferred date and time", "Event location"],
-  "draftReply": "...",
-  "provider": "mock",
-  "isDemo": true
+  "businessName": "Lagos Light Studio",
+  "businessDescription": "Wedding and portrait photography.",
+  "contactEmail": "hello@example.com",
+  "contactPhone": "+2348031234567",
+  "contactPhoneCountry": "NG",
+  "businessAddress": "12 Example Road, Lagos",
+  "timezone": "Africa/Lagos",
+  "openingHours": [
+    { "day": "monday", "opensAt": "09:00", "closesAt": "17:00" }
+  ],
+  "currencyCode": "NGN"
 }
 ```
 
-Allowed `intent` values are `availability`, `pricing`, `service-details`, `booking`, and `general-enquiry`. The dashboard labels all drafts as mock demonstration output; copying is manual and never sends a customer message.
+A successful response wraps the stored record:
+
+```json
+{
+  "profile": {
+    "id": "500291a5-edb5-4a27-b9f5-06e41b3fc2ee",
+    "businessName": "Lagos Light Studio",
+    "businessDescription": "Wedding and portrait photography.",
+    "contactEmail": "hello@example.com",
+    "contactPhone": "+2348031234567",
+    "contactPhoneCountry": "NG",
+    "businessAddress": "12 Example Road, Lagos",
+    "timezone": "Africa/Lagos",
+    "openingHours": [
+      { "day": "monday", "opensAt": "09:00", "closesAt": "17:00" }
+    ],
+    "currencyCode": "NGN",
+    "createdAt": "2026-01-01T08:00:00.000Z",
+    "updatedAt": "2026-01-01T08:00:00.000Z"
+  }
+}
+```
+
+`openingHours` is a JSON array in PostgreSQL. Each entry has a lowercase `day` (`monday` through `sunday`), `opensAt`, and `closesAt` in 24-hour `HH:MM` format. Each weekday may appear only once, closing time must be after opening time, and a maximum of seven entries is allowed. The current limitation is **one same-day interval per weekday**: overnight spans and split shifts are not represented. An empty array means no published hours.
+
+The `/settings` page edits this same array through a Monday–Sunday visual schedule with Open/Closed toggles and native time inputs. Closed days are omitted from the saved payload; their times remain in the form only while the current edit session is open. A new profile starts with every day closed and no assumed hours. The optional **Copy Monday to weekdays** action updates Tuesday through Friday locally and does not save by itself. Duplicate saved days are shown explicitly and preserved until you choose to replace them; malformed or overnight saved times are flagged for correction rather than silently replaced.
+
+The contact-phone control offers exactly 50 curated countries. Calling codes come from `libphonenumber-js` metadata, and the user enters only the national number; the dashboard parses and normalizes it before saving the E.164 value in `contactPhone`. The selected ISO alpha-2 code is stored separately in `contactPhoneCountry` so shared calling codes such as `+1` can be restored reliably. A blank phone remains valid. Existing international numbers are parsed when reliable; unreadable or mismatched saved values stay visible with a warning and must be confirmed or replaced before the profile can be saved. The API validates and normalizes phone numbers too, rejects invalid values, and rejects a phone-country code that does not match the number.
+
+The timezone field is a searchable, grouped combobox populated from `Intl.supportedValuesOf("timeZone")` plus `UTC`, with a small fallback list and any valid saved alias. Search matches region and city text. The dashboard does not infer a timezone from the device, locale, phone country, or estimated location; a new profile requires an explicit selection. The API still accepts the existing `Africa/Lagos` default when `timezone` is omitted for backward compatibility.
+
+The profile-level `currencyCode` is nullable. Migration `004` adds it without a default or backfill, so existing profiles show an honest **Not configured** state. The dashboard builds one selectable option per supported ISO 4217 code from the runtime currency list, with readable names and country search using `country-to-currency`; it does not guess a currency from locale, phone country, or location. Changing the business currency never rewrites existing catalogue prices or currencies. New catalogue entries start with the profile currency as their default; when the profile has no currency configured, the catalogue's existing `NGN` API fallback remains.
+
+Timezones must be valid IANA identifiers. Invalid timezones, invalid phone numbers, invalid phone countries, invalid currency codes, duplicate weekdays, malformed times, and closing times before opening times are rejected with `400`.
+
+#### Products and services
+
+```http
+POST /api/business/catalogue
+Content-Type: application/json
+```
+
+```json
+{
+  "name": "Wedding photography",
+  "description": "Full-day wedding coverage.",
+  "priceMinor": 150000,
+  "currencyCode": "NGN",
+  "availabilityNotes": "Weekends by arrangement.",
+  "isActive": true
+}
+```
+
+```json
+{
+  "entry": {
+    "id": "4a687f75-061f-4c30-aa66-ef4534a5c133",
+    "name": "Wedding photography",
+    "description": "Full-day wedding coverage.",
+    "priceMinor": 150000,
+    "currencyCode": "NGN",
+    "isActive": true,
+    "availabilityNotes": "Weekends by arrangement.",
+    "createdAt": "2026-01-01T08:00:00.000Z",
+    "updatedAt": "2026-01-01T08:00:00.000Z"
+  }
+}
+```
+
+Price rules:
+
+- `priceMinor` is an optional integer in minor currency units, stored as PostgreSQL `BIGINT`. It is never a floating-point value and no floating-point money arithmetic is used.
+- Because the API transports prices as JSON numbers, values must be safe integers. The accepted range is `0` through `9007199254740991` (`Number.MAX_SAFE_INTEGER`); larger, negative, fractional, or non-numeric values are rejected with `400`. The database also enforces the safe limit. If a database created by an earlier build already contains a larger price, migration `003` refuses to apply rather than deleting or rounding it; correct that row manually first.
+- Omit `priceMinor` or send `null` when the price is not fixed. The API returns `null` and the dashboard displays “Price on request”; no price is invented.
+- `currencyCode` defaults to `NGN` in the API. The dashboard pre-fills new catalogue entries with the profile-level business currency when one is configured, otherwise with `NGN`; existing entries keep their saved currency. It must be an **uppercase ISO 4217 currency code** present in the runtime's ICU currency list (for example `NGN`, `USD`, `GBP`, `KES`, `JPY`). The list is maintained with Node.js ICU data rather than a hand-written regex; it excludes non-currency codes such as `ZZZ`, `XXX`, and `XTS`, though it may still include a recently replaced currency until the ICU data is updated. Lowercase and malformed values are rejected. The same validation applies to create and update.
+
+#### FAQs and policies
+
+```http
+POST /api/business/knowledge
+Content-Type: application/json
+```
+
+```json
+{
+  "title": "Do you travel for weddings?",
+  "answer": "Travel within the city is included.",
+  "entryType": "faq",
+  "isActive": true
+}
+```
+
+`entryType` is `faq` or `policy`. Answers are approved business text and are limited to 4,000 characters. Deactivating an entry keeps it for review but removes it from future reply context. Editing an inactive entry with `isActive: true` reactivates it.
+
+### Reply drafts, provenance, and owner approval
+
+Draft generation uses a local deterministic mock provider only. It does not call a live AI service, require credentials, or send a customer message. The legacy `POST /api/leads/:id/draft-reply` endpoint keeps its original non-persistent response contract and shares the same generation logic.
+
+The saved-draft endpoints persist reviewable drafts:
+
+- `POST /api/leads/:id/reply-drafts` generates and saves a new draft, or regenerates an existing one when the optional body is `{"draftId":"<uuid>"}`.
+- `GET /api/leads/:id/reply-drafts` lists that lead's saved drafts, newest first.
+- `PATCH /api/leads/:leadId/reply-drafts/:draftId` saves edited text or changes the review status.
+
+A saved draft response is wrapped as `{"draft":{...}}`:
+
+```json
+{
+  "draft": {
+    "id": "d0000000-0000-4000-8000-000000000001",
+    "leadId": "10000000-0000-4000-8000-000000000001",
+    "intent": "pricing",
+    "summary": "Enquiry from Sarah Musa about Wedding photography: How much is wedding photography?",
+    "missingInformation": ["Event date", "Event location", "What the customer needs"],
+    "draftReply": "Hi Sarah Musa, ...",
+    "provider": "mock",
+    "isDemo": true,
+    "status": "draft",
+    "sources": [
+      {
+        "id": "c0000000-0000-4000-8000-000000000001",
+        "type": "catalogue",
+        "title": "Wedding photography",
+        "content": "Full-day wedding coverage.\nPrice: NGN 1,500.00\nAvailability: Weekends by arrangement.",
+        "reason": "Keyword match on \"wedding\" and \"photography\". Keyword matching only, not semantic retrieval; verify that this fact is relevant.",
+        "priceMinor": 150000,
+        "currencyCode": "NGN"
+      }
+    ],
+    "approvedAt": null,
+    "createdAt": "2026-03-01T09:00:00.000Z",
+    "updatedAt": "2026-03-01T09:00:00.000Z"
+  }
+}
+```
+
+`source.type` is `catalogue`, `faq`, or `policy`. The `sources` snapshot is generated server-side from the active approved facts selected for that generation. Draft creation and regeneration requests do not accept source facts from the browser; any extra body keys are rejected. The provider reports which context facts it used, but the API replaces provider-supplied titles, text, prices, and reasons with canonical values from the server-side context. A provider cannot claim a fact from outside the selected context.
+
+Draft status starts as `draft` with `approvedAt: null`. Approval with `{"status":"approved"}` records the timestamp. Saving edited text returns the draft to `draft` and clears approval. Regeneration updates the same draft in place, refreshes the business-fact snapshot, and resets approval because the content changed. `{"status":"draft"}` explicitly returns an approved draft to draft status. Editing and approving in the same request is rejected; save the edited text first, then approve it as a separate review action.
+
+Approval is a review status only. It is not a legal signature, does not prove that edited text is factually correct, and does not send a WhatsApp, email, Instagram, or other customer message. The owner must still copy and send any message manually.
+
+#### How business facts are selected and snapshotted
+
+Before drafting, `server/src/business/context.ts` loads the business profile, only **active** catalogue entries, and only **active** FAQ/policy entries. It builds enquiry text from the lead's `service` and `lastMessage` and keeps entries whose name/description or title/answer share a word of at least three characters, after ignoring common stop words. The selection is deterministic keyword matching, **not semantic AI retrieval**: different wording can miss a relevant entry, and shared wording can produce a false match. Reasons in `sources` describe that keyword match; they do not prove that a claim is supported.
+
+The mock provider includes matched approved catalogue facts and FAQ/policy answers in the suggested reply and reports only the facts actually appended to that reply. It never invents a price, availability, opening hours, refund right, booking term, or other policy: if a matching entry has no price, it says the price needs confirmation; if no approved policy is supplied, it asks for the missing detail or adds it to `missingInformation`.
+
+The saved `sources` snapshot preserves the original approved values even if a catalogue or knowledge entry is later edited or deactivated. It is evidence of what was used at generation time, not a claim that those facts are still current. The dashboard labels it accordingly. Snapshots do not contain API credentials or unnecessary customer information.
+
+The Draft Reply dialog shows the enquiry summary, missing information, **Business information used**, editable text, demo labeling, review status, save/regenerate/copy/approve actions, and previously saved drafts for the lead. Reopening it restores the latest saved text, snapshot, and status; if the lead has no saved draft, it generates and saves one. Editing warns that changes may no longer be supported by the original facts.
+
+
 
 ## Learn More
 

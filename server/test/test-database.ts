@@ -80,9 +80,15 @@ export function getTestDatabaseUrl(): string {
 
 export async function prepareTestDatabase(pool: Pool): Promise<void> {
   await runMigrations(pool);
-  await resetTestLeads(pool);
+  await resetTestData(pool);
 }
 
-export async function resetTestLeads(pool: Pool): Promise<void> {
-  await pool.query("TRUNCATE TABLE leads");
+/**
+ * Resets every table used by the API tests. This is only ever called with the
+ * dedicated TEST_DATABASE_URL connection, which getTestDatabaseUrl verifies.
+ */
+export async function resetTestData(pool: Pool): Promise<void> {
+  await pool.query(
+    "TRUNCATE TABLE reply_drafts, business_profiles, catalogue_entries, knowledge_entries, leads",
+  );
 }

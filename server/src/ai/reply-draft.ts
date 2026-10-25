@@ -1,5 +1,19 @@
 import { z } from "zod";
+import {
+  buildCatalogueReplySource,
+  buildKnowledgeReplySource,
+  replyDraftSourcesSchema,
+  type ReplyDraftSource,
+} from "../business/provenance.js";
+import { formatMinorUnits } from "../business/money.js";
+import type {
+  CatalogueEntry,
+  KnowledgeEntry,
+  ReplyContext,
+} from "../business/types.js";
 import type { Lead } from "../leads/types.js";
+
+export { formatMinorUnits } from "../business/money.js";
 
 export const REPLY_DRAFT_INTENTS = [
   "availability",
@@ -16,20 +30,36 @@ export const replyDraftSchema = z.object({
   draftReply: z.string().min(1).max(2_000),
   provider: z.literal("mock"),
   isDemo: z.literal(true),
+  sources: replyDraftSourcesSchema.default([]),
 });
 
 export type ReplyDraft = z.infer<typeof replyDraftSchema>;
 
 export interface ReplyDraftProvider {
-  draftReply(lead: Lead): Promise<unknown>;
+  /**
+   * The context contains active, keyword-matched approved business facts for a
+   * future grounded provider. The mock provider uses these facts when present.
+   */
+  draftReply(lead: Lead, context?: ReplyContext): Promise<unknown>;
 }
+
+const MAX_REPLY_LENGTH = 1_900;
 
 function getIntent(message: string): ReplyDraft["intent"] {
   const normalized = message.toLowerCase();
 
-  if (/available|availability|free|open/.test(normalized)) return "availability";
-  if (/price|pricing|cost|package|quote/.test(normalized)) return "pricing";
-  if (/book|booking|confirm|reserve/.test(normalized)) return "booking";
+  if (/available|availability|free|open/.test(normalized)) {
+    return "availability";
+  }
+
+  if (/price|pricing|cost|package|quote|how much/.test(normalized)) {
+    return "pricing";
+  }
+
+  if (/book|booking|confirm|reserve/.test(normalized)) {
+    return "booking";
+  }
+
   if (/detail|information|service|offer/.test(normalized)) {
     return "service-details";
   }
@@ -37,7 +67,7 @@ function getIntent(message: string): ReplyDraft["intent"] {
   return "general-enquiry";
 }
 
-function missingInformationFor(intent: ReplyDraft["intent"]): string[] {
+function baseMissingInformationFor(intent: ReplyDraft["intent"]): string[] {
   switch (intent) {
     case "availability":
       return ["Preferred date and time", "Event location"];
@@ -75,17 +105,127 @@ function summaryFor(lead: Lead): string {
   return summary.length <= 500 ? summary : `${summary.slice(0, 497)}...`;
 }
 
+function catalogueFact(entry: CatalogueEntry): string {
+  const name = `Our approved catalogue lists ${entry.name}`;
+
+  if (entry.priceMinor === null) {
+    return `${name}, but no price is set, so the price needs confirmation.`;
+  }
+
+  return `${name} at ${formatMinorUnits(
+    entry.priceMinor,
+    entry.currencyCode,
+  )}.`;
+}
+
+function knowledgeFact(entry: KnowledgeEntry): string {
+  const label = entry.entryType === "faq" ? "FAQ" : "policy";
+  const answer = entry.answer.replace(/\s+/g, " ").trim();
+
+  if (answer.length > 700) {
+    return `Approved ${label} — ${entry.title}: the full approved text needs confirmation before it is quoted.`;
+  }
+
+  return `Approved ${label} — ${entry.title}: ${answer}`;
+}
+
+type GroundedFact = {
+  text: string;
+  source: ReplyDraftSource;
+};
+
+function groundedFacts(lead: Lead, context?: ReplyContext): GroundedFact[] {
+  if (!context) {
+    return [];
+  }
+
+  return [
+    ...context.catalogue.map((entry) => ({
+      text: catalogueFact(entry),
+      source: buildCatalogueReplySource(entry, lead),
+    })),
+    ...context.knowledge.map((entry) => ({
+      text: knowledgeFact(entry),
+      source: buildKnowledgeReplySource(entry, lead),
+    })),
+  ].filter((fact) => fact.text.length <= 700);
+}
+
+function appendFacts(
+  reply: string,
+  facts: GroundedFact[],
+): { draftReply: string; sources: ReplyDraftSource[] } {
+  let result = reply;
+  const sources: ReplyDraftSource[] = [];
+
+  for (const fact of facts) {
+    const candidate = `${result} ${fact.text}`;
+
+    if (candidate.length > MAX_REPLY_LENGTH) {
+      continue;
+    }
+
+    result = candidate;
+    sources.push(fact.source);
+  }
+
+  return { draftReply: result, sources };
+}
+
+function policyTopic(message: string): string | null {
+  const normalized = message.toLowerCase();
+
+  if (/refund/.test(normalized)) return "refund";
+  if (/cancel/.test(normalized)) return "cancellation";
+  if (/reschedul/.test(normalized)) return "rescheduling";
+  if (/deposit/.test(normalized)) return "deposit";
+  if (/payment/.test(normalized)) return "payment";
+  if (/terms|policy|contract/.test(normalized)) return "policy";
+
+  return null;
+}
+
+function missingInformationFor(
+  intent: ReplyDraft["intent"],
+  lead: Lead,
+  context?: ReplyContext,
+): string[] {
+  const missing = baseMissingInformationFor(intent);
+  const catalogue = context?.catalogue ?? [];
+  const knowledge = context?.knowledge ?? [];
+
+  if (
+    intent === "pricing" &&
+    !catalogue.some((entry) => entry.priceMinor !== null)
+  ) {
+    missing.push("An approved price for the requested service");
+  }
+
+  const topic = policyTopic(lead.lastMessage);
+
+  if (topic && knowledge.length === 0) {
+    missing.push(`An approved ${topic} policy`);
+  }
+
+  return [...new Set(missing)].slice(0, 10);
+}
+
 export class MockReplyDraftProvider implements ReplyDraftProvider {
-  async draftReply(lead: Lead): Promise<ReplyDraft> {
+  async draftReply(lead: Lead, context?: ReplyContext): Promise<ReplyDraft> {
     const intent = getIntent(lead.lastMessage);
+    const grounded = appendFacts(
+      replyFor(intent, lead),
+      groundedFacts(lead, context),
+    );
 
     return {
       intent,
       summary: summaryFor(lead),
-      missingInformation: missingInformationFor(intent),
-      draftReply: replyFor(intent, lead),
+      missingInformation: missingInformationFor(intent, lead, context),
+      draftReply: grounded.draftReply,
       provider: "mock",
       isDemo: true,
+      sources: grounded.sources,
     };
   }
 }
