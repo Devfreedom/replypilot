@@ -116,26 +116,150 @@ export function createLeadsRouter({
       return;
     }
 
-    let providerResult: unknown;
+    try {
+      const draft = await generateReplyDraft(pool, lead, replyDraftProvider);
+      response.status(200).json(legacyReplyDraft(draft));
+    } catch {
+      response.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  router.get("/:id/reply-drafts", async (request, response) => {
+    const id = leadIdSchema.safeParse(request.params.id);
+
+    if (!id.success) {
+      sendValidationError(response, id.error, "id");
+      return;
+    }
+
+    const lead = await getLeadById(pool, id.data);
+
+    if (!lead) {
+      response.status(404).json({ error: "Lead not found" });
+      return;
+    }
+
+    const drafts = await listReplyDraftsForLead(pool, id.data);
+    response.status(200).json({ drafts });
+  });
+
+  router.post("/:id/reply-drafts", async (request, response) => {
+    const id = leadIdSchema.safeParse(request.params.id);
+
+    if (!id.success) {
+      sendValidationError(response, id.error, "id");
+      return;
+    }
+
+    const parsed = createReplyDraftSchema.safeParse(request.body ?? {});
+
+    if (!parsed.success) {
+      sendValidationError(response, parsed.error, "body");
+      return;
+    }
+
+    const lead = await getLeadById(pool, id.data);
+
+    if (!lead) {
+      response.status(404).json({ error: "Lead not found" });
+      return;
+    }
+
+    const existingDraftId = parsed.data.draftId;
+
+    if (existingDraftId) {
+      const existing = await getReplyDraftForLead(
+        pool,
+        id.data,
+        existingDraftId,
+      );
+
+      if (!existing) {
+        response.status(404).json({ error: "Reply draft not found" });
+        return;
+      }
+    }
+
+    let generated;
 
     try {
-      providerResult = await replyDraftProvider.draftReply(
-        lead,
-        await buildReplyContext(pool, lead),
-      );
+      generated = await generateReplyDraft(pool, lead, replyDraftProvider);
     } catch {
       response.status(500).json({ error: "Internal server error" });
       return;
     }
 
-    const draft = replyDraftSchema.safeParse(providerResult);
+    if (existingDraftId) {
+      const draft = await replaceGeneratedReplyDraft(
+        pool,
+        id.data,
+        existingDraftId,
+        generated,
+      );
 
-    if (!draft.success) {
-      response.status(500).json({ error: "Internal server error" });
+      if (!draft) {
+        response.status(404).json({ error: "Reply draft not found" });
+        return;
+      }
+
+      response.status(200).json({ draft });
       return;
     }
 
-    response.status(200).json(draft.data);
+    const draft = await createReplyDraft(pool, id.data, generated);
+    response.status(201).json({ draft });
+  });
+
+  router.patch("/:id/reply-drafts/:draftId", async (request, response) => {
+    const id = leadIdSchema.safeParse(request.params.id);
+
+    if (!id.success) {
+      sendValidationError(response, id.error, "id");
+      return;
+    }
+
+    const draftId = replyDraftIdSchema.safeParse(request.params.draftId);
+
+    if (!draftId.success) {
+      sendValidationError(response, draftId.error, "draftId");
+      return;
+    }
+
+    const parsed = updateReplyDraftSchema.safeParse(request.body);
+
+    if (!parsed.success) {
+      sendValidationError(response, parsed.error, "body");
+      return;
+    }
+
+    const lead = await getLeadById(pool, id.data);
+
+    if (!lead) {
+      response.status(404).json({ error: "Lead not found" });
+      return;
+    }
+
+    const draft =
+      parsed.data.draftReply !== undefined
+        ? await updateReplyDraftText(
+            pool,
+            id.data,
+            draftId.data,
+            parsed.data.draftReply,
+          )
+        : await updateReplyDraftStatus(
+            pool,
+            id.data,
+            draftId.data,
+            parsed.data.status ?? "draft",
+          );
+
+    if (!draft) {
+      response.status(404).json({ error: "Reply draft not found" });
+      return;
+    }
+
+    response.status(200).json({ draft });
   });
 
   return router;

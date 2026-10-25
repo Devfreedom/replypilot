@@ -89,6 +89,6 @@ export async function prepareTestDatabase(pool: Pool): Promise<void> {
  */
 export async function resetTestData(pool: Pool): Promise<void> {
   await pool.query(
-    "TRUNCATE TABLE business_profiles, catalogue_entries, knowledge_entries, leads",
+    "TRUNCATE TABLE reply_drafts, business_profiles, catalogue_entries, knowledge_entries, leads",
   );
 }
