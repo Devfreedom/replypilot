@@ -129,33 +129,47 @@ function knowledgeFact(entry: KnowledgeEntry): string {
   return `Approved ${label} — ${entry.title}: ${answer}`;
 }
 
-function groundedFacts(context?: ReplyContext): string[] {
+type GroundedFact = {
+  text: string;
+  source: ReplyDraftSource;
+};
+
+function groundedFacts(lead: Lead, context?: ReplyContext): GroundedFact[] {
   if (!context) {
     return [];
   }
 
-  const facts = [
-    ...context.catalogue.map(catalogueFact),
-    ...context.knowledge.map(knowledgeFact),
-  ];
-
-  return facts.filter((fact) => fact.length <= 700);
+  return [
+    ...context.catalogue.map((entry) => ({
+      text: catalogueFact(entry),
+      source: buildCatalogueReplySource(entry, lead),
+    })),
+    ...context.knowledge.map((entry) => ({
+      text: knowledgeFact(entry),
+      source: buildKnowledgeReplySource(entry, lead),
+    })),
+  ].filter((fact) => fact.text.length <= 700);
 }
 
-function appendFacts(reply: string, facts: string[]): string {
+function appendFacts(
+  reply: string,
+  facts: GroundedFact[],
+): { draftReply: string; sources: ReplyDraftSource[] } {
   let result = reply;
+  const sources: ReplyDraftSource[] = [];
 
   for (const fact of facts) {
-    const candidate = `${result} ${fact}`;
+    const candidate = `${result} ${fact.text}`;
 
     if (candidate.length > MAX_REPLY_LENGTH) {
       continue;
     }
 
     result = candidate;
+    sources.push(fact.source);
   }
 
-  return result;
+  return { draftReply: result, sources };
 }
 
 function policyTopic(message: string): string | null {
@@ -199,15 +213,19 @@ function missingInformationFor(
 export class MockReplyDraftProvider implements ReplyDraftProvider {
   async draftReply(lead: Lead, context?: ReplyContext): Promise<ReplyDraft> {
     const intent = getIntent(lead.lastMessage);
-    const facts = groundedFacts(context);
+    const grounded = appendFacts(
+      replyFor(intent, lead),
+      groundedFacts(lead, context),
+    );
 
     return {
       intent,
       summary: summaryFor(lead),
       missingInformation: missingInformationFor(intent, lead, context),
-      draftReply: appendFacts(replyFor(intent, lead), facts),
+      draftReply: grounded.draftReply,
       provider: "mock",
       isDemo: true,
+      sources: grounded.sources,
     };
   }
 }
