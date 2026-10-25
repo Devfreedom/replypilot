@@ -3,10 +3,25 @@ import type { Pool } from "pg";
 import type { ZodError } from "zod";
 import {
   MockReplyDraftProvider,
-  replyDraftSchema,
   type ReplyDraftProvider,
 } from "../ai/reply-draft.js";
-import { buildReplyContext } from "../business/context.js";
+import {
+  createReplyDraft,
+  getReplyDraftForLead,
+  listReplyDraftsForLead,
+  replaceGeneratedReplyDraft,
+  updateReplyDraftStatus,
+  updateReplyDraftText,
+} from "../reply-drafts/repository.js";
+import {
+  createReplyDraftSchema,
+  replyDraftIdSchema,
+  updateReplyDraftSchema,
+} from "../reply-drafts/schemas.js";
+import {
+  generateReplyDraft,
+  legacyReplyDraft,
+} from "../reply-drafts/service.js";
 import {
   createLead,
   getLeadById,
