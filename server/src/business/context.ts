@@ -74,7 +74,7 @@ const STOP_WORDS = new Set([
   "using",
 ]);
 
-function terms(value: string): Set<string> {
+export function searchTerms(value: string): Set<string> {
   const matches = value.toLowerCase().match(/[a-z0-9]{3,}/g) ?? [];
   return new Set(matches.filter((term) => !STOP_WORDS.has(term)));
 }
@@ -84,14 +84,14 @@ function relevant<T>(
   text: string,
   searchable: (item: T) => string,
 ): T[] {
-  const enquiryTerms = terms(text);
+  const enquiryTerms = searchTerms(text);
 
   if (enquiryTerms.size === 0) {
     return [];
   }
 
   return items.filter((item) => {
-    const itemTerms = terms(searchable(item));
+    const itemTerms = searchTerms(searchable(item));
     return [...itemTerms].some((term) => enquiryTerms.has(term));
   });
 }

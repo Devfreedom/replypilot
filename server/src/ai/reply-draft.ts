@@ -1,10 +1,19 @@
 import { z } from "zod";
-import type { Lead } from "../leads/types.js";
+import {
+  buildCatalogueReplySource,
+  buildKnowledgeReplySource,
+  replyDraftSourcesSchema,
+  type ReplyDraftSource,
+} from "../business/provenance.js";
+import { formatMinorUnits } from "../business/money.js";
 import type {
   CatalogueEntry,
   KnowledgeEntry,
   ReplyContext,
 } from "../business/types.js";
+import type { Lead } from "../leads/types.js";
+
+export { formatMinorUnits } from "../business/money.js";
 
 export const REPLY_DRAFT_INTENTS = [
   "availability",
@@ -21,6 +30,7 @@ export const replyDraftSchema = z.object({
   draftReply: z.string().min(1).max(2_000),
   provider: z.literal("mock"),
   isDemo: z.literal(true),
+  sources: replyDraftSourcesSchema.default([]),
 });
 
 export type ReplyDraft = z.infer<typeof replyDraftSchema>;
@@ -93,50 +103,6 @@ function summaryFor(lead: Lead): string {
   const summary = `Enquiry from ${lead.name} about ${lead.service}: ${lead.lastMessage}`;
 
   return summary.length <= 500 ? summary : `${summary.slice(0, 497)}...`;
-}
-
-function currencyFractionDigits(currencyCode: string): number {
-  try {
-    const options = new Intl.NumberFormat("en-US", {
-      style: "currency",
-      currency: currencyCode,
-    }).resolvedOptions();
-
-    return options.maximumFractionDigits ?? 2;
-  } catch {
-    return 2;
-  }
-}
-
-/**
- * Formats safe integer minor units without floating-point money arithmetic.
- * Grouping and the fractional part are calculated with BigInt.
- */
-export function formatMinorUnits(
-  amount: number,
-  currencyCode: string,
-): string {
-  if (!Number.isSafeInteger(amount) || amount < 0) {
-    throw new Error("Price must be a non-negative safe integer.");
-  }
-
-  const digits = currencyFractionDigits(currencyCode);
-  const factor = 10n ** BigInt(digits);
-  const value = BigInt(amount);
-  const whole = Number(value / factor);
-  const fraction = Number(value % factor);
-  const groupedWhole = new Intl.NumberFormat("en-US", {
-    maximumFractionDigits: 0,
-  }).format(whole);
-
-  if (digits === 0) {
-    return `${currencyCode} ${groupedWhole}`;
-  }
-
-  return `${currencyCode} ${groupedWhole}.${String(fraction).padStart(
-    digits,
-    "0",
-  )}`;
 }
 
 function catalogueFact(entry: CatalogueEntry): string {
