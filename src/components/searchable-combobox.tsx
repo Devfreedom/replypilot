@@ -193,10 +193,10 @@ export function SearchableCombobox({
     }
 
     if (event.key === "Enter") {
+      event.preventDefault();
       const option = filteredOptions[activeIndex];
 
       if (option) {
-        event.preventDefault();
         selectOption(option);
       }
 

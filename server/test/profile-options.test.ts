@@ -92,6 +92,7 @@ test("saved phone values are restored safely and ambiguous values are preserved"
   const detected = restorePhoneState("+14165550123", null);
   const unreadable = restorePhoneState("call the studio", "NG");
   const mismatched = restorePhoneState("+12025550123", "CA");
+  const unknownCountry = restorePhoneState("+2348031234567", "ZZ");
 
   assert.equal(saved.countryCode, "NG");
   assert.equal(saved.warning, null);
@@ -104,6 +105,12 @@ test("saved phone values are restored safely and ambiguous values are preserved"
   assert.equal(mismatched.countryCode, "CA");
   assert.equal(mismatched.nationalNumber, "+12025550123");
   assert.match(mismatched.warning ?? "", /appears to belong to United States/);
+  assert.equal(unknownCountry.countryCode, "NG");
+  assert.match(unknownCountry.nationalNumber, /803/);
+  assert.match(
+    unknownCountry.warning ?? "",
+    /saved phone country is not one of the available choices/,
+  );
 });
 
 test("blank optional phone values are valid with or without a selected country", () => {
