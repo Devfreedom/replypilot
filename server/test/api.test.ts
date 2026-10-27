@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { once } from "node:events";
+import { readFile, readdir } from "node:fs/promises";
 import type { Server } from "node:http";
 import { after, before, beforeEach, test } from "node:test";
+import { join } from "node:path";
 import { Pool } from "pg";
 import {
   MockReplyDraftProvider,
@@ -19,6 +21,11 @@ import type {
 import { createPool } from "../src/db/pool.js";
 import { runMigrations } from "../src/db/migrate.js";
 import { seedLeads } from "../src/db/seed.js";
+import {
+  LEGACY_WORKSPACE_ID,
+  bootstrapLegacyWorkspace,
+  listMembershipsForUser,
+} from "../src/workspaces/repository.js";
 import {
   type Weekday,
   openingHoursFromSchedule,
@@ -130,14 +137,42 @@ type KnowledgeListPayload = { entries: KnowledgeItem[] };
 
 
 const testDatabaseUrl = getTestDatabaseUrl();
+const TEST_AUTH_ORIGIN = "http://127.0.0.1:3000";
+const TEST_AUTH_SECRET = "replypilot-test-only-secret-0123456789abcdef";
+const TEST_CLIENT_IP = "127.0.0.1";
+const nativeFetch = globalThis.fetch.bind(globalThis);
+
+type TestWorkspacePayload = {
+  id: string;
+  name: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+type TestSession = Readonly<{
+  email: string;
+  password: string;
+  cookie: string;
+  user: Readonly<{ id: string; name: string; email: string }>;
+  workspace: TestWorkspacePayload;
+  role: "owner" | "member";
+}>;
+
+type TestAuthRateLimit = Readonly<{
+  enabled?: boolean;
+  window?: number;
+  max?: number;
+}>;
 
 let pool: Pool;
 let server: Server;
 let baseUrl: string;
+let currentSession: TestSession;
 
 async function startServer(
   poolToUse: Pool,
   replyDraftProvider?: ReplyDraftProvider,
+  rateLimit?: TestAuthRateLimit,
 ): Promise<{
   server: Server;
   baseUrl: string;
@@ -145,6 +180,12 @@ async function startServer(
   const appServer = createApp({
     pool: poolToUse,
     replyDraftProvider,
+    auth: {
+      secret: TEST_AUTH_SECRET,
+      baseURL: TEST_AUTH_ORIGIN,
+      trustedOrigins: [TEST_AUTH_ORIGIN],
+      rateLimit,
+    },
   }).listen(0, "127.0.0.1");
   await once(appServer, "listening");
 
@@ -179,24 +220,154 @@ async function readJson<T>(response: Response): Promise<T> {
   return (await response.json()) as T;
 }
 
-function postLead(body: unknown): Promise<Response> {
-  return fetch(`${baseUrl}/api/leads`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
+function requireSession(): TestSession {
+  if (!currentSession) {
+    throw new Error("The test session has not been initialized.");
+  }
+
+  return currentSession;
+}
+
+function cookieHeader(headers: Headers): string {
+  const mutableHeaders = headers as Headers & {
+    getSetCookie?: () => string[];
+  };
+  const setCookies =
+    typeof mutableHeaders.getSetCookie === "function"
+      ? mutableHeaders.getSetCookie()
+      : (() => {
+          const combined = headers.get("set-cookie");
+          return combined ? [combined] : [];
+        })();
+
+  return setCookies
+    .map((value) => value.split(";", 1)[0]?.trim() ?? "")
+    .filter(Boolean)
+    .join("; ");
+}
+
+function authHeaders(): Headers {
+  return new Headers({
+    "content-type": "application/json",
+    origin: TEST_AUTH_ORIGIN,
+    "x-forwarded-for": TEST_CLIENT_IP,
   });
+}
+
+async function registerUser(
+  options: Readonly<{
+    email?: string;
+    password?: string;
+    name?: string;
+  }> = {},
+): Promise<TestSession> {
+  const email = options.email ?? `owner-${randomUUID()}@example.test`;
+  const password = options.password ?? "replypilot-test-password";
+  const name = options.name ?? "Test Owner";
+  const response = await nativeFetch(`${baseUrl}/api/auth/sign-up/email`, {
+    method: "POST",
+    headers: authHeaders(),
+    body: JSON.stringify({ email, password, name }),
+  });
+
+  if (!response.ok) {
+    throw new Error(
+      `Registration failed (${response.status}): ${await response.text()}`,
+    );
+  }
+
+  const cookie = cookieHeader(response.headers);
+
+  if (!cookie) {
+    throw new Error("Registration did not return a session cookie.");
+  }
+
+  const payload = await readJson<{
+    user: { id: string; name: string; email: string };
+  }>(response);
+  const workspaceResponse = await nativeFetch(`${baseUrl}/api/workspace`, {
+    headers: {
+      cookie,
+      "x-forwarded-for": TEST_CLIENT_IP,
+    },
+  });
+
+  if (!workspaceResponse.ok) {
+    throw new Error(
+      `Workspace initialization failed (${workspaceResponse.status}): ${await workspaceResponse.text()}`,
+    );
+  }
+
+  const workspacePayload = await readJson<{
+    user: { id: string; name: string; email: string };
+    workspace: TestWorkspacePayload;
+    role: "owner" | "member";
+  }>(workspaceResponse);
+
+  return {
+    email,
+    password,
+    cookie,
+    user: payload.user,
+    workspace: workspacePayload.workspace,
+    role: workspacePayload.role,
+  };
+}
+
+function signInRequest(email: string, password: string): Promise<Response> {
+  return nativeFetch(`${baseUrl}/api/auth/sign-in/email`, {
+    method: "POST",
+    headers: authHeaders(),
+    body: JSON.stringify({ email, password }),
+  });
+}
+
+function requestAs(
+  session: TestSession,
+  path: string,
+  method = "GET",
+  body?: unknown,
+): Promise<Response> {
+  const headers = new Headers({
+    cookie: session.cookie,
+    "x-forwarded-for": TEST_CLIENT_IP,
+  });
+
+  if (body !== undefined) {
+    headers.set("content-type", "application/json");
+  }
+
+  return nativeFetch(`${baseUrl}${path}`, {
+    method,
+    headers,
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+}
+
+function fetch(
+  input: RequestInfo | URL,
+  init: RequestInit = {},
+): Promise<Response> {
+  const headers = new Headers(init.headers);
+  headers.set("x-forwarded-for", TEST_CLIENT_IP);
+
+  if (currentSession && !headers.has("cookie")) {
+    headers.set("cookie", currentSession.cookie);
+  }
+
+  return nativeFetch(input, { ...init, headers });
+}
+
+function postLead(body: unknown): Promise<Response> {
+  return jsonRequest("/api/leads", "POST", body);
 }
 
 function patchLead(id: string, body: unknown): Promise<Response> {
-  return fetch(`${baseUrl}/api/leads/${id}`, {
-    method: "PATCH",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
-  });
+  return jsonRequest(`/api/leads/${id}`, "PATCH", body);
 }
 
 function draftReply(id: string): Promise<Response> {
-  return fetch(`${baseUrl}/api/leads/${id}/draft-reply`, { method: "POST" });
+  return jsonRequest(`/api/leads/${id}/draft-reply`, "POST");
 }
 
 function createSavedDraft(
@@ -404,6 +575,7 @@ beforeEach(async () => {
   }
 
   await resetTestData(pool);
+  currentSession = await registerUser();
 });
 
 after(async () => {
@@ -835,15 +1007,16 @@ test("GET /api/leads orders leads by creation time, newest first", async () => {
   await pool.query(
     `
       INSERT INTO leads (
-        id, name, service, channel, status, last_message, created_at, updated_at
+        workspace_id, id, name, service, channel, status, last_message,
+        created_at, updated_at
       )
       VALUES
-        ($1, 'Older Lead', 'Portrait photography', 'Manual', 'New',
+        ($3, $1, 'Older Lead', 'Portrait photography', 'Manual', 'New',
           'Older message', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'),
-        ($2, 'Newer Lead', 'Portrait photography', 'Manual', 'New',
+        ($3, $2, 'Newer Lead', 'Portrait photography', 'Manual', 'New',
           'Newer message', '2026-02-01T00:00:00Z', '2026-02-01T00:00:00Z')
     `,
-    [olderId, newerId],
+    [olderId, newerId, requireSession().workspace.id],
   );
 
   const response = await fetch(`${baseUrl}/api/leads`);
@@ -856,8 +1029,8 @@ test("GET /api/leads orders leads by creation time, newest first", async () => {
 });
 
 test("seed data is idempotent", async () => {
-  const first = await seedLeads(pool);
-  const second = await seedLeads(pool);
+  const first = await seedLeads(pool, requireSession().workspace.id);
+  const second = await seedLeads(pool, requireSession().workspace.id);
 
   assert.equal(first, 5);
   assert.equal(second, 0);
@@ -1453,9 +1626,14 @@ test("the database rejects prices above the safe integer limit", async () => {
   await assert.rejects(
     pool.query(
       `
-        INSERT INTO catalogue_entries (name, price_minor, currency_code)
-        VALUES ('Unsafe direct insert', 9007199254740992, 'NGN')
+        INSERT INTO catalogue_entries (
+          workspace_id, name, price_minor, currency_code
+        )
+        VALUES (
+          $1, 'Unsafe direct insert', 9007199254740992, 'NGN'
+        )
       `,
+      [requireSession().workspace.id],
     ),
     /catalogue_entries_price_minor_safe|check constraint/i,
   );
