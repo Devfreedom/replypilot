@@ -20,11 +20,26 @@ You can start editing the page by modifying `app/page.tsx`. The page auto-update
 
 This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
 
-## API and local PostgreSQL
+## API, authentication, and local PostgreSQL
 
-> **Development-only warning:** the API has no authentication or tenant isolation. The business-profile, catalogue, knowledge-base, and reply-draft endpoints expose and accept business data without access control. Do not expose this application publicly or use it with real customer or business data until authentication and tenant isolation are implemented.
+> **Not production-ready warning:** email/password authentication and workspace isolation are implemented, but this application still needs HTTPS, production origin and cookie review, email verification, password recovery, deployment hardening, operational monitoring, and a complete security review before production use. Reply generation remains mock-only and there is no WhatsApp integration. Do not use real customer or business data yet.
 
-The Express API is a separate development service. It binds to `127.0.0.1` and must not be exposed publicly. It has no authentication or WhatsApp integration. The browser dashboard is a separate Next.js app; it proxies `/api/*` requests to `API_ORIGIN`, which defaults to `http://127.0.0.1:4000`.
+The Express API is a separate development service. It binds to `127.0.0.1` and must not be exposed publicly. The browser dashboard is a separate Next.js app; it proxies `/api/*` requests to `API_ORIGIN`, which defaults to `http://127.0.0.1:4000`. This keeps Better Auth and business API requests same-origin from the browser, so session cookies flow through the rewrite.
+
+### Authentication architecture
+
+Authentication uses [Better Auth](https://www.better-auth.com/) `1.7.14` with its official email/password and PostgreSQL integration. Better Auth owns user records, password hashing, session tokens, session expiry, session invalidation, origin checks, and rate limiting. The repository does not implement its own password hashing, session tokens, or JWTs.
+
+- The Better Auth handler is mounted in Express at `/api/auth/*splat` **before** `express.json()`, so Better Auth receives the raw request body.
+- Browser requests reach it through the existing Next.js `/api/:path*` rewrite.
+- Sessions are HTTP-only, `SameSite=Lax` cookies. Better Auth uses `Secure` cookies when `BETTER_AUTH_URL` is HTTPS.
+- Auth POST requests must come from a trusted origin. Local development trusts `http://localhost:3000` and `http://127.0.0.1:3000`; configure production origins explicitly.
+- Better Auth applies its built-in sign-in/sign-up rate limits. The production app leaves rate limiting enabled.
+- Signing out invalidates the server-side session; the browser session cookie alone cannot be reused.
+
+Registration creates one personal workspace and an owner membership through a Better Auth database hook. If that hook is interrupted, the first authenticated private request runs a recoverable workspace initialization path. The server never accepts a workspace ID from the browser as proof of ownership.
+
+The browser uses `src/lib/auth-client.ts`, an authenticated workspace context, and a protected app wrapper. These provide redirects and a clear loading/unauthenticated state. They are user-experience controls only; every private API request is authorized again on the server.
 
 ### Start the database
 
@@ -44,9 +59,21 @@ npm run db:migrate
 npm run db:seed
 ```
 
-The migrations create the `leads` table plus the business-profile, catalogue, and knowledge-base tables. Migration `003_limit_catalogue_price.sql` adds the safe-integer price constraint without changing existing leads. Migration `004_add_profile_phone_country_currency.sql` adds nullable profile phone-country and currency columns without defaults or backfills, so existing profiles remain unconfigured until the owner saves a choice. Migration `005_create_reply_drafts.sql` adds the `reply_drafts` table for saved drafts and their server-generated business-fact snapshots; it does not alter existing leads or business records. Running migrations again is a no-op; existing data is preserved. The seed is idempotent: running `npm run db:seed` again does not create duplicates. It uses fixed UUIDs and `ON CONFLICT DO NOTHING`, so existing records are not overwritten.
+The migrations create the `leads` table plus the business-profile, catalogue, knowledge-base, and saved-draft tables. Migration `003_limit_catalogue_price.sql` adds the safe-integer price constraint without changing existing leads. Migration `004_add_profile_phone_country_currency.sql` adds nullable profile phone-country and currency columns without defaults or backfills, so existing profiles remain unconfigured until the owner saves a choice. Migration `005_create_reply_drafts.sql` adds the `reply_drafts` table for saved drafts and their server-generated business-fact snapshots.
 
-Environment variables are loaded by Node.js `--env-file-if-exists=.env` in the API scripts. Values already set in the environment take precedence, and no dotenv dependency is needed. The API validates `DATABASE_URL`, `PORT`, and `NODE_ENV` at startup.
+Migration `006_create_auth_and_workspaces.sql` adds the Better Auth tables (`auth_users`, `auth_sessions`, `auth_accounts`, `auth_verifications`), `workspaces`, and `workspace_memberships` with UUID keys, owner/member roles, foreign keys, indexes, and a partial unique index that permits exactly one default workspace per user.
+
+Migration `007_scope_business_data_to_workspaces.sql` is the non-destructive tenant migration. It creates the explicit legacy workspace `00000000-0000-4000-8000-000000000001` (`Legacy development workspace`), adds `workspace_id` to leads, profiles, catalogue, knowledge, and reply drafts, backfills existing rows to that workspace, then adds non-null constraints, foreign keys, and indexes. Drafts receive a composite `(lead_id, workspace_id)` foreign key so a draft cannot reference a lead from another workspace. Existing IDs, values, follow-up dates, approval status, and source snapshots are preserved. The old single-profile `singleton` column is replaced by a unique profile per workspace.
+
+Running migrations again through `npm run db:migrate` is a no-op; existing data is preserved. The seed is idempotent and requires the explicit workspace supplied by its CLI. It uses fixed UUIDs and `ON CONFLICT DO NOTHING`, so existing records are not overwritten.
+
+Environment variables are loaded by Node.js `--env-file-if-exists=.env` in the API scripts. Values already set in the environment take precedence, and no dotenv dependency is needed. The API validates `DATABASE_URL`, `PORT`, `NODE_ENV`, and `BETTER_AUTH_SECRET` (32+ characters) at startup. Production also requires an HTTPS `BETTER_AUTH_URL`. Generate a secret without printing it into source control:
+
+```bash
+openssl rand -base64 32
+```
+
+Put the generated value only in your local `.env` (or your deployment's secret store), then set `BETTER_AUTH_URL` to the public frontend origin. Add any additional production frontend origins to `BETTER_AUTH_TRUSTED_ORIGINS`; do not add wildcard or attacker-controlled origins.
 
 ### Run the API
 
@@ -90,9 +117,30 @@ docker compose exec db createdb -U replypilot replypilot_test
 
 Run this only once; skip it if the database already exists.
 
-The test suite runs migrations against `TEST_DATABASE_URL` and truncates its `reply_drafts`, `leads`, `business_profiles`, `catalogue_entries`, and `knowledge_entries` tables before each test. It fails with a clear error if `TEST_DATABASE_URL` is missing, points at the same database as `DATABASE_URL`, or points at a maintenance database. Tests are never silently skipped.
+The test suite runs migrations against `TEST_DATABASE_URL` and truncates its auth, workspace, and business tables before each test. It then registers a real Better Auth account through `/api/auth/sign-up/email` and uses the returned HTTP-only session cookie for authenticated API calls; there is no authentication bypass. The shared test app disables rate limiting to avoid tripping sign-up limits between unrelated tests, while a dedicated app instance verifies the real Better Auth limit. Tests cover session creation, sign-in/sign-out, expiry, origin checks, workspace creation, bootstrap guards, migration backfill, cross-workspace reads/writes/deletes/approvals/regeneration, source snapshots, database constraints, and member read-only behavior.
+
+The suite fails with a clear error if `TEST_DATABASE_URL` is missing, points at the same database as `DATABASE_URL`, or points at a maintenance database. Tests are never silently skipped.
+
+### Legacy development workspace bootstrap
+
+Existing development data is not automatically attached to the first person who registers. It stays in the explicit legacy workspace until a local operator assigns it to a chosen, already-registered account with the guarded CLI. There is no public HTTP endpoint for this operation.
+
+1. Back up the development database if the data matters.
+2. Apply migrations with `npm run db:migrate`.
+3. Start the API and Next.js app, then create the intended account through `/sign-up`.
+4. Find the account ID if needed: `SELECT id, email FROM auth_users WHERE email = 'owner@example.test';`
+5. Run exactly one of the following with the real account ID or email:
+
+```bash
+npm run db:bootstrap-legacy -- --user-id <uuid> --confirm
+npm run db:bootstrap-legacy -- --user-email owner@example.test --confirm
+```
+
+The command refuses to run without `--confirm`, refuses both selectors at once, refuses an unknown account, and refuses if the legacy workspace already has any member. It makes the legacy workspace the selected account's default and requires a deliberately one-time decision. Re-running it never reassigns ownership. This is a local-development procedure only; production account administration is not implemented.
 
 ### Endpoints
+
+All business endpoints below require a valid Better Auth session and workspace membership. Unauthenticated requests return `401 {"error":"Authentication required"}`. Authenticated members can read business data, but writes require the `owner` role and return `403 {"error":"Forbidden"}` otherwise. The server derives the workspace from the session and rejects request bodies that include a `workspaceId` or other unknown fields.
 
 | Method | Path | Behaviour |
 | --- | --- | --- |

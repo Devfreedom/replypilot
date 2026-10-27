@@ -2,12 +2,14 @@
 
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
+import { useAuth } from "@/components/auth-provider";
 import { LeadTable } from "@/components/lead-table";
 import { DraftReplyDialog } from "@/components/draft-reply-dialog";
 import {
   NewLeadDialog,
   type NewLeadValues,
 } from "@/components/new-lead-dialog";
+import { ProtectedApp } from "@/components/protected-app";
 import { Sidebar } from "@/components/sidebar";
 import { StatCard } from "@/components/stat-card";
 import {
@@ -65,7 +67,9 @@ const FILTER_LABELS: Record<LeadFilter, string> = {
   Booked: "Booked",
 };
 
-export default function Home() {
+function Dashboard() {
+  const { user, workspace, role, signOut } = useAuth();
+  const canManage = role === "owner";
   const [leads, setLeads] = useState<Lead[]>([]);
   const [view, setView] = useState<View>("overview");
   const [filter, setFilter] = useState<LeadFilter>("All");
@@ -257,6 +261,12 @@ export default function Home() {
         onSelectView={selectView}
         leadCount={leads.length}
         followUpCount={followUpCount}
+        workspaceName={workspace?.name ?? "Workspace"}
+        userName={user?.name ?? "Account"}
+        userEmail={user?.email ?? ""}
+        role={role ?? "member"}
+        canManage={canManage}
+        onSignOut={() => void signOut()}
       />
 
       <main className="min-w-0 flex-1">
@@ -269,13 +279,17 @@ export default function Home() {
               >
                 R
               </div>
-              <nav aria-label="Breadcrumb">
-                <p className="text-xs text-slate-500">
-                  Workspace <span aria-hidden="true">/</span>{" "}
+              <nav aria-label="Breadcrumb" className="min-w-0">
+                <p className="truncate text-xs text-slate-500">
+                  <span className="font-medium text-slate-600">
+                    {workspace?.name ?? "Workspace"}
+                  </span>{" "}
+                  <span aria-hidden="true">/</span>{" "}
                   <span className="font-semibold text-slate-700">
                     {pageTitle}
                   </span>
                 </p>
+                <p className="truncate text-xs text-slate-400">{user?.email}</p>
               </nav>
             </div>
 
@@ -285,20 +299,36 @@ export default function Home() {
                   aria-hidden="true"
                   className="h-1.5 w-1.5 rounded-full bg-amber-400"
                 />
-                Development · Local API
+                {role === "owner" ? "Workspace owner" : "Read-only member"}
               </span>
               <button
-                onClick={() => setModalOpen(true)}
-                className="rounded-xl bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-blue-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
+                type="button"
+                onClick={() => void signOut()}
+                className="rounded-xl border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-600 hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 lg:hidden"
               >
-                <span aria-hidden="true">＋ </span>
-                New lead
+                Sign out
               </button>
+              {canManage ? (
+                <button
+                  onClick={() => setModalOpen(true)}
+                  className="rounded-xl bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-blue-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
+                >
+                  <span aria-hidden="true">＋ </span>
+                  New lead
+                </button>
+              ) : null}
             </div>
           </div>
         </header>
 
         <div className="mx-auto max-w-7xl px-5 py-8 sm:px-8">
+          {!canManage ? (
+            <p className="mb-6 rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-600">
+              You are signed in as a workspace member. Leads and approved
+              business data are visible, but only the workspace owner can make
+              changes.
+            </p>
+          ) : null}
           <nav
             className="mb-6 flex gap-2 overflow-x-auto pb-1 lg:hidden"
             aria-label="Mobile navigation"
@@ -387,12 +417,14 @@ export default function Home() {
                       </p>
                     </div>
                   </div>
-                  <button
-                    onClick={() => setModalOpen(true)}
-                    className="shrink-0 rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
-                  >
-                    Add an enquiry
-                  </button>
+                  {canManage ? (
+                    <button
+                      onClick={() => setModalOpen(true)}
+                      className="shrink-0 rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
+                    >
+                      Add an enquiry
+                    </button>
+                  ) : null}
                 </div>
               </div>
             </>
@@ -471,14 +503,18 @@ export default function Home() {
               <div className="px-6 py-16 text-center">
                 <h3 className="font-semibold text-slate-900">No leads yet</h3>
                 <p className="mt-1 text-sm text-slate-500">
-                  Add your first customer enquiry to begin tracking it here.
+                  {canManage
+                    ? "Add your first customer enquiry to begin tracking it here."
+                    : "No leads have been added to this workspace yet."}
                 </p>
-                <button
-                  onClick={() => setModalOpen(true)}
-                  className="mt-4 rounded-lg text-sm font-semibold text-blue-700 hover:text-blue-800 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
-                >
-                  Add a lead
-                </button>
+                {canManage ? (
+                  <button
+                    onClick={() => setModalOpen(true)}
+                    className="mt-4 rounded-lg text-sm font-semibold text-blue-700 hover:text-blue-800 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
+                  >
+                    Add a lead
+                  </button>
+                ) : null}
               </div>
             ) : displayedLeads.length === 0 ? (
               <div className="px-6 py-16 text-center">
@@ -505,6 +541,7 @@ export default function Home() {
                   onStatusChange={updateStatus}
                   onDraftReply={setDraftLead}
                   pendingStatusIds={pendingStatusIds}
+                  canManage={canManage}
                 />
 
                 <div className="flex flex-col justify-between gap-2 border-t border-slate-100 px-6 py-4 text-xs text-slate-400 sm:flex-row sm:items-center">
@@ -524,11 +561,19 @@ export default function Home() {
       </main>
 
       <NewLeadDialog
-        open={modalOpen}
+        open={canManage && modalOpen}
         onClose={() => setModalOpen(false)}
         onCreate={createLead}
       />
       <DraftReplyDialog lead={draftLead} onClose={() => setDraftLead(null)} />
     </div>
+  );
+}
+
+export default function Home() {
+  return (
+    <ProtectedApp>
+      <Dashboard />
+    </ProtectedApp>
   );
 }

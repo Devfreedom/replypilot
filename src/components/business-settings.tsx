@@ -43,6 +43,7 @@ import {
   buildTimezoneOptions,
   isValidTimezone,
 } from "@/lib/timezones";
+import { useAuth } from "./auth-provider";
 import { OpeningHoursEditor } from "./opening-hours-editor";
 import { PhoneNumberField } from "./phone-number-field";
 import { SearchableCombobox } from "./searchable-combobox";
@@ -108,6 +109,8 @@ function hasKey(value: unknown, key: string): boolean {
 }
 
 export function BusinessSettings() {
+  const { workspace, role } = useAuth();
+  const canManage = role === "owner";
   const [profile, setProfile] = useState<BusinessProfile | null>(null);
   const [catalogue, setCatalogue] = useState<CatalogueEntry[]>([]);
   const [knowledge, setKnowledge] = useState<KnowledgeEntry[]>([]);
@@ -625,8 +628,11 @@ export function BusinessSettings() {
       <header className="border-b border-slate-200 bg-white">
         <div className="mx-auto flex max-w-5xl items-center justify-between gap-4 px-5 py-4 sm:px-8">
           <div>
-            <p className="text-xs text-slate-500">
-              Workspace /{" "}
+            <p className="truncate text-xs text-slate-500">
+              <span className="font-medium text-slate-600">
+                {workspace?.name ?? "Workspace"}
+              </span>{" "}
+              /{" "}
               <span className="font-semibold text-slate-700">
                 Business settings
               </span>
@@ -642,10 +648,17 @@ export function BusinessSettings() {
       </header>
 
       <div className="mx-auto max-w-5xl px-5 py-8 sm:px-8">
-        <p className="mb-6 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
-          Development-only settings. These endpoints have no authentication or
-          tenant isolation and must not be publicly deployed.
+        <p className="mb-6 rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-900">
+          Signed in to <strong>{workspace?.name ?? "this workspace"}</strong>.
+          Business details and reply context are scoped to this workspace.
         </p>
+
+        {!canManage ? (
+          <p className="mb-6 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+            You are a workspace member. Settings are read-only for your role;
+            only the workspace owner can make changes.
+          </p>
+        ) : null}
 
         {notice ? (
           <p
@@ -680,7 +693,10 @@ export function BusinessSettings() {
             Loading business settings…
           </p>
         ) : (
-          <div className="space-y-8">
+          <fieldset
+            disabled={!canManage}
+            className="m-0 min-w-0 space-y-8 border-0 p-0"
+          >
             <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6">
               <h2 className="text-lg font-bold text-slate-900">
                 Business profile
@@ -1136,7 +1152,7 @@ export function BusinessSettings() {
                 )}
               />
             </section>
-          </div>
+          </fieldset>
         )}
       </div>
     </main>

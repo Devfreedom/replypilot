@@ -1,6 +1,6 @@
 import countryToCurrency from "country-to-currency";
-import { countryName } from "./countries.js";
-import type { SearchOption } from "./search-option.js";
+import { countryName } from "./countries";
+import type { SearchOption } from "./search-option";
 
 const SUPPORTED_CURRENCY_CODES = new Set(
   Intl.supportedValuesOf("currency"),

@@ -1,5 +1,5 @@
 import { getCountryCallingCode, type CountryCode } from "libphonenumber-js";
-import type { SearchOption } from "./search-option.js";
+import type { SearchOption } from "./search-option";
 
 /**
  * The curated country choices used by the profile phone control. Keep this

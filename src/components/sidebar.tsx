@@ -39,16 +39,40 @@ const NAV_ITEMS: { view: View; label: string; icon: ReactNode }[] = [
   },
 ];
 
+function initials(name: string): string {
+  return (
+    name
+      .split(" ")
+      .map((part) => part[0])
+      .filter(Boolean)
+      .join("")
+      .slice(0, 2)
+      .toUpperCase() || "U"
+  );
+}
+
 export function Sidebar({
   view,
   onSelectView,
   leadCount,
   followUpCount,
+  workspaceName,
+  userName,
+  userEmail,
+  role,
+  canManage,
+  onSignOut,
 }: {
   view: View;
   onSelectView: (view: View) => void;
   leadCount: number;
   followUpCount: number;
+  workspaceName: string;
+  userName: string;
+  userEmail: string;
+  role: "owner" | "member";
+  canManage: boolean;
+  onSignOut: () => void;
 }) {
   return (
     <aside className="hidden w-64 shrink-0 flex-col border-r border-slate-200 bg-white px-5 py-6 lg:flex">
@@ -71,8 +95,11 @@ export function Sidebar({
       </Link>
 
       <div className="mt-10">
-        <p className="mb-3 px-3 text-xs font-semibold uppercase tracking-widest text-slate-400">
+        <p className="mb-1 px-3 text-xs font-semibold uppercase tracking-widest text-slate-400">
           Workspace
+        </p>
+        <p className="mb-3 truncate px-3 text-sm font-semibold text-slate-700">
+          {workspaceName}
         </p>
 
         <nav className="space-y-1" aria-label="Main navigation">
@@ -117,25 +144,38 @@ export function Sidebar({
         <div className="mb-2 flex h-9 w-9 items-center justify-center rounded-xl bg-white text-blue-700">
           <Icon path="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3z" />
         </div>
-        <p className="text-sm font-semibold text-slate-800">AI assistant</p>
+        <p className="text-sm font-semibold text-slate-800">Reply assistant</p>
         <p className="mt-1 text-xs leading-5 text-slate-600">
-          AI-generated replies are coming next. For now, manage your customer
-          enquiries here.
+          {canManage
+            ? "Draft replies use only this workspace's approved business facts. Review every draft before sending anything."
+            : "You are a workspace member. Business data is read-only for your role."}
         </p>
         <span className="mt-3 inline-flex items-center gap-1.5 rounded-full bg-white px-2.5 py-1 text-xs font-medium text-blue-700 ring-1 ring-blue-100">
           <span aria-hidden="true" className="h-1.5 w-1.5 rounded-full bg-blue-400" />
-          In development
+          Mock generation
         </span>
       </div>
 
-      <div className="mt-5 flex items-center gap-3 border-t border-slate-100 pt-5">
-        <div className="flex h-10 w-10 items-center justify-center rounded-full bg-slate-900 text-sm font-semibold text-white">
-          F
+      <div className="mt-5 border-t border-slate-100 pt-5">
+        <div className="flex items-center gap-3">
+          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-slate-900 text-sm font-semibold text-white">
+            {initials(userName)}
+          </div>
+          <div className="min-w-0">
+            <p className="truncate text-sm font-semibold">{userName}</p>
+            <p className="truncate text-xs text-slate-500">{userEmail}</p>
+            <p className="mt-0.5 text-xs font-medium text-slate-400">
+              {role === "owner" ? "Workspace owner" : "Workspace member"}
+            </p>
+          </div>
         </div>
-        <div className="min-w-0">
-          <p className="truncate text-sm font-semibold">Your business</p>
-          <p className="text-xs text-slate-500">Workspace owner</p>
-        </div>
+        <button
+          type="button"
+          onClick={onSignOut}
+          className="mt-3 w-full rounded-xl border border-slate-200 px-3 py-2 text-left text-sm font-medium text-slate-600 hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
+        >
+          Sign out
+        </button>
       </div>
     </aside>
   );

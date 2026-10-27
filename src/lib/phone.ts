@@ -6,7 +6,7 @@ import {
   countryName,
   isCuratedPhoneCountryCode,
   type CuratedPhoneCountryCode,
-} from "./countries.js";
+} from "./countries";
 
 export type PhoneValidationErrors = {
   country?: string;
