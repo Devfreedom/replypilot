@@ -171,6 +171,12 @@ type TestAuthRateLimit = Readonly<{
   max?: number;
 }>;
 
+type TestAuthOptions = Readonly<{
+  baseURL?: string;
+  trustedOrigins?: string[];
+  rateLimit?: TestAuthRateLimit;
+}>;
+
 let pool: Pool;
 let server: Server;
 let baseUrl: string;
@@ -179,22 +185,23 @@ let currentSession: TestSession;
 async function startServer(
   poolToUse: Pool,
   replyDraftProvider?: ReplyDraftProvider,
-  rateLimit?: TestAuthRateLimit,
+  authOptions: TestAuthOptions = {},
 ): Promise<{
   server: Server;
   baseUrl: string;
 }> {
+  const authBaseUrl = authOptions.baseURL ?? TEST_AUTH_ORIGIN;
   const appServer = createApp({
     pool: poolToUse,
     replyDraftProvider,
     auth: {
       secret: TEST_AUTH_SECRET,
-      baseURL: TEST_AUTH_ORIGIN,
-      trustedOrigins: [TEST_AUTH_ORIGIN],
+      baseURL: authBaseUrl,
+      trustedOrigins: authOptions.trustedOrigins ?? [authBaseUrl],
       // The suite creates a real account for every test. Rate limiting is
       // exercised explicitly against a dedicated app instance instead of
       // tripping Better Auth's sign-up rule during unrelated tests.
-      rateLimit: rateLimit ?? { enabled: false },
+      rateLimit: authOptions.rateLimit ?? { enabled: false },
     },
   }).listen(0, "127.0.0.1");
   await once(appServer, "listening");
@@ -2726,6 +2733,47 @@ test("sign-in returns a usable HTTP-only session cookie", async () => {
   assert.equal(privateResponse.status, 200);
 });
 
+test("HTTPS auth configuration issues Secure session cookies", async () => {
+  const secureOrigin = "https://replypilot.example";
+  const secureServer = await startServer(pool, undefined, {
+    baseURL: secureOrigin,
+    trustedOrigins: [secureOrigin],
+  });
+
+  try {
+    const response = await nativeFetch(
+      `${secureServer.baseUrl}/api/auth/sign-in/email`,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          origin: secureOrigin,
+          "x-forwarded-for": TEST_CLIENT_IP,
+        },
+        body: JSON.stringify({
+          email: requireSession().email,
+          password: requireSession().password,
+        }),
+      },
+    );
+
+    assert.equal(response.status, 200);
+
+    const setCookie =
+      (
+        response.headers as Headers & { getSetCookie?: () => string[] }
+      ).getSetCookie?.().join("\n") ??
+      response.headers.get("set-cookie") ??
+      "";
+
+    assert.match(setCookie, /HttpOnly/i);
+    assert.match(setCookie, /SameSite=Lax/i);
+    assert.match(setCookie, /(?:^|;\s*)Secure(?:;|$)/i);
+  } finally {
+    await stopServer(secureServer.server);
+  }
+});
+
 test("duplicate registration and invalid credentials are rejected", async () => {
   const duplicate = await nativeFetch(
     `${baseUrl}/api/auth/sign-up/email`,
@@ -2877,9 +2925,11 @@ test("authentication rejects missing and untrusted origins", async () => {
 
 test("authentication rate limits repeated sign-in attempts", async () => {
   const limited = await startServer(pool, undefined, {
-    enabled: true,
-    window: 60,
-    max: 100,
+    rateLimit: {
+      enabled: true,
+      window: 60,
+      max: 100,
+    },
   });
 
   try {
