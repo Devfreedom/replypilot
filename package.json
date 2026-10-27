@@ -13,9 +13,11 @@
     "typecheck:api": "tsc -p server/tsconfig.test.json",
     "test:api": "node --env-file-if-exists=.env --import tsx --test server/test/*.test.ts",
     "db:migrate": "node --env-file-if-exists=.env --import tsx server/src/db/migrate-cli.ts",
-    "db:seed": "node --env-file-if-exists=.env --import tsx server/src/db/seed-cli.ts"
+    "db:seed": "node --env-file-if-exists=.env --import tsx server/src/db/seed-cli.ts",
+    "db:bootstrap-legacy": "node --env-file-if-exists=.env --import tsx server/src/db/bootstrap-legacy-workspace-cli.ts"
   },
   "dependencies": {
+    "better-auth": "^1.7.14",
     "country-to-currency": "^3.0.1",
     "express": "^5.3.0",
     "libphonenumber-js": "^1.13.15",
@@ -37,5 +39,6 @@
     "tailwindcss": "^4",
     "tsx": "^4.23.15",
     "typescript": "^5"
-  }
+  },
+  "type": "module"
 }
