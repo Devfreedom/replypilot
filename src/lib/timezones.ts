@@ -1,4 +1,4 @@
-import type { SearchOption } from "./search-option";
+import type { SearchOption } from "./search-option.js";
 
 const FALLBACK_TIMEZONE_IDS = [
   "UTC",

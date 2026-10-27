@@ -345,8 +345,8 @@ function requestAs(
 }
 
 function fetch(
-  input: RequestInfo | URL,
-  init: RequestInit = {},
+  input: Parameters<typeof nativeFetch>[0],
+  init: Parameters<typeof nativeFetch>[1] = {},
 ): Promise<Response> {
   const headers = new Headers(init.headers);
   headers.set("x-forwarded-for", TEST_CLIENT_IP);
@@ -1763,7 +1763,7 @@ test("knowledge entries reject invalid bodies, types, and IDs", async () => {
 
 test("reply context selects only active relevant business facts", async () => {
   const fixture = await createBusinessFixture();
-  const context = await buildReplyContext(pool, makeLead());
+  const context = await buildReplyContext(pool, requireSession().workspace.id, makeLead());
 
   assert.ok(context.profile);
   assert.equal(context.profile.id, fixture.profile.id);
@@ -1794,7 +1794,7 @@ test("reply context selects only active relevant business facts", async () => {
     "DELETE",
   );
 
-  const afterDeactivation = await buildReplyContext(pool, makeLead());
+  const afterDeactivation = await buildReplyContext(pool, requireSession().workspace.id, makeLead());
   assert.deepEqual(afterDeactivation.catalogue, []);
   assert.deepEqual(afterDeactivation.knowledge, []);
 });
@@ -1804,6 +1804,7 @@ test("unrelated enquiries receive no unrelated business facts", async () => {
 
   const context = await buildReplyContext(
     pool,
+    requireSession().workspace.id,
     makeLead({
       service: "Podcast editing",
       lastMessage: "How much for audio cleanup?",
@@ -1815,7 +1816,7 @@ test("unrelated enquiries receive no unrelated business facts", async () => {
 });
 
 test("empty profiles and knowledge bases produce safe empty context", async () => {
-  const context = await buildReplyContext(pool, makeLead());
+  const context = await buildReplyContext(pool, requireSession().workspace.id, makeLead());
 
   assert.equal(context.profile, null);
   assert.deepEqual(context.catalogue, []);
