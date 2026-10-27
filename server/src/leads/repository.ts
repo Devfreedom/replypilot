@@ -19,27 +19,35 @@ const LEAD_COLUMNS = `
   updated_at
 `;
 
-export async function listLeads(pool: Pool): Promise<Lead[]> {
-  const result = await pool.query<LeadRow>(`
-    SELECT ${LEAD_COLUMNS}
-    FROM leads
-    ORDER BY created_at DESC, id ASC
-  `);
+export async function listLeads(
+  pool: Pool,
+  workspaceId: string,
+): Promise<Lead[]> {
+  const result = await pool.query<LeadRow>(
+    `
+      SELECT ${LEAD_COLUMNS}
+      FROM leads
+      WHERE workspace_id = $1
+      ORDER BY created_at DESC, id ASC
+    `,
+    [workspaceId],
+  );
 
   return result.rows.map(mapLeadRow);
 }
 
 export async function getLeadById(
   pool: Pool,
+  workspaceId: string,
   id: string,
 ): Promise<Lead | null> {
   const result = await pool.query<LeadRow>(
     `
       SELECT ${LEAD_COLUMNS}
       FROM leads
-      WHERE id = $1
+      WHERE workspace_id = $1 AND id = $2
     `,
-    [id],
+    [workspaceId, id],
   );
 
   const row = result.rows[0];
@@ -48,11 +56,13 @@ export async function getLeadById(
 
 export async function createLead(
   pool: Pool,
+  workspaceId: string,
   input: CreateLeadInput,
 ): Promise<Lead> {
   const result = await pool.query<LeadRow>(
     `
       INSERT INTO leads (
+        workspace_id,
         name,
         service,
         channel,
@@ -60,10 +70,11 @@ export async function createLead(
         last_message,
         next_follow_up_at
       )
-      VALUES ($1, $2, $3, $4, $5, $6)
+      VALUES ($1, $2, $3, $4, $5, $6, $7)
       RETURNING ${LEAD_COLUMNS}
     `,
     [
+      workspaceId,
       input.name,
       input.service,
       input.channel,
@@ -84,17 +95,18 @@ export async function createLead(
 
 export async function updateLeadStatus(
   pool: Pool,
+  workspaceId: string,
   id: string,
   status: LeadStatus,
 ): Promise<Lead | null> {
   const result = await pool.query<LeadRow>(
     `
       UPDATE leads
-      SET status = $2, updated_at = now()
-      WHERE id = $1
+      SET status = $3, updated_at = now()
+      WHERE workspace_id = $1 AND id = $2
       RETURNING ${LEAD_COLUMNS}
     `,
-    [id, status],
+    [workspaceId, id, status],
   );
 
   const row = result.rows[0];
