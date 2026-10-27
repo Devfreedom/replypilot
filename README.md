@@ -144,8 +144,13 @@ All business endpoints below require a valid Better Auth session and workspace m
 
 | Method | Path | Behaviour |
 | --- | --- | --- |
-| `GET` | `/api/health` | `200 {"status":"ok"}` when PostgreSQL responds; `503 {"status":"unavailable"}` otherwise. |
-| `GET` | `/api/leads` | `200 {"leads":[...]}` ordered newest first. |
+| `POST` | `/api/auth/sign-up/email` | Better Auth email/password registration with `email`, `password`, and `name`. Creates a session cookie and, through the database hook, an owner workspace. Returns `422` for an existing email and `400` for invalid input. |
+| `POST` | `/api/auth/sign-in/email` | Better Auth email/password sign-in. Returns a session cookie, `401` for invalid credentials, `403` for an untrusted/missing origin, and `429` when rate-limited. |
+| `POST` | `/api/auth/sign-out` | Invalidates the server-side session and clears the session cookie. |
+| `GET` | `/api/auth/get-session` | Returns the current Better Auth session and user, or no session when unauthenticated. |
+| `GET` | `/api/workspace` | Requires a session. Returns the authenticated user, the resolved default workspace, and the member's `owner`/`member` role. |
+| `GET` | `/api/health` | `200 {"status":"ok"}` when PostgreSQL responds; `503 {"status":"unavailable"}` otherwise. Public. |
+| `GET` | `/api/leads` | `200 {"leads":[...]}` for the session workspace, ordered newest first. |
 | `POST` | `/api/leads` | Accepts `name`, `service`, and `lastMessage`; optional `channel`, `status`, and `nextFollowUpAt`. Returns `201 {"lead":{...}}`. Defaults: `Manual`, `New`. |
 | `PATCH` | `/api/leads/:id` | Accepts `{ "status": "New" \| "Contacted" \| "Quoted" \| "Booked" }`. Returns the updated lead, `400` for malformed input, or `404` for an unknown valid UUID. |
 | `POST` | `/api/leads/:id/draft-reply` | Returns a non-persistent mock demonstration analysis and suggested reply for an existing lead. Kept for compatibility; the response omits the saved-draft fields and sources. Returns `400` for a malformed ID or `404` for an unknown valid UUID. |
@@ -153,7 +158,7 @@ All business endpoints below require a valid Better Auth session and workspace m
 | `GET` | `/api/leads/:id/reply-drafts` | `200 {"drafts":[...]}` for that lead, newest first. Returns `404` for an unknown lead. |
 | `PATCH` | `/api/leads/:leadId/reply-drafts/:draftId` | Accepts `{"draftReply":"..."}` to save edited text, or `{"status":"approved"\|"draft"}` to change review status. Text edits return the draft to `draft`; approving records `approvedAt`. Returns `200 {"draft":{...}}`, `400`, or `404`. |
 | `GET` | `/api/business/profile` | `200 {"profile":{...}}`, or `200 {"profile":null}` when no profile has been created. |
-| `POST` | `/api/business/profile` | Creates the single development business profile. Returns `201 {"profile":{...}}`, `400` for invalid data, or `409` if a profile already exists. |
+| `POST` | `/api/business/profile` | Creates the single business profile for the session workspace. Returns `201 {"profile":{...}}`, `400` for invalid data, or `409` if that workspace already has a profile. |
 | `PATCH` | `/api/business/profile` | Replaces the profile's editable fields using the same body shape as creation. Returns the updated profile, `400`, or `404` when no profile exists. |
 | `GET` | `/api/business/catalogue` | `200 {"entries":[...]}` including active and inactive entries, newest first. |
 | `POST` | `/api/business/catalogue` | Creates a catalogue entry. Returns `201 {"entry":{...}}` or `400`. |
@@ -349,7 +354,27 @@ The saved `sources` snapshot preserves the original approved values even if a ca
 
 The Draft Reply dialog shows the enquiry summary, missing information, **Business information used**, editable text, demo labeling, review status, save/regenerate/copy/approve actions, and previously saved drafts for the lead. Reopening it restores the latest saved text, snapshot, and status; if the lead has no saved draft, it generates and saves one. Editing warns that changes may no longer be supported by the original facts.
 
+### Manual authentication and isolation checks
 
+These checks verify the browser flow and the server boundary. Use fictional data.
+
+1. Configure `.env` from `.env.example` with a unique `BETTER_AUTH_SECRET`, then start PostgreSQL, the API, and Next.js as described above.
+2. Visit `http://localhost:3000` in a private window. The dashboard must redirect to `/sign-in`; the private API endpoints must return `401` when called without a session cookie.
+3. Create an account through `/sign-up`. You should land on an owner workspace with no leads and no business profile. The sidebar must show the account email, workspace name, `Workspace owner`, and a working sign-out control.
+4. Add a lead and some business details, then open a saved draft. Confirm the draft uses only facts you saved and that approval remains a manual review action.
+5. Sign out. The old page must no longer load private data, and signing back in must restore the same workspace.
+6. Create a second account in a separate private window. Confirm it has a different workspace UUID and cannot see the first account's leads, profile, catalogue, knowledge entries, or drafts. Direct requests using the first account's record IDs must return `404` or `403`, not another workspace's data.
+7. If you need the legacy development records, follow the guarded bootstrap procedure above and confirm they appear in the selected account's workspace without ID or value changes.
+
+### Limitations and production work still required
+
+- Email verification and password recovery are not configured. Better Auth's password reset flow needs an email provider and deliberate templates before it can be enabled.
+- Workspace membership administration is deliberately minimal. Registration creates one owner workspace, the owner/member roles are enforced server-side, and members are read-only in this milestone. There is no invitation, member-management, role-change, or account-deletion UI/API.
+- The legacy workspace is assigned only by the guarded local CLI. There is no public bootstrap endpoint, first-user claim, or production admin console.
+- Production requires HTTPS, `BETTER_AUTH_URL` with an HTTPS origin, a secret from a deployment secret store, explicit trusted origins, secure reverse-proxy/header handling, backups, and a security review. The API currently binds to `127.0.0.1` for local development.
+- Better Auth's default rate-limit storage and the Express process model need review before horizontal scaling. Use a shared, reviewed rate-limit store if multiple API instances are deployed.
+- Reply generation is still a deterministic mock. There is no live AI provider, WhatsApp integration, webhook processing, scheduling, or customer-message sending. Approval never sends a message.
+- There is no audit log for business-record changes, no account recovery support workflow, and no automated backup/restore verification. Do not treat passing tests as evidence that the application is production-ready.
 
 ## Learn More
 

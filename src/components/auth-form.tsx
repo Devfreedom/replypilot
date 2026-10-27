@@ -34,6 +34,10 @@ function friendlyAuthError(
     return "An account with this email already exists. Sign in instead.";
   }
 
+  if (error?.status === 429 || code.includes("RATE_LIMIT")) {
+    return "Too many attempts. Wait a little, then try again.";
+  }
+
   if (
     code.includes("INVALID_EMAIL_OR_PASSWORD") ||
     code.includes("INVALID_PASSWORD") ||
