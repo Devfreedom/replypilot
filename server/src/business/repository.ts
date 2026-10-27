@@ -152,13 +152,15 @@ function mapKnowledge(row: KnowledgeRow): KnowledgeEntry {
 
 export async function getBusinessProfile(
   pool: Pool,
+  workspaceId: string,
 ): Promise<BusinessProfile | null> {
   const result = await pool.query<ProfileRow>(
     `
       SELECT ${PROFILE_COLUMNS}
       FROM business_profiles
-      WHERE singleton = true
+      WHERE workspace_id = $1
     `,
+    [workspaceId],
   );
 
   const row = result.rows[0];
@@ -167,11 +169,13 @@ export async function getBusinessProfile(
 
 export async function createBusinessProfile(
   pool: Pool,
+  workspaceId: string,
   input: BusinessProfileInput,
 ): Promise<BusinessProfile | null> {
   const result = await pool.query<ProfileRow>(
     `
       INSERT INTO business_profiles (
+        workspace_id,
         business_name,
         business_description,
         contact_email,
@@ -182,11 +186,12 @@ export async function createBusinessProfile(
         opening_hours,
         currency_code
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-      ON CONFLICT (singleton) DO NOTHING
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+      ON CONFLICT (workspace_id) DO NOTHING
       RETURNING ${PROFILE_COLUMNS}
     `,
     [
+      workspaceId,
       input.businessName,
       input.businessDescription,
       input.contactEmail ?? null,
@@ -205,25 +210,27 @@ export async function createBusinessProfile(
 
 export async function updateBusinessProfile(
   pool: Pool,
+  workspaceId: string,
   input: BusinessProfileInput,
 ): Promise<BusinessProfile | null> {
   const result = await pool.query<ProfileRow>(
     `
       UPDATE business_profiles
-      SET business_name = $1,
-          business_description = $2,
-          contact_email = $3,
-          contact_phone = $4,
-          contact_phone_country = $5,
-          business_address = $6,
-          timezone = $7,
-          opening_hours = $8,
-          currency_code = $9,
+      SET business_name = $2,
+          business_description = $3,
+          contact_email = $4,
+          contact_phone = $5,
+          contact_phone_country = $6,
+          business_address = $7,
+          timezone = $8,
+          opening_hours = $9,
+          currency_code = $10,
           updated_at = now()
-      WHERE singleton = true
+      WHERE workspace_id = $1
       RETURNING ${PROFILE_COLUMNS}
     `,
     [
+      workspaceId,
       input.businessName,
       input.businessDescription,
       input.contactEmail ?? null,
@@ -242,15 +249,18 @@ export async function updateBusinessProfile(
 
 export async function listCatalogue(
   pool: Pool,
+  workspaceId: string,
   activeOnly = false,
 ): Promise<CatalogueEntry[]> {
   const result = await pool.query<CatalogueRow>(
     `
       SELECT ${CATALOGUE_COLUMNS}
       FROM catalogue_entries
-      ${activeOnly ? "WHERE is_active = true" : ""}
+      WHERE workspace_id = $1
+      ${activeOnly ? "AND is_active = true" : ""}
       ORDER BY created_at DESC, id ASC
     `,
+    [workspaceId],
   );
 
   return result.rows.map(mapCatalogue);
@@ -258,11 +268,13 @@ export async function listCatalogue(
 
 export async function createCatalogueEntry(
   pool: Pool,
+  workspaceId: string,
   input: CatalogueEntryInput,
 ): Promise<CatalogueEntry> {
   const result = await pool.query<CatalogueRow>(
     `
       INSERT INTO catalogue_entries (
+        workspace_id,
         name,
         description,
         price_minor,
@@ -270,10 +282,11 @@ export async function createCatalogueEntry(
         is_active,
         availability_notes
       )
-      VALUES ($1, $2, $3, $4, $5, $6)
+      VALUES ($1, $2, $3, $4, $5, $6, $7)
       RETURNING ${CATALOGUE_COLUMNS}
     `,
     [
+      workspaceId,
       input.name,
       input.description,
       input.priceMinor ?? null,
@@ -294,23 +307,25 @@ export async function createCatalogueEntry(
 
 export async function updateCatalogueEntry(
   pool: Pool,
+  workspaceId: string,
   id: string,
   input: CatalogueEntryInput,
 ): Promise<CatalogueEntry | null> {
   const result = await pool.query<CatalogueRow>(
     `
       UPDATE catalogue_entries
-      SET name = $2,
-          description = $3,
-          price_minor = $4,
-          currency_code = $5,
-          is_active = $6,
-          availability_notes = $7,
+      SET name = $3,
+          description = $4,
+          price_minor = $5,
+          currency_code = $6,
+          is_active = $7,
+          availability_notes = $8,
           updated_at = now()
-      WHERE id = $1
+      WHERE workspace_id = $1 AND id = $2
       RETURNING ${CATALOGUE_COLUMNS}
     `,
     [
+      workspaceId,
       id,
       input.name,
       input.description,
@@ -327,6 +342,7 @@ export async function updateCatalogueEntry(
 
 export async function deactivateCatalogueEntry(
   pool: Pool,
+  workspaceId: string,
   id: string,
 ): Promise<CatalogueEntry | null> {
   const result = await pool.query<CatalogueRow>(
@@ -334,10 +350,10 @@ export async function deactivateCatalogueEntry(
       UPDATE catalogue_entries
       SET is_active = false,
           updated_at = now()
-      WHERE id = $1
+      WHERE workspace_id = $1 AND id = $2
       RETURNING ${CATALOGUE_COLUMNS}
     `,
-    [id],
+    [workspaceId, id],
   );
 
   const row = result.rows[0];
@@ -346,15 +362,18 @@ export async function deactivateCatalogueEntry(
 
 export async function listKnowledge(
   pool: Pool,
+  workspaceId: string,
   activeOnly = false,
 ): Promise<KnowledgeEntry[]> {
   const result = await pool.query<KnowledgeRow>(
     `
       SELECT ${KNOWLEDGE_COLUMNS}
       FROM knowledge_entries
-      ${activeOnly ? "WHERE is_active = true" : ""}
+      WHERE workspace_id = $1
+      ${activeOnly ? "AND is_active = true" : ""}
       ORDER BY created_at DESC, id ASC
     `,
+    [workspaceId],
   );
 
   return result.rows.map(mapKnowledge);
@@ -362,20 +381,23 @@ export async function listKnowledge(
 
 export async function createKnowledgeEntry(
   pool: Pool,
+  workspaceId: string,
   input: KnowledgeEntryInput,
 ): Promise<KnowledgeEntry> {
   const result = await pool.query<KnowledgeRow>(
     `
       INSERT INTO knowledge_entries (
+        workspace_id,
         title,
         answer,
         entry_type,
         is_active
       )
-      VALUES ($1, $2, $3, $4)
+      VALUES ($1, $2, $3, $4, $5)
       RETURNING ${KNOWLEDGE_COLUMNS}
     `,
     [
+      workspaceId,
       input.title,
       input.answer,
       input.entryType,
@@ -394,21 +416,29 @@ export async function createKnowledgeEntry(
 
 export async function updateKnowledgeEntry(
   pool: Pool,
+  workspaceId: string,
   id: string,
   input: KnowledgeEntryInput,
 ): Promise<KnowledgeEntry | null> {
   const result = await pool.query<KnowledgeRow>(
     `
       UPDATE knowledge_entries
-      SET title = $2,
-          answer = $3,
-          entry_type = $4,
-          is_active = $5,
+      SET title = $3,
+          answer = $4,
+          entry_type = $5,
+          is_active = $6,
           updated_at = now()
-      WHERE id = $1
+      WHERE workspace_id = $1 AND id = $2
       RETURNING ${KNOWLEDGE_COLUMNS}
     `,
-    [id, input.title, input.answer, input.entryType, input.isActive ?? true],
+    [
+      workspaceId,
+      id,
+      input.title,
+      input.answer,
+      input.entryType,
+      input.isActive ?? true,
+    ],
   );
 
   const row = result.rows[0];
@@ -417,6 +447,7 @@ export async function updateKnowledgeEntry(
 
 export async function deactivateKnowledgeEntry(
   pool: Pool,
+  workspaceId: string,
   id: string,
 ): Promise<KnowledgeEntry | null> {
   const result = await pool.query<KnowledgeRow>(
@@ -424,10 +455,10 @@ export async function deactivateKnowledgeEntry(
       UPDATE knowledge_entries
       SET is_active = false,
           updated_at = now()
-      WHERE id = $1
+      WHERE workspace_id = $1 AND id = $2
       RETURNING ${KNOWLEDGE_COLUMNS}
     `,
-    [id],
+    [workspaceId, id],
   );
 
   const row = result.rows[0];

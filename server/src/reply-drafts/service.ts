@@ -51,10 +51,11 @@ function canonicalizeSources(
 
 export async function generateReplyDraft(
   pool: Pool,
+  workspaceId: string,
   lead: Lead,
   provider: ReplyDraftProvider,
 ): Promise<ReplyDraft> {
-  const context = await buildReplyContext(pool, lead);
+  const context = await buildReplyContext(pool, workspaceId, lead);
   const providerResult = await provider.draftReply(lead, context);
   const parsed = replyDraftSchema.safeParse(providerResult);
 

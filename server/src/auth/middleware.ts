@@ -1,11 +1,8 @@
 import { fromNodeHeaders } from "better-auth/node";
 import type { NextFunction, Request, RequestHandler, Response } from "express";
 import type { Pool } from "pg";
-import {
-  ensureWorkspaceForUser,
-  type WorkspaceContext,
-} from "../workspaces/repository.js";
-import type { WorkspaceRole } from "../workspaces/types.js";
+import { ensureWorkspaceForUser } from "../workspaces/repository.js";
+import type { WorkspaceContext, WorkspaceRole } from "../workspaces/types.js";
 import type { AuthInstance } from "./config.js";
 
 export type AuthenticatedWorkspaceContext = Readonly<{

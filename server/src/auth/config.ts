@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { betterAuth } from "better-auth";
 import type { Pool } from "pg";
 import { ensureWorkspaceForUser } from "../workspaces/repository.js";
@@ -16,15 +17,13 @@ export type CreateAuthOptions = Readonly<{
   rateLimit?: AuthRateLimitOptions;
 }>;
 
-export type AuthInstance = ReturnType<typeof createAuth>;
-
 export function createAuth({
   pool,
   secret,
   baseURL,
   trustedOrigins,
   rateLimit,
-}: CreateAuthOptions): AuthInstance {
+}: CreateAuthOptions) {
   return betterAuth({
     appName: "ReplyPilot",
     secret,
@@ -44,7 +43,7 @@ export function createAuth({
     },
     advanced: {
       database: {
-        generateId: "uuid",
+        generateId: () => randomUUID(),
       },
     },
     user: {
@@ -114,3 +113,5 @@ export function createAuth({
     },
   });
 }
+
+export type AuthInstance = ReturnType<typeof createAuth>;

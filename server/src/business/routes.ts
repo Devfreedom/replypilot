@@ -1,6 +1,11 @@
 import { Router, type Response } from "express";
 import type { Pool } from "pg";
 import type { ZodError } from "zod";
+import type { AuthInstance } from "../auth/config.js";
+import {
+  createRequireWorkspace,
+  getAuthContext,
+} from "../auth/middleware.js";
 import {
   businessProfileSchema,
   catalogueEntrySchema,
@@ -37,7 +42,7 @@ function validationError(
   });
 }
 
-function parseId(value: string, response: Response): string | null {
+function parseId(value: unknown, response: Response): string | null {
   const parsed = resourceIdSchema.safeParse(value);
 
   if (!parsed.success) {
@@ -48,14 +53,33 @@ function parseId(value: string, response: Response): string | null {
   return parsed.data;
 }
 
-export function createBusinessRouter({ pool }: { pool: Pool }): Router {
+export function createBusinessRouter({
+  pool,
+  auth,
+}: {
+  pool: Pool;
+  auth: AuthInstance;
+}): Router {
   const router = Router();
-
-  router.get("/profile", async (_request, response) => {
-    response.status(200).json({ profile: await getBusinessProfile(pool) });
+  const requireMember = createRequireWorkspace({
+    auth,
+    pool,
+    roles: ["owner", "member"],
+  });
+  const requireOwner = createRequireWorkspace({
+    auth,
+    pool,
+    roles: ["owner"],
   });
 
-  router.post("/profile", async (request, response) => {
+  router.get("/profile", requireMember, async (_request, response) => {
+    const { workspace } = getAuthContext(response);
+    response
+      .status(200)
+      .json({ profile: await getBusinessProfile(pool, workspace.id) });
+  });
+
+  router.post("/profile", requireOwner, async (request, response) => {
     const parsed = businessProfileSchema.safeParse(request.body);
 
     if (!parsed.success) {
@@ -63,7 +87,12 @@ export function createBusinessRouter({ pool }: { pool: Pool }): Router {
       return;
     }
 
-    const profile = await createBusinessProfile(pool, parsed.data);
+    const { workspace } = getAuthContext(response);
+    const profile = await createBusinessProfile(
+      pool,
+      workspace.id,
+      parsed.data,
+    );
 
     if (!profile) {
       response.status(409).json({ error: "Business profile already exists" });
@@ -73,7 +102,7 @@ export function createBusinessRouter({ pool }: { pool: Pool }): Router {
     response.status(201).json({ profile });
   });
 
-  router.patch("/profile", async (request, response) => {
+  router.patch("/profile", requireOwner, async (request, response) => {
     const parsed = businessProfileSchema.safeParse(request.body);
 
     if (!parsed.success) {
@@ -81,7 +110,12 @@ export function createBusinessRouter({ pool }: { pool: Pool }): Router {
       return;
     }
 
-    const profile = await updateBusinessProfile(pool, parsed.data);
+    const { workspace } = getAuthContext(response);
+    const profile = await updateBusinessProfile(
+      pool,
+      workspace.id,
+      parsed.data,
+    );
 
     if (!profile) {
       response.status(404).json({ error: "Business profile not found" });
@@ -91,11 +125,14 @@ export function createBusinessRouter({ pool }: { pool: Pool }): Router {
     response.status(200).json({ profile });
   });
 
-  router.get("/catalogue", async (_request, response) => {
-    response.status(200).json({ entries: await listCatalogue(pool) });
+  router.get("/catalogue", requireMember, async (_request, response) => {
+    const { workspace } = getAuthContext(response);
+    response
+      .status(200)
+      .json({ entries: await listCatalogue(pool, workspace.id) });
   });
 
-  router.post("/catalogue", async (request, response) => {
+  router.post("/catalogue", requireOwner, async (request, response) => {
     const parsed = catalogueEntrySchema.safeParse(request.body);
 
     if (!parsed.success) {
@@ -103,57 +140,76 @@ export function createBusinessRouter({ pool }: { pool: Pool }): Router {
       return;
     }
 
+    const { workspace } = getAuthContext(response);
+    response.status(201).json({
+      entry: await createCatalogueEntry(pool, workspace.id, parsed.data),
+    });
+  });
+
+  router.patch(
+    "/catalogue/:id",
+    requireOwner,
+    async (request, response) => {
+      const id = parseId(request.params.id, response);
+
+      if (!id) {
+        return;
+      }
+
+      const parsed = catalogueEntrySchema.safeParse(request.body);
+
+      if (!parsed.success) {
+        validationError(response, parsed.error, "body");
+        return;
+      }
+
+      const { workspace } = getAuthContext(response);
+      const entry = await updateCatalogueEntry(
+        pool,
+        workspace.id,
+        id,
+        parsed.data,
+      );
+
+      if (!entry) {
+        response.status(404).json({ error: "Catalogue entry not found" });
+        return;
+      }
+
+      response.status(200).json({ entry });
+    },
+  );
+
+  router.delete(
+    "/catalogue/:id",
+    requireOwner,
+    async (request, response) => {
+      const id = parseId(request.params.id, response);
+
+      if (!id) {
+        return;
+      }
+
+      const { workspace } = getAuthContext(response);
+      const entry = await deactivateCatalogueEntry(pool, workspace.id, id);
+
+      if (!entry) {
+        response.status(404).json({ error: "Catalogue entry not found" });
+        return;
+      }
+
+      response.status(200).json({ entry });
+    },
+  );
+
+  router.get("/knowledge", requireMember, async (_request, response) => {
+    const { workspace } = getAuthContext(response);
     response
-      .status(201)
-      .json({ entry: await createCatalogueEntry(pool, parsed.data) });
+      .status(200)
+      .json({ entries: await listKnowledge(pool, workspace.id) });
   });
 
-  router.patch("/catalogue/:id", async (request, response) => {
-    const id = parseId(request.params.id, response);
-
-    if (!id) {
-      return;
-    }
-
-    const parsed = catalogueEntrySchema.safeParse(request.body);
-
-    if (!parsed.success) {
-      validationError(response, parsed.error, "body");
-      return;
-    }
-
-    const entry = await updateCatalogueEntry(pool, id, parsed.data);
-
-    if (!entry) {
-      response.status(404).json({ error: "Catalogue entry not found" });
-      return;
-    }
-
-    response.status(200).json({ entry });
-  });
-
-  router.delete("/catalogue/:id", async (request, response) => {
-    const id = parseId(request.params.id, response);
-
-    if (!id) {
-      return;
-    }
-
-    const entry = await deactivateCatalogueEntry(pool, id);
-
-    if (!entry) {
-      response.status(404).json({ error: "Catalogue entry not found" });
-      return;
-    }
-
-    response.status(200).json({ entry });
-  });
-
-  router.get("/knowledge", async (_request, response) => {
-    response.status(200).json({ entries: await listKnowledge(pool) });
-  });
-
-  router.post("/knowledge", async (request, response) => {
+  router.post("/knowledge", requireOwner, async (request, response) => {
     const parsed = knowledgeEntrySchema.safeParse(request.body);
 
     if (!parsed.success) {
@@ -161,51 +217,67 @@ export function createBusinessRouter({ pool }: { pool: Pool }): Router {
       return;
     }
 
-    response
-      .status(201)
-      .json({ entry: await createKnowledgeEntry(pool, parsed.data) });
+    const { workspace } = getAuthContext(response);
+    response.status(201).json({
+      entry: await createKnowledgeEntry(pool, workspace.id, parsed.data),
+    });
   });
 
-  router.patch("/knowledge/:id", async (request, response) => {
-    const id = parseId(request.params.id, response);
+  router.patch(
+    "/knowledge/:id",
+    requireOwner,
+    async (request, response) => {
+      const id = parseId(request.params.id, response);
 
-    if (!id) {
-      return;
-    }
+      if (!id) {
+        return;
+      }
 
-    const parsed = knowledgeEntrySchema.safeParse(request.body);
+      const parsed = knowledgeEntrySchema.safeParse(request.body);
 
-    if (!parsed.success) {
-      validationError(response, parsed.error, "body");
-      return;
-    }
+      if (!parsed.success) {
+        validationError(response, parsed.error, "body");
+        return;
+      }
 
-    const entry = await updateKnowledgeEntry(pool, id, parsed.data);
+      const { workspace } = getAuthContext(response);
+      const entry = await updateKnowledgeEntry(
+        pool,
+        workspace.id,
+        id,
+        parsed.data,
+      );
 
-    if (!entry) {
-      response.status(404).json({ error: "Knowledge entry not found" });
-      return;
-    }
+      if (!entry) {
+        response.status(404).json({ error: "Knowledge entry not found" });
+        return;
+      }
 
-    response.status(200).json({ entry });
-  });
+      response.status(200).json({ entry });
+    },
+  );
 
-  router.delete("/knowledge/:id", async (request, response) => {
-    const id = parseId(request.params.id, response);
+  router.delete(
+    "/knowledge/:id",
+    requireOwner,
+    async (request, response) => {
+      const id = parseId(request.params.id, response);
 
-    if (!id) {
-      return;
-    }
+      if (!id) {
+        return;
+      }
 
-    const entry = await deactivateKnowledgeEntry(pool, id);
+      const { workspace } = getAuthContext(response);
+      const entry = await deactivateKnowledgeEntry(pool, workspace.id, id);
 
-    if (!entry) {
-      response.status(404).json({ error: "Knowledge entry not found" });
-      return;
-    }
+      if (!entry) {
+        response.status(404).json({ error: "Knowledge entry not found" });
+        return;
+      }
 
-    response.status(200).json({ entry });
-  });
+      response.status(200).json({ entry });
+    },
+  );
 
   return router;
 }

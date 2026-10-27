@@ -1,5 +1,6 @@
 import { loadConfig } from "../config.js";
 import { createPool } from "./pool.js";
+import { LEGACY_WORKSPACE_ID } from "../workspaces/repository.js";
 import { seedLeads } from "./seed.js";
 
 async function main(): Promise<void> {
@@ -7,7 +8,7 @@ async function main(): Promise<void> {
   const pool = createPool(config.databaseUrl);
 
   try {
-    const inserted = await seedLeads(pool);
+    const inserted = await seedLeads(pool, LEGACY_WORKSPACE_ID);
 
     if (inserted === 0) {
       console.log("Sample leads already present; nothing inserted.");
