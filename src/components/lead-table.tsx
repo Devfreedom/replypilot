@@ -50,11 +50,13 @@ export function LeadTable({
   onStatusChange,
   onDraftReply,
   pendingStatusIds,
+  canManage,
 }: {
   leads: Lead[];
   onStatusChange: (id: string, status: LeadStatus) => void;
   onDraftReply: (lead: Lead) => void;
   pendingStatusIds: ReadonlySet<string>;
+  canManage: boolean;
 }) {
   return (
     <>
@@ -79,24 +81,32 @@ export function LeadTable({
                   </p>
                 </div>
               </div>
-              <StatusSelect
-                lead={lead}
-                onStatusChange={onStatusChange}
-                disabled={pendingStatusIds.has(lead.id)}
-              />
+              {canManage ? (
+                <StatusSelect
+                  lead={lead}
+                  onStatusChange={onStatusChange}
+                  disabled={pendingStatusIds.has(lead.id)}
+                />
+              ) : (
+                <span className="rounded-lg bg-slate-100 px-2.5 py-1 text-xs font-semibold text-slate-600">
+                  {lead.status}
+                </span>
+              )}
             </div>
 
             <p className="mt-3 text-sm leading-6 text-slate-600">
               {lead.lastMessage}
             </p>
 
-            <button
-              type="button"
-              onClick={() => onDraftReply(lead)}
-              className="mt-3 rounded-lg text-sm font-semibold text-blue-700 hover:text-blue-800 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
-            >
-              Draft reply
-            </button>
+            {canManage ? (
+              <button
+                type="button"
+                onClick={() => onDraftReply(lead)}
+                className="mt-3 rounded-lg text-sm font-semibold text-blue-700 hover:text-blue-800 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
+              >
+                Draft reply
+              </button>
+            ) : null}
 
             <dl className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-500">
               <div className="flex items-center gap-1.5">
@@ -179,11 +189,17 @@ export function LeadTable({
                 </td>
 
                 <td className="px-6 py-5">
-                  <StatusSelect
-                    lead={lead}
-                    onStatusChange={onStatusChange}
-                    disabled={pendingStatusIds.has(lead.id)}
-                  />
+                  {canManage ? (
+                    <StatusSelect
+                      lead={lead}
+                      onStatusChange={onStatusChange}
+                      disabled={pendingStatusIds.has(lead.id)}
+                    />
+                  ) : (
+                    <span className="rounded-lg bg-slate-100 px-2.5 py-1 text-xs font-semibold text-slate-600">
+                      {lead.status}
+                    </span>
+                  )}
                 </td>
 
                 <td className="px-6 py-5">
@@ -195,13 +211,17 @@ export function LeadTable({
                 </td>
 
                 <td className="px-6 py-5">
-                  <button
-                    type="button"
-                    onClick={() => onDraftReply(lead)}
-                    className="whitespace-nowrap rounded-lg text-sm font-semibold text-blue-700 hover:text-blue-800 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
-                  >
-                    Draft reply
-                  </button>
+                  {canManage ? (
+                    <button
+                      type="button"
+                      onClick={() => onDraftReply(lead)}
+                      className="whitespace-nowrap rounded-lg text-sm font-semibold text-blue-700 hover:text-blue-800 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
+                    >
+                      Draft reply
+                    </button>
+                  ) : (
+                    <span className="text-xs text-slate-400">Read-only</span>
+                  )}
                 </td>
               </tr>
             ))}

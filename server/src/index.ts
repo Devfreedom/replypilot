@@ -7,7 +7,25 @@ const SHUTDOWN_TIMEOUT_MS = 10_000;
 function start(): void {
   const config = loadConfig();
   const pool = createPool(config.databaseUrl);
-  const app = createApp({ pool });
+  const app = createApp({
+    pool,
+    auth: {
+      secret: config.betterAuthSecret,
+      baseURL: config.betterAuthUrl,
+      trustedOrigins: config.trustedOrigins,
+    },
+    whatsapp: config.whatsapp,
+  });
+
+  if (config.whatsapp) {
+    console.log(
+      "WhatsApp inbound webhook configured for the single test workspace.",
+    );
+  } else {
+    console.log(
+      "WhatsApp inbound webhook disabled: WHATSAPP_* variables are not configured.",
+    );
+  }
 
   const server = app.listen(config.port, "127.0.0.1", () => {
     console.log(

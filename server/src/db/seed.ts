@@ -69,13 +69,17 @@ export function buildSampleLeads(now = Date.now()): SeedLead[] {
   ];
 }
 
-export async function seedLeads(pool: Pool): Promise<number> {
+export async function seedLeads(
+  pool: Pool,
+  workspaceId: string,
+): Promise<number> {
   let inserted = 0;
 
   for (const lead of buildSampleLeads()) {
     const result = await pool.query(
       `
         INSERT INTO leads (
+          workspace_id,
           id,
           name,
           service,
@@ -86,10 +90,11 @@ export async function seedLeads(pool: Pool): Promise<number> {
           created_at,
           updated_at
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9)
         ON CONFLICT (id) DO NOTHING
       `,
       [
+        workspaceId,
         lead.id,
         lead.name,
         lead.service,

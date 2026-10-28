@@ -1,5 +1,9 @@
 import type { Pool } from "pg";
 import { runMigrations } from "../src/db/migrate.js";
+import {
+  LEGACY_WORKSPACE_ID,
+  LEGACY_WORKSPACE_NAME,
+} from "../src/workspaces/repository.js";
 
 type DatabaseIdentity = Readonly<{
   hostname: string;
@@ -89,6 +93,31 @@ export async function prepareTestDatabase(pool: Pool): Promise<void> {
  */
 export async function resetTestData(pool: Pool): Promise<void> {
   await pool.query(
-    "TRUNCATE TABLE reply_drafts, business_profiles, catalogue_entries, knowledge_entries, leads",
+    `
+      TRUNCATE TABLE
+        whatsapp_messages,
+        whatsapp_conversations,
+        reply_drafts,
+        business_profiles,
+        catalogue_entries,
+        knowledge_entries,
+        leads,
+        workspace_memberships,
+        workspaces,
+        auth_sessions,
+        auth_accounts,
+        auth_verifications,
+        auth_users
+      CASCADE
+    `,
+  );
+
+  await pool.query(
+    `
+      INSERT INTO workspaces (id, name)
+      VALUES ($1, $2)
+      ON CONFLICT (id) DO NOTHING
+    `,
+    [LEGACY_WORKSPACE_ID, LEGACY_WORKSPACE_NAME],
   );
 }

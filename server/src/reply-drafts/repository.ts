@@ -59,16 +59,17 @@ function mapReplyDraftRow(row: ReplyDraftRow): SavedReplyDraft {
 
 export async function listReplyDraftsForLead(
   pool: Pool,
+  workspaceId: string,
   leadId: string,
 ): Promise<SavedReplyDraft[]> {
   const result = await pool.query<ReplyDraftRow>(
     `
       SELECT ${REPLY_DRAFT_COLUMNS}
       FROM reply_drafts
-      WHERE lead_id = $1
+      WHERE workspace_id = $1 AND lead_id = $2
       ORDER BY created_at DESC, id ASC
     `,
-    [leadId],
+    [workspaceId, leadId],
   );
 
   return result.rows.map(mapReplyDraftRow);
@@ -76,6 +77,7 @@ export async function listReplyDraftsForLead(
 
 export async function getReplyDraftForLead(
   pool: Pool,
+  workspaceId: string,
   leadId: string,
   draftId: string,
 ): Promise<SavedReplyDraft | null> {
@@ -83,9 +85,9 @@ export async function getReplyDraftForLead(
     `
       SELECT ${REPLY_DRAFT_COLUMNS}
       FROM reply_drafts
-      WHERE id = $1 AND lead_id = $2
+      WHERE workspace_id = $1 AND id = $2 AND lead_id = $3
     `,
-    [draftId, leadId],
+    [workspaceId, draftId, leadId],
   );
 
   const row = result.rows[0];
@@ -94,12 +96,14 @@ export async function getReplyDraftForLead(
 
 export async function createReplyDraft(
   pool: Pool,
+  workspaceId: string,
   leadId: string,
   draft: ReplyDraft,
 ): Promise<SavedReplyDraft> {
   const result = await pool.query<ReplyDraftRow>(
     `
       INSERT INTO reply_drafts (
+        workspace_id,
         lead_id,
         intent,
         summary,
@@ -111,10 +115,11 @@ export async function createReplyDraft(
         sources,
         approved_at
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, 'draft', $8, NULL)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'draft', $9, NULL)
       RETURNING ${REPLY_DRAFT_COLUMNS}
     `,
     [
+      workspaceId,
       leadId,
       draft.intent,
       draft.summary,
@@ -137,6 +142,7 @@ export async function createReplyDraft(
 
 export async function replaceGeneratedReplyDraft(
   pool: Pool,
+  workspaceId: string,
   leadId: string,
   draftId: string,
   draft: ReplyDraft,
@@ -144,20 +150,21 @@ export async function replaceGeneratedReplyDraft(
   const result = await pool.query<ReplyDraftRow>(
     `
       UPDATE reply_drafts
-      SET intent = $3,
-          summary = $4,
-          missing_information = $5,
-          draft_reply = $6,
-          provider = $7,
-          is_demo = $8,
+      SET intent = $4,
+          summary = $5,
+          missing_information = $6,
+          draft_reply = $7,
+          provider = $8,
+          is_demo = $9,
           status = 'draft',
-          sources = $9,
+          sources = $10,
           approved_at = NULL,
           updated_at = now()
-      WHERE id = $1 AND lead_id = $2
+      WHERE workspace_id = $1 AND id = $2 AND lead_id = $3
       RETURNING ${REPLY_DRAFT_COLUMNS}
     `,
     [
+      workspaceId,
       draftId,
       leadId,
       draft.intent,
@@ -176,6 +183,7 @@ export async function replaceGeneratedReplyDraft(
 
 export async function updateReplyDraftText(
   pool: Pool,
+  workspaceId: string,
   leadId: string,
   draftId: string,
   draftReply: string,
@@ -183,14 +191,14 @@ export async function updateReplyDraftText(
   const result = await pool.query<ReplyDraftRow>(
     `
       UPDATE reply_drafts
-      SET draft_reply = $3,
+      SET draft_reply = $4,
           status = 'draft',
           approved_at = NULL,
           updated_at = now()
-      WHERE id = $1 AND lead_id = $2
+      WHERE workspace_id = $1 AND id = $2 AND lead_id = $3
       RETURNING ${REPLY_DRAFT_COLUMNS}
     `,
-    [draftId, leadId, draftReply],
+    [workspaceId, draftId, leadId, draftReply],
   );
 
   const row = result.rows[0];
@@ -199,6 +207,7 @@ export async function updateReplyDraftText(
 
 export async function updateReplyDraftStatus(
   pool: Pool,
+  workspaceId: string,
   leadId: string,
   draftId: string,
   status: ReplyDraftReviewStatus,
@@ -206,16 +215,16 @@ export async function updateReplyDraftStatus(
   const result = await pool.query<ReplyDraftRow>(
     `
       UPDATE reply_drafts
-      SET status = $3,
+      SET status = $4,
           approved_at = CASE
-            WHEN $3 = 'approved' THEN now()
+            WHEN $4 = 'approved' THEN now()
             ELSE NULL
           END,
           updated_at = now()
-      WHERE id = $1 AND lead_id = $2
+      WHERE workspace_id = $1 AND id = $2 AND lead_id = $3
       RETURNING ${REPLY_DRAFT_COLUMNS}
     `,
-    [draftId, leadId, status],
+    [workspaceId, draftId, leadId, status],
   );
 
   const row = result.rows[0];

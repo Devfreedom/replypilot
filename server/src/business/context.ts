@@ -103,12 +103,13 @@ function relevant<T>(
  */
 export async function buildReplyContext(
   pool: Pool,
+  workspaceId: string,
   lead: Lead,
 ): Promise<ReplyContext> {
   const [profile, catalogue, knowledge] = await Promise.all([
-    getBusinessProfile(pool),
-    listCatalogue(pool, true),
-    listKnowledge(pool, true),
+    getBusinessProfile(pool, workspaceId),
+    listCatalogue(pool, workspaceId, true),
+    listKnowledge(pool, workspaceId, true),
   ]);
 
   const enquiry = `${lead.service} ${lead.lastMessage}`;

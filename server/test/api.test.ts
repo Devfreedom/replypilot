@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
+import { createHmac, randomUUID } from "node:crypto";
 import { once } from "node:events";
+import { readFile, readdir } from "node:fs/promises";
 import type { Server } from "node:http";
 import { after, before, beforeEach, test } from "node:test";
+import { join } from "node:path";
 import { Pool } from "pg";
 import {
   MockReplyDraftProvider,
@@ -20,11 +22,22 @@ import { createPool } from "../src/db/pool.js";
 import { runMigrations } from "../src/db/migrate.js";
 import { seedLeads } from "../src/db/seed.js";
 import {
+  LEGACY_WORKSPACE_ID,
+  bootstrapLegacyWorkspace,
+  listMembershipsForUser,
+} from "../src/workspaces/repository.js";
+import {
   type Weekday,
   openingHoursFromSchedule,
   scheduleFromOpeningHours,
   setDayOpen,
 } from "../../src/lib/opening-hours.js";
+import type {
+  WhatsAppConversation,
+  WhatsAppIntegrationConfig,
+  WhatsAppMessage,
+} from "../src/whatsapp/types.js";
+import { loadWhatsAppConfig } from "../src/whatsapp/config.js";
 import {
   getTestDatabaseUrl,
   prepareTestDatabase,
@@ -38,6 +51,7 @@ type Lead = {
   channel: "WhatsApp" | "Manual";
   status: "New" | "Contacted" | "Quoted" | "Booked";
   lastMessage: string;
+  whatsappNumber: string | null;
   nextFollowUpAt: string | null;
   createdAt: string;
   updatedAt: string;
@@ -130,21 +144,74 @@ type KnowledgeListPayload = { entries: KnowledgeItem[] };
 
 
 const testDatabaseUrl = getTestDatabaseUrl();
+const MIGRATIONS_DIR = join(
+  process.cwd(),
+  "server",
+  "src",
+  "db",
+  "migrations",
+);
+const TEST_AUTH_ORIGIN = "http://127.0.0.1:3000";
+const TEST_AUTH_SECRET = "replypilot-test-only-secret-0123456789abcdef";
+const TEST_CLIENT_IP = "127.0.0.1";
+const nativeFetch = globalThis.fetch.bind(globalThis);
+
+type TestWorkspacePayload = {
+  id: string;
+  name: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+type TestSession = Readonly<{
+  email: string;
+  password: string;
+  cookie: string;
+  user: Readonly<{ id: string; name: string; email: string }>;
+  workspace: TestWorkspacePayload;
+  role: "owner" | "member";
+}>;
+
+type TestAuthRateLimit = Readonly<{
+  enabled?: boolean;
+  window?: number;
+  max?: number;
+}>;
+
+type TestAuthOptions = Readonly<{
+  baseURL?: string;
+  trustedOrigins?: string[];
+  rateLimit?: TestAuthRateLimit;
+}>;
 
 let pool: Pool;
 let server: Server;
 let baseUrl: string;
+let currentSession: TestSession;
 
 async function startServer(
   poolToUse: Pool,
   replyDraftProvider?: ReplyDraftProvider,
+  authOptions: TestAuthOptions = {},
+  whatsapp: WhatsAppIntegrationConfig | null = null,
 ): Promise<{
   server: Server;
   baseUrl: string;
 }> {
+  const authBaseUrl = authOptions.baseURL ?? TEST_AUTH_ORIGIN;
   const appServer = createApp({
     pool: poolToUse,
     replyDraftProvider,
+    whatsapp,
+    auth: {
+      secret: TEST_AUTH_SECRET,
+      baseURL: authBaseUrl,
+      trustedOrigins: authOptions.trustedOrigins ?? [authBaseUrl],
+      // The suite creates a real account for every test. Rate limiting is
+      // exercised explicitly against a dedicated app instance instead of
+      // tripping Better Auth's sign-up rule during unrelated tests.
+      rateLimit: authOptions.rateLimit ?? { enabled: false },
+    },
   }).listen(0, "127.0.0.1");
   await once(appServer, "listening");
 
@@ -175,28 +242,307 @@ async function stopServer(serverToStop: Server): Promise<void> {
   });
 }
 
+const TEST_WHATSAPP_VERIFY_TOKEN = "replypilot-test-whatsapp-verify-token";
+const TEST_WHATSAPP_APP_SECRET =
+  "replypilot-test-whatsapp-app-secret-0123456789abcdef";
+const TEST_WHATSAPP_PHONE_NUMBER_ID = "106540352242922";
+const TEST_WHATSAPP_CUSTOMER_WA_ID = "16505551234";
+const TEST_WHATSAPP_BSUID = "US.13491208655302741918";
+
+type TestWhatsAppMessage = {
+  id: string;
+  from?: string;
+  timestamp: string;
+  type: string;
+  text?: { body: string };
+  [key: string]: unknown;
+};
+
+type TestWhatsAppContact = {
+  wa_id?: string;
+  user_id?: string;
+  profile: { name: string };
+};
+
+type TestWhatsAppChange = {
+  field?: string;
+  value: unknown;
+};
+
+type WhatsAppWebhookPayload = {
+  status: "ok" | "ignored";
+  stored?: number;
+  duplicates?: number;
+};
+
+type WhatsAppConversationsPayload = {
+  conversations: WhatsAppConversation[];
+};
+
+type WhatsAppConversationMessagesPayload = {
+  conversation: WhatsAppConversation;
+  messages: WhatsAppMessage[];
+};
+
+function signWhatsAppBody(
+  body: string,
+  secret = TEST_WHATSAPP_APP_SECRET,
+): string {
+  return `sha256=${createHmac("sha256", secret).update(body, "utf8").digest("hex")}`;
+}
+
+function whatsappChange({
+  messages,
+  contacts = [],
+  phoneNumberId = TEST_WHATSAPP_PHONE_NUMBER_ID,
+  field = "messages",
+}: {
+  messages?: TestWhatsAppMessage[];
+  contacts?: TestWhatsAppContact[];
+  phoneNumberId?: string;
+  field?: string;
+} = {}): TestWhatsAppChange {
+  return {
+    field,
+    value: {
+      messaging_product: "whatsapp",
+      metadata: {
+        display_phone_number: "15550783881",
+        phone_number_id: phoneNumberId,
+      },
+      contacts,
+      messages,
+    },
+  };
+}
+
+function whatsappEnvelope(
+  changes: TestWhatsAppChange[],
+  object = "whatsapp_business_account",
+): string {
+  return JSON.stringify({
+    object,
+    entry: [{ id: "waba-test", changes }],
+  });
+}
+
+function textWhatsAppMessage({
+  id = `wamid.${randomUUID()}`,
+  from = TEST_WHATSAPP_CUSTOMER_WA_ID,
+  text = "Hello from a test customer",
+  timestamp = "1760000000",
+}: {
+  id?: string;
+  from?: string;
+  text?: string;
+  timestamp?: string;
+} = {}): TestWhatsAppMessage {
+  return {
+    id,
+    from,
+    timestamp,
+    type: "text",
+    text: { body: text },
+  };
+}
+
+function testWhatsAppConfig(
+  overrides: Partial<WhatsAppIntegrationConfig> = {},
+): WhatsAppIntegrationConfig {
+  return {
+    verifyToken: TEST_WHATSAPP_VERIFY_TOKEN,
+    appSecret: TEST_WHATSAPP_APP_SECRET,
+    phoneNumberId: TEST_WHATSAPP_PHONE_NUMBER_ID,
+    workspaceId: requireSession().workspace.id,
+    ...overrides,
+  };
+}
+
+function startWhatsAppServer(
+  overrides: Partial<WhatsAppIntegrationConfig> = {},
+): Promise<{ server: Server; baseUrl: string }> {
+  return startServer(pool, undefined, {}, testWhatsAppConfig(overrides));
+}
+
+async function postWhatsApp(
+  app: Readonly<{ baseUrl: string }>,
+  body: string,
+  options: Readonly<{
+    signature?: string | null;
+  }> = {},
+): Promise<Response> {
+  const headers = new Headers({
+    "content-type": "application/json",
+    "x-forwarded-for": TEST_CLIENT_IP,
+  });
+  const signature =
+    options.signature === undefined
+      ? signWhatsAppBody(body)
+      : options.signature;
+
+  if (signature) {
+    headers.set("x-hub-signature-256", signature);
+  }
+
+  return nativeFetch(`${app.baseUrl}/api/webhooks/whatsapp`, {
+    method: "POST",
+    headers,
+    body,
+  });
+}
+
 async function readJson<T>(response: Response): Promise<T> {
   return (await response.json()) as T;
 }
 
-function postLead(body: unknown): Promise<Response> {
-  return fetch(`${baseUrl}/api/leads`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
+function requireSession(): TestSession {
+  if (!currentSession) {
+    throw new Error("The test session has not been initialized.");
+  }
+
+  return currentSession;
+}
+
+function cookieHeader(headers: Headers): string {
+  const mutableHeaders = headers as Headers & {
+    getSetCookie?: () => string[];
+  };
+  const setCookies =
+    typeof mutableHeaders.getSetCookie === "function"
+      ? mutableHeaders.getSetCookie()
+      : (() => {
+          const combined = headers.get("set-cookie");
+          return combined ? [combined] : [];
+        })();
+
+  return setCookies
+    .map((value) => value.split(";", 1)[0]?.trim() ?? "")
+    .filter(Boolean)
+    .join("; ");
+}
+
+function authHeaders(): Headers {
+  return new Headers({
+    "content-type": "application/json",
+    origin: TEST_AUTH_ORIGIN,
+    "x-forwarded-for": TEST_CLIENT_IP,
   });
+}
+
+async function registerUser(
+  options: Readonly<{
+    email?: string;
+    password?: string;
+    name?: string;
+  }> = {},
+): Promise<TestSession> {
+  const email = options.email ?? `owner-${randomUUID()}@example.test`;
+  const password = options.password ?? "replypilot-test-password";
+  const name = options.name ?? "Test Owner";
+  const response = await nativeFetch(`${baseUrl}/api/auth/sign-up/email`, {
+    method: "POST",
+    headers: authHeaders(),
+    body: JSON.stringify({ email, password, name }),
+  });
+
+  if (!response.ok) {
+    throw new Error(
+      `Registration failed (${response.status}): ${await response.text()}`,
+    );
+  }
+
+  const cookie = cookieHeader(response.headers);
+
+  if (!cookie) {
+    throw new Error("Registration did not return a session cookie.");
+  }
+
+  const payload = await readJson<{
+    user: { id: string; name: string; email: string };
+  }>(response);
+  const workspaceResponse = await nativeFetch(`${baseUrl}/api/workspace`, {
+    headers: {
+      cookie,
+      "x-forwarded-for": TEST_CLIENT_IP,
+    },
+  });
+
+  if (!workspaceResponse.ok) {
+    throw new Error(
+      `Workspace initialization failed (${workspaceResponse.status}): ${await workspaceResponse.text()}`,
+    );
+  }
+
+  const workspacePayload = await readJson<{
+    user: { id: string; name: string; email: string };
+    workspace: TestWorkspacePayload;
+    role: "owner" | "member";
+  }>(workspaceResponse);
+
+  return {
+    email,
+    password,
+    cookie,
+    user: payload.user,
+    workspace: workspacePayload.workspace,
+    role: workspacePayload.role,
+  };
+}
+
+function signInRequest(email: string, password: string): Promise<Response> {
+  return nativeFetch(`${baseUrl}/api/auth/sign-in/email`, {
+    method: "POST",
+    headers: authHeaders(),
+    body: JSON.stringify({ email, password }),
+  });
+}
+
+function requestAs(
+  session: TestSession,
+  path: string,
+  method = "GET",
+  body?: unknown,
+): Promise<Response> {
+  const headers = new Headers({
+    cookie: session.cookie,
+    "x-forwarded-for": TEST_CLIENT_IP,
+  });
+
+  if (body !== undefined) {
+    headers.set("content-type", "application/json");
+  }
+
+  return nativeFetch(`${baseUrl}${path}`, {
+    method,
+    headers,
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+}
+
+function fetch(
+  input: Parameters<typeof nativeFetch>[0],
+  init: Parameters<typeof nativeFetch>[1] = {},
+): Promise<Response> {
+  const headers = new Headers(init.headers);
+  headers.set("x-forwarded-for", TEST_CLIENT_IP);
+
+  if (currentSession && !headers.has("cookie")) {
+    headers.set("cookie", currentSession.cookie);
+  }
+
+  return nativeFetch(input, { ...init, headers });
+}
+
+function postLead(body: unknown): Promise<Response> {
+  return jsonRequest("/api/leads", "POST", body);
 }
 
 function patchLead(id: string, body: unknown): Promise<Response> {
-  return fetch(`${baseUrl}/api/leads/${id}`, {
-    method: "PATCH",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
-  });
+  return jsonRequest(`/api/leads/${id}`, "PATCH", body);
 }
 
 function draftReply(id: string): Promise<Response> {
-  return fetch(`${baseUrl}/api/leads/${id}/draft-reply`, { method: "POST" });
+  return jsonRequest(`/api/leads/${id}/draft-reply`, "POST");
 }
 
 function createSavedDraft(
@@ -343,6 +689,7 @@ function makeLead(overrides: Partial<Lead> = {}): Lead {
     channel: "Manual",
     status: "New",
     lastMessage: "Do you travel for a wedding?",
+    whatsappNumber: null,
     nextFollowUpAt: null,
     createdAt: "2026-01-01T08:00:00.000Z",
     updatedAt: "2026-01-01T08:00:00.000Z",
@@ -404,6 +751,7 @@ beforeEach(async () => {
   }
 
   await resetTestData(pool);
+  currentSession = await registerUser();
 });
 
 after(async () => {
@@ -577,6 +925,40 @@ test("POST /api/leads accepts channel, status, and nextFollowUpAt", async () => 
   assert.equal(lead.nextFollowUpAt, "2030-01-01T10:00:00.000Z");
 });
 
+test("POST /api/leads normalizes and rejects duplicate WhatsApp numbers", async () => {
+  const first = await postLead({
+    name: "First Enquiry",
+    service: "Wedding photography",
+    lastMessage: "Please share availability.",
+    whatsappNumber: "+1 (650) 555-1234",
+  });
+  assert.equal(first.status, 201);
+  const firstLead = (await readJson<LeadPayload>(first)).lead;
+  assert.equal(firstLead.whatsappNumber, "16505551234");
+
+  const duplicate = await postLead({
+    name: "Duplicate Enquiry",
+    service: "Wedding photography",
+    lastMessage: "Another message from the same number.",
+    whatsappNumber: "16505551234",
+  });
+  assert.equal(duplicate.status, 409);
+  assert.deepEqual(await readJson(duplicate), {
+    error: "A lead with this WhatsApp number already exists.",
+  });
+
+  const stored = await pool.query<{ count: number }>(
+    `
+      SELECT count(*)::int AS count
+      FROM leads
+      WHERE workspace_id = $1
+        AND whatsapp_number = $2
+    `,
+    [requireSession().workspace.id, "16505551234"],
+  );
+  assert.equal(stored.rows[0]?.count, 1);
+});
+
 test("POST /api/leads rejects invalid input", async () => {
   const invalidBodies = [
     { service: "Wedding photography", lastMessage: "Missing name" },
@@ -603,6 +985,12 @@ test("POST /api/leads rejects invalid input", async () => {
       service: "Wedding photography",
       lastMessage: "Unknown field",
       unexpected: true,
+    },
+    {
+      name: "Test",
+      service: "Wedding photography",
+      lastMessage: "Bad WhatsApp number",
+      whatsappNumber: "not-a-number",
     },
   ];
 
@@ -835,15 +1223,16 @@ test("GET /api/leads orders leads by creation time, newest first", async () => {
   await pool.query(
     `
       INSERT INTO leads (
-        id, name, service, channel, status, last_message, created_at, updated_at
+        workspace_id, id, name, service, channel, status, last_message,
+        created_at, updated_at
       )
       VALUES
-        ($1, 'Older Lead', 'Portrait photography', 'Manual', 'New',
+        ($3, $1, 'Older Lead', 'Portrait photography', 'Manual', 'New',
           'Older message', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'),
-        ($2, 'Newer Lead', 'Portrait photography', 'Manual', 'New',
+        ($3, $2, 'Newer Lead', 'Portrait photography', 'Manual', 'New',
           'Newer message', '2026-02-01T00:00:00Z', '2026-02-01T00:00:00Z')
     `,
-    [olderId, newerId],
+    [olderId, newerId, requireSession().workspace.id],
   );
 
   const response = await fetch(`${baseUrl}/api/leads`);
@@ -856,8 +1245,8 @@ test("GET /api/leads orders leads by creation time, newest first", async () => {
 });
 
 test("seed data is idempotent", async () => {
-  const first = await seedLeads(pool);
-  const second = await seedLeads(pool);
+  const first = await seedLeads(pool, requireSession().workspace.id);
+  const second = await seedLeads(pool, requireSession().workspace.id);
 
   assert.equal(first, 5);
   assert.equal(second, 0);
@@ -1453,9 +1842,14 @@ test("the database rejects prices above the safe integer limit", async () => {
   await assert.rejects(
     pool.query(
       `
-        INSERT INTO catalogue_entries (name, price_minor, currency_code)
-        VALUES ('Unsafe direct insert', 9007199254740992, 'NGN')
+        INSERT INTO catalogue_entries (
+          workspace_id, name, price_minor, currency_code
+        )
+        VALUES (
+          $1, 'Unsafe direct insert', 9007199254740992, 'NGN'
+        )
       `,
+      [requireSession().workspace.id],
     ),
     /catalogue_entries_price_minor_safe|check constraint/i,
   );
@@ -1585,7 +1979,7 @@ test("knowledge entries reject invalid bodies, types, and IDs", async () => {
 
 test("reply context selects only active relevant business facts", async () => {
   const fixture = await createBusinessFixture();
-  const context = await buildReplyContext(pool, makeLead());
+  const context = await buildReplyContext(pool, requireSession().workspace.id, makeLead());
 
   assert.ok(context.profile);
   assert.equal(context.profile.id, fixture.profile.id);
@@ -1616,7 +2010,7 @@ test("reply context selects only active relevant business facts", async () => {
     "DELETE",
   );
 
-  const afterDeactivation = await buildReplyContext(pool, makeLead());
+  const afterDeactivation = await buildReplyContext(pool, requireSession().workspace.id, makeLead());
   assert.deepEqual(afterDeactivation.catalogue, []);
   assert.deepEqual(afterDeactivation.knowledge, []);
 });
@@ -1626,6 +2020,7 @@ test("unrelated enquiries receive no unrelated business facts", async () => {
 
   const context = await buildReplyContext(
     pool,
+    requireSession().workspace.id,
     makeLead({
       service: "Podcast editing",
       lastMessage: "How much for audio cleanup?",
@@ -1637,7 +2032,7 @@ test("unrelated enquiries receive no unrelated business facts", async () => {
 });
 
 test("empty profiles and knowledge bases produce safe empty context", async () => {
-  const context = await buildReplyContext(pool, makeLead());
+  const context = await buildReplyContext(pool, requireSession().workspace.id, makeLead());
 
   assert.equal(context.profile, null);
   assert.deepEqual(context.catalogue, []);
@@ -2446,4 +2841,1998 @@ test("re-running migrations preserves existing leads, business data, and reply d
     catalogue_entries: 2,
     knowledge_entries: 3,
   });
+});
+
+test("registration creates a session and an owner workspace", async () => {
+  const session = await registerUser({
+    email: `new-owner-${randomUUID()}@example.test`,
+    name: "Ada Photographer",
+  });
+
+  assert.equal(session.role, "owner");
+  assert.match(session.workspace.id, /^[0-9a-f-]{36}$/i);
+  assert.match(session.workspace.name, /Ada Photographer/);
+
+  const workspace = await requestAs(session, "/api/workspace");
+  assert.equal(workspace.status, 200);
+  const payload = await readJson<{
+    user: { id: string; email: string };
+    workspace: { id: string; name: string };
+    role: "owner" | "member";
+  }>(workspace);
+
+  assert.equal(payload.user.id, session.user.id);
+  assert.equal(payload.workspace.id, session.workspace.id);
+  assert.equal(payload.role, "owner");
+
+  const membership = await pool.query<{
+    role: string;
+    is_default: boolean;
+    workspace_id: string;
+  }>(
+    `
+      SELECT role, is_default, workspace_id
+      FROM workspace_memberships
+      WHERE user_id = $1
+    `,
+    [session.user.id],
+  );
+
+  assert.deepEqual(membership.rows, [
+    {
+      role: "owner",
+      is_default: true,
+      workspace_id: session.workspace.id,
+    },
+  ]);
+});
+
+test("sign-in returns a usable HTTP-only session cookie", async () => {
+  const response = await signInRequest(
+    requireSession().email,
+    requireSession().password,
+  );
+
+  assert.equal(response.status, 200);
+
+  const setCookie = (
+    response.headers as Headers & { getSetCookie?: () => string[] }
+  ).getSetCookie?.().join("\n") ?? response.headers.get("set-cookie") ?? "";
+
+  assert.match(setCookie, /HttpOnly/i);
+  assert.match(setCookie, /SameSite=Lax/i);
+  assert.doesNotMatch(setCookie, /Secure/i);
+
+  const cookie = cookieHeader(response.headers);
+  assert.ok(cookie);
+
+  const sessionResponse = await nativeFetch(
+    `${baseUrl}/api/auth/get-session`,
+    {
+      headers: {
+        cookie,
+        "x-forwarded-for": TEST_CLIENT_IP,
+      },
+    },
+  );
+  assert.equal(sessionResponse.status, 200);
+  const session = await readJson<{
+    user: { id: string };
+    session: { id: string };
+  }>(sessionResponse);
+  assert.equal(session.user.id, requireSession().user.id);
+  assert.ok(session.session.id);
+
+  const privateResponse = await nativeFetch(`${baseUrl}/api/workspace`, {
+    headers: {
+      cookie,
+      "x-forwarded-for": TEST_CLIENT_IP,
+    },
+  });
+  assert.equal(privateResponse.status, 200);
+});
+
+test("HTTPS auth configuration issues Secure session cookies", async () => {
+  const secureOrigin = "https://replypilot.example";
+  const secureServer = await startServer(pool, undefined, {
+    baseURL: secureOrigin,
+    trustedOrigins: [secureOrigin],
+  });
+
+  try {
+    const response = await nativeFetch(
+      `${secureServer.baseUrl}/api/auth/sign-in/email`,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          origin: secureOrigin,
+          "x-forwarded-for": TEST_CLIENT_IP,
+        },
+        body: JSON.stringify({
+          email: requireSession().email,
+          password: requireSession().password,
+        }),
+      },
+    );
+
+    assert.equal(response.status, 200);
+
+    const setCookie =
+      (
+        response.headers as Headers & { getSetCookie?: () => string[] }
+      ).getSetCookie?.().join("\n") ??
+      response.headers.get("set-cookie") ??
+      "";
+
+    assert.match(setCookie, /HttpOnly/i);
+    assert.match(setCookie, /SameSite=Lax/i);
+    assert.match(setCookie, /(?:^|;\s*)Secure(?:;|$)/i);
+  } finally {
+    await stopServer(secureServer.server);
+  }
+});
+
+test("duplicate registration and invalid credentials are rejected", async () => {
+  const duplicate = await nativeFetch(
+    `${baseUrl}/api/auth/sign-up/email`,
+    {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify({
+        email: requireSession().email,
+        password: "another-secure-password",
+        name: "Duplicate",
+      }),
+    },
+  );
+  assert.equal(duplicate.status, 422);
+
+  const invalid = await signInRequest(
+    requireSession().email,
+    "incorrect-password",
+  );
+  assert.equal(invalid.status, 401);
+
+  const weakPassword = await nativeFetch(
+    `${baseUrl}/api/auth/sign-up/email`,
+    {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify({
+        email: `weak-${randomUUID()}@example.test`,
+        password: "short",
+        name: "Weak Password",
+      }),
+    },
+  );
+  assert.equal(weakPassword.status, 400);
+});
+
+test("unauthenticated requests cannot access private business routes", async () => {
+  for (const path of [
+    "/api/workspace",
+    "/api/leads",
+    "/api/business/profile",
+    "/api/business/catalogue",
+    "/api/business/knowledge",
+    "/api/whatsapp/conversations",
+    `/api/whatsapp/conversations/${randomUUID()}/messages`,
+  ]) {
+    const response = await nativeFetch(`${baseUrl}${path}`, {
+      headers: { "x-forwarded-for": TEST_CLIENT_IP },
+    });
+    assert.equal(response.status, 401, path);
+    assert.deepEqual(await readJson(response), {
+      error: "Authentication required",
+    });
+  }
+
+  const create = await nativeFetch(`${baseUrl}/api/leads`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-forwarded-for": TEST_CLIENT_IP,
+    },
+    body: JSON.stringify({
+      name: "Anonymous",
+      service: "Wedding photography",
+      lastMessage: "Hello",
+    }),
+  });
+  assert.equal(create.status, 401);
+
+  const health = await nativeFetch(`${baseUrl}/api/health`, {
+    headers: { "x-forwarded-for": TEST_CLIENT_IP },
+  });
+  assert.equal(health.status, 200);
+});
+
+test("sign-out invalidates the server-side session", async () => {
+  const cookie = requireSession().cookie;
+  const signOut = await nativeFetch(`${baseUrl}/api/auth/sign-out`, {
+    method: "POST",
+    headers: {
+      ...Object.fromEntries(authHeaders().entries()),
+      cookie,
+    },
+  });
+  assert.equal(signOut.status, 200);
+
+  const privateResponse = await nativeFetch(`${baseUrl}/api/workspace`, {
+    headers: {
+      cookie,
+      "x-forwarded-for": TEST_CLIENT_IP,
+    },
+  });
+  assert.equal(privateResponse.status, 401);
+});
+
+test("expired and malformed sessions are rejected", async () => {
+  await pool.query(
+    `
+      UPDATE auth_sessions
+      SET expires_at = now() - interval '1 minute'
+      WHERE user_id = $1
+    `,
+    [requireSession().user.id],
+  );
+
+  const expired = await fetch(`${baseUrl}/api/workspace`);
+  assert.equal(expired.status, 401);
+
+  const malformed = await nativeFetch(`${baseUrl}/api/workspace`, {
+    headers: {
+      cookie: "better-auth.session_token=not-a-real-session",
+      "x-forwarded-for": TEST_CLIENT_IP,
+    },
+  });
+  assert.equal(malformed.status, 401);
+});
+
+test("authentication rejects missing and untrusted origins", async () => {
+  const body = JSON.stringify({
+    email: requireSession().email,
+    password: requireSession().password,
+  });
+
+  const missingOrigin = await nativeFetch(
+    `${baseUrl}/api/auth/sign-in/email`,
+    {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-forwarded-for": TEST_CLIENT_IP,
+      },
+      body,
+    },
+  );
+  assert.equal(missingOrigin.status, 403);
+
+  const untrustedOrigin = await nativeFetch(
+    `${baseUrl}/api/auth/sign-in/email`,
+    {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        origin: "https://attacker.example",
+        "x-forwarded-for": TEST_CLIENT_IP,
+      },
+      body,
+    },
+  );
+  assert.equal(untrustedOrigin.status, 403);
+});
+
+test("authentication rate limits repeated sign-in attempts", async () => {
+  const limited = await startServer(pool, undefined, {
+    rateLimit: {
+      enabled: true,
+      window: 60,
+      max: 100,
+    },
+  });
+
+  try {
+    const statuses: number[] = [];
+
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      const response = await nativeFetch(
+        `${limited.baseUrl}/api/auth/sign-in/email`,
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            origin: TEST_AUTH_ORIGIN,
+            "x-forwarded-for": "198.51.100.25",
+          },
+          body: JSON.stringify({
+            email: requireSession().email,
+            password: requireSession().password,
+          }),
+        },
+      );
+      statuses.push(response.status);
+    }
+
+    assert.deepEqual(statuses, [200, 200, 200, 429]);
+  } finally {
+    await stopServer(limited.server);
+  }
+});
+
+test("legacy workspace bootstrap requires explicit guarded CLI input", async () => {
+  const user = requireSession();
+  const legacy = await pool.query<{ count: number }>(
+    "SELECT count(*)::int AS count FROM workspaces WHERE id = $1",
+    [LEGACY_WORKSPACE_ID],
+  );
+  assert.equal(legacy.rows[0]?.count, 1);
+
+  const before = await pool.query<{ count: number }>(
+    "SELECT count(*)::int AS count FROM workspace_memberships WHERE workspace_id = $1",
+    [LEGACY_WORKSPACE_ID],
+  );
+  assert.equal(before.rows[0]?.count, 0);
+
+  await assert.rejects(
+    () =>
+      bootstrapLegacyWorkspace(pool, {
+        userId: user.user.id,
+        confirm: false,
+      }),
+    /--confirm/,
+  );
+  await assert.rejects(
+    () =>
+      bootstrapLegacyWorkspace(pool, {
+        userId: user.user.id,
+        userEmail: user.email,
+        confirm: true,
+      }),
+    /exactly one/,
+  );
+  await assert.rejects(
+    () =>
+      bootstrapLegacyWorkspace(pool, {
+        userId: randomUUID(),
+        confirm: true,
+      }),
+    /No registered account/,
+  );
+
+  const bootstrapped = await bootstrapLegacyWorkspace(pool, {
+    userId: user.user.id,
+    confirm: true,
+  });
+
+  assert.equal(bootstrapped.workspace.id, LEGACY_WORKSPACE_ID);
+  assert.equal(bootstrapped.workspace.name, "Legacy development workspace");
+  assert.equal(bootstrapped.membership.role, "owner");
+  assert.equal(bootstrapped.membership.isDefault, true);
+
+  const memberships = await listMembershipsForUser(pool, user.user.id);
+  assert.equal(memberships.length, 2);
+  assert.equal(memberships.filter((membership) => membership.isDefault).length, 1);
+  assert.equal(
+    memberships.find((membership) => membership.isDefault)?.workspaceId,
+    LEGACY_WORKSPACE_ID,
+  );
+
+  await assert.rejects(
+    () =>
+      bootstrapLegacyWorkspace(pool, {
+        userEmail: user.email,
+        confirm: true,
+      }),
+    /already has a member/,
+  );
+
+  const publicEndpoint = await requestAs(
+    user,
+    "/api/workspace/bootstrap",
+    "POST",
+    {},
+  );
+  assert.equal(publicEndpoint.status, 404);
+});
+
+test("workspace data is isolated across all business resources", async () => {
+  const ownerA = requireSession();
+  const profileA = await createProfile({ businessName: "Alpha Studio" });
+  const catalogueA = await createCatalogue({
+    name: "Alpha wedding photography",
+    description: "Alpha full-day coverage.",
+    priceMinor: 100_000,
+    currencyCode: "NGN",
+  });
+  const knowledgeA = await createKnowledge({
+    title: "Alpha travel policy",
+    answer: "Alpha travels within the city.",
+    entryType: "faq",
+  });
+  const leadA = await createDraftLead({ name: "Alpha Client" });
+  const draftA = (
+    await readJson<ReplyDraftPayload>(
+      await createSavedDraft(leadA.id),
+    )
+  ).draft;
+
+  const ownerB = await registerUser({
+    email: `owner-b-${randomUUID()}@example.test`,
+    name: "Beta Studio",
+  });
+
+  currentSession = ownerB;
+  const profileB = await createProfile({
+    businessName: "Beta Studio",
+    contactEmail: "beta@example.test",
+    contactPhone: "+2348037654321",
+  });
+  const catalogueB = await createCatalogue({
+    name: "Beta wedding photography",
+    description: "Beta full-day coverage.",
+    priceMinor: 200_000,
+    currencyCode: "USD",
+  });
+  const knowledgeB = await createKnowledge({
+    title: "Beta travel policy",
+    answer: "Beta travels nationwide.",
+    entryType: "policy",
+  });
+  const leadB = await createDraftLead({
+    name: "Beta Client",
+    lastMessage: "How much is Beta wedding photography?",
+  });
+  const draftB = (
+    await readJson<ReplyDraftPayload>(
+      await createSavedDraft(leadB.id),
+    )
+  ).draft;
+  currentSession = ownerA;
+
+  try {
+    const leads = await readJson<LeadsPayload>(
+      await fetch(`${baseUrl}/api/leads`),
+    );
+    assert.deepEqual(
+      leads.leads.map((lead) => lead.id),
+      [leadA.id],
+    );
+
+    const catalogue = await readJson<CatalogueListPayload>(
+      await fetch(`${baseUrl}/api/business/catalogue`),
+    );
+    assert.deepEqual(
+      catalogue.entries.map((entry) => entry.id),
+      [catalogueA.id],
+    );
+
+    const knowledge = await readJson<KnowledgeListPayload>(
+      await fetch(`${baseUrl}/api/business/knowledge`),
+    );
+    assert.deepEqual(
+      knowledge.entries.map((entry) => entry.id),
+      [knowledgeA.id],
+    );
+
+    const profile = await readJson<ProfilePayload>(
+      await fetch(`${baseUrl}/api/business/profile`),
+    );
+    assert.equal(profile.profile?.id, profileA.id);
+    assert.equal(profile.profile?.businessName, "Alpha Studio");
+    assert.doesNotMatch(JSON.stringify(profile), /Beta Studio/);
+
+    const crossLeadRead = await requestAs(
+      ownerA,
+      `/api/leads/${leadB.id}/reply-drafts`,
+    );
+    assert.equal(crossLeadRead.status, 404);
+
+    const crossLeadUpdate = await requestAs(
+      ownerA,
+      `/api/leads/${leadB.id}`,
+      "PATCH",
+      { status: "Booked" },
+    );
+    assert.equal(crossLeadUpdate.status, 404);
+
+    const crossDraftGeneration = await requestAs(
+      ownerA,
+      `/api/leads/${leadB.id}/draft-reply`,
+      "POST",
+    );
+    assert.equal(crossDraftGeneration.status, 404);
+
+    const crossDraftCreate = await requestAs(
+      ownerA,
+      `/api/leads/${leadB.id}/reply-drafts`,
+      "POST",
+    );
+    assert.equal(crossDraftCreate.status, 404);
+
+    const crossDraftApprove = await requestAs(
+      ownerA,
+      `/api/leads/${leadB.id}/reply-drafts/${draftB.id}`,
+      "PATCH",
+      { status: "approved" },
+    );
+    assert.equal(crossDraftApprove.status, 404);
+
+    const crossDraftRegenerate = await requestAs(
+      ownerA,
+      `/api/leads/${leadB.id}/reply-drafts`,
+      "POST",
+      { draftId: draftB.id },
+    );
+    assert.equal(crossDraftRegenerate.status, 404);
+
+    const foreignDraftOnOwnLead = await requestAs(
+      ownerA,
+      `/api/leads/${leadA.id}/reply-drafts/${draftB.id}`,
+      "PATCH",
+      { status: "approved" },
+    );
+    assert.equal(foreignDraftOnOwnLead.status, 404);
+
+    const crossCatalogueUpdate = await requestAs(
+      ownerA,
+      `/api/business/catalogue/${catalogueB.id}`,
+      "PATCH",
+      {
+        name: "Hijacked catalogue",
+        description: "Hijacked.",
+        priceMinor: 1,
+        currencyCode: "NGN",
+      },
+    );
+    assert.equal(crossCatalogueUpdate.status, 404);
+
+    const crossCatalogueDelete = await requestAs(
+      ownerA,
+      `/api/business/catalogue/${catalogueB.id}`,
+      "DELETE",
+    );
+    assert.equal(crossCatalogueDelete.status, 404);
+
+    const crossKnowledgeUpdate = await requestAs(
+      ownerA,
+      `/api/business/knowledge/${knowledgeB.id}`,
+      "PATCH",
+      {
+        title: "Hijacked knowledge",
+        answer: "Hijacked.",
+        entryType: "faq",
+      },
+    );
+    assert.equal(crossKnowledgeUpdate.status, 404);
+
+    const crossKnowledgeDelete = await requestAs(
+      ownerA,
+      `/api/business/knowledge/${knowledgeB.id}`,
+      "DELETE",
+    );
+    assert.equal(crossKnowledgeDelete.status, 404);
+
+    const submittedWorkspaceLead = await postLead({
+      name: "Workspace Override",
+      service: "Wedding photography",
+      lastMessage: "Trying to override ownership.",
+      workspaceId: ownerB.workspace.id,
+    });
+    assert.equal(submittedWorkspaceLead.status, 400);
+
+    const submittedWorkspaceCatalogue = await jsonRequest(
+      "/api/business/catalogue",
+      "POST",
+      {
+        name: "Workspace Override",
+        description: "",
+        priceMinor: 1,
+        currencyCode: "NGN",
+        workspaceId: ownerB.workspace.id,
+      },
+    );
+    assert.equal(submittedWorkspaceCatalogue.status, 400);
+
+    const submittedWorkspaceProfile = await jsonRequest(
+      "/api/business/profile",
+      "POST",
+      {
+        ...validProfileBody,
+        businessName: "Workspace Override",
+        workspaceId: ownerB.workspace.id,
+      },
+    );
+    assert.equal(submittedWorkspaceProfile.status, 400);
+
+    const counts = await pool.query<{
+      workspace_id: string;
+      count: number;
+    }>(
+      `
+        SELECT workspace_id, count(*)::int AS count
+        FROM leads
+        GROUP BY workspace_id
+        ORDER BY workspace_id
+      `,
+    );
+    assert.deepEqual(
+      Object.fromEntries(
+        counts.rows.map((row) => [row.workspace_id, row.count]),
+      ),
+      {
+        [ownerA.workspace.id]: 1,
+        [ownerB.workspace.id]: 1,
+      },
+    );
+
+    currentSession = ownerB;
+    const betaLeads = await readJson<LeadsPayload>(
+      await fetch(`${baseUrl}/api/leads`),
+    );
+    assert.deepEqual(
+      betaLeads.leads.map((lead) => [lead.id, lead.name, lead.status]),
+      [[leadB.id, "Beta Client", "New"]],
+    );
+
+    const betaDrafts = await readJson<ReplyDraftsPayload>(
+      await listSavedDrafts(leadB.id),
+    );
+    assert.equal(betaDrafts.drafts.length, 1);
+    assert.equal(betaDrafts.drafts[0]?.id, draftB.id);
+    assert.equal(betaDrafts.drafts[0]?.status, "draft");
+    assert.deepEqual(betaDrafts.drafts[0]?.sources, draftB.sources);
+
+    const betaCatalogue = await readJson<CatalogueListPayload>(
+      await fetch(`${baseUrl}/api/business/catalogue`),
+    );
+    assert.deepEqual(
+      betaCatalogue.entries.map((entry) => [
+        entry.id,
+        entry.name,
+        entry.priceMinor,
+      ]),
+      [[catalogueB.id, "Beta wedding photography", 200_000]],
+    );
+
+    const betaProfile = await readJson<ProfilePayload>(
+      await fetch(`${baseUrl}/api/business/profile`),
+    );
+    assert.equal(betaProfile.profile?.id, profileB.id);
+    assert.equal(betaProfile.profile?.businessName, "Beta Studio");
+
+    const betaKnowledge = await readJson<KnowledgeListPayload>(
+      await fetch(`${baseUrl}/api/business/knowledge`),
+    );
+    assert.deepEqual(
+      betaKnowledge.entries.map((entry) => entry.id),
+      [knowledgeB.id],
+    );
+  } finally {
+    currentSession = ownerA;
+  }
+
+  assert.notEqual(draftA.id, draftB.id);
+
+  await assert.rejects(
+    pool.query(
+      `
+        INSERT INTO reply_drafts (
+          workspace_id,
+          lead_id,
+          intent,
+          summary,
+          missing_information,
+          draft_reply,
+          provider,
+          is_demo,
+          status,
+          sources,
+          approved_at
+        )
+        VALUES (
+          $1, $2, 'general-enquiry', 'Cross-workspace direct insert', '[]',
+          'This must fail.', 'mock', true, 'draft', '[]', NULL
+        )
+      `,
+      [ownerA.workspace.id, leadB.id],
+    ),
+    /reply_drafts_lead_workspace_fkey|foreign key/i,
+  );
+});
+
+test("workspace members are read-only for business data", async () => {
+  const member = requireSession();
+  const owner = await registerUser({
+    email: `workspace-owner-${randomUUID()}@example.test`,
+    name: "Workspace Owner",
+  });
+
+  currentSession = owner;
+  await createProfile({ businessName: "Member Test Studio" });
+  const catalogue = await createCatalogue({
+    name: "Shared catalogue",
+    description: "Visible to members.",
+    priceMinor: 50_000,
+    currencyCode: "NGN",
+  });
+  const lead = await createDraftLead({ name: "Member-visible lead" });
+  const draft = (
+    await readJson<ReplyDraftPayload>(
+      await createSavedDraft(lead.id),
+    )
+  ).draft;
+  currentSession = member;
+
+  await pool.query(
+    `
+      UPDATE workspace_memberships
+      SET is_default = false, updated_at = now()
+      WHERE user_id = $1
+    `,
+    [member.user.id],
+  );
+  await pool.query(
+    `
+      INSERT INTO workspace_memberships (
+        user_id,
+        workspace_id,
+        role,
+        is_default
+      )
+      VALUES ($1, $2, 'member', true)
+    `,
+    [member.user.id, owner.workspace.id],
+  );
+
+  const workspace = await readJson<{ role: string }>(
+    await fetch(`${baseUrl}/api/workspace`),
+  );
+  assert.equal(workspace.role, "member");
+
+  const leads = await readJson<LeadsPayload>(
+    await fetch(`${baseUrl}/api/leads`),
+  );
+  assert.deepEqual(
+    leads.leads.map((item) => item.id),
+    [lead.id],
+  );
+
+  const catalogueList = await readJson<CatalogueListPayload>(
+    await fetch(`${baseUrl}/api/business/catalogue`),
+  );
+  assert.deepEqual(
+    catalogueList.entries.map((entry) => entry.id),
+    [catalogue.id],
+  );
+
+  const drafts = await readJson<ReplyDraftsPayload>(
+    await listSavedDrafts(lead.id),
+  );
+  assert.equal(drafts.drafts[0]?.id, draft.id);
+
+  const forbiddenRequests: Array<Promise<Response>> = [
+    postLead({
+      name: "Member-created lead",
+      service: "Wedding photography",
+      lastMessage: "Members cannot create leads.",
+    }),
+    patchLead(lead.id, { status: "Booked" }),
+    draftReply(lead.id),
+    createSavedDraft(lead.id),
+    patchSavedDraft(lead.id, draft.id, { status: "approved" }),
+    jsonRequest(`/api/business/catalogue/${catalogue.id}`, "DELETE"),
+    jsonRequest("/api/business/knowledge", "POST", {
+      title: "Member knowledge",
+      answer: "Members cannot create knowledge.",
+      entryType: "faq",
+    }),
+    jsonRequest("/api/business/profile", "PATCH", validProfileBody),
+  ];
+
+  for (const request of forbiddenRequests) {
+    const response = await request;
+    assert.equal(response.status, 403);
+    assert.deepEqual(await readJson(response), { error: "Forbidden" });
+  }
+
+  const stored = await pool.query<{ count: number }>(
+    "SELECT count(*)::int AS count FROM leads WHERE workspace_id = $1",
+    [owner.workspace.id],
+  );
+  assert.equal(stored.rows[0]?.count, 1);
+});
+
+test("migration backfills existing data without changing IDs or values", async () => {
+  const schema = `migration_test_${randomUUID().replaceAll("-", "")}`;
+  const migrations = (await readdir(MIGRATIONS_DIR))
+    .filter((file) => /^\d+_.+\.sql$/.test(file))
+    .sort();
+  const oldMigrations = migrations.filter(
+    (file) => Number.parseInt(file.slice(0, 3), 10) < 6,
+  );
+  const workspaceMigrations = migrations.filter(
+    (file) => Number.parseInt(file.slice(0, 3), 10) >= 6,
+  );
+  const client = await pool.connect();
+  const leadId = "30000000-0000-4000-8000-000000000001";
+  const profileId = "30000000-0000-4000-8000-000000000002";
+  const catalogueId = "30000000-0000-4000-8000-000000000003";
+  const knowledgeId = "30000000-0000-4000-8000-000000000004";
+  const draftId = "30000000-0000-4000-8000-000000000005";
+  const approvedAt = "2026-03-01T10:30:00.000Z";
+  const sources = [
+    {
+      id: catalogueId,
+      type: "catalogue",
+      title: "Legacy wedding photography",
+      content: "Legacy full-day coverage.",
+      reason: "Approved price from the legacy catalogue.",
+      priceMinor: 175_000,
+      currencyCode: "NGN",
+    },
+  ];
+
+  try {
+    await client.query("BEGIN");
+    await client.query(`CREATE SCHEMA "${schema}"`);
+    await client.query(`SET LOCAL search_path TO "${schema}"`);
+
+    for (const file of oldMigrations) {
+      await client.query(
+        await readFile(join(MIGRATIONS_DIR, file), "utf8"),
+      );
+    }
+
+    await client.query(
+      `
+        INSERT INTO leads (
+          id, name, service, channel, status, last_message,
+          next_follow_up_at, created_at, updated_at
+        )
+        VALUES (
+          $1, 'Legacy Client', 'Wedding photography', 'WhatsApp', 'Quoted',
+          'Legacy enquiry message.', '2026-04-01T09:00:00Z',
+          '2026-02-01T08:00:00Z', '2026-02-02T08:00:00Z'
+        )
+      `,
+      [leadId],
+    );
+    await client.query(
+      `
+        INSERT INTO business_profiles (
+          id, business_name, business_description, contact_email,
+          contact_phone, contact_phone_country, business_address,
+          timezone, opening_hours, currency_code
+        )
+        VALUES (
+          $1, 'Legacy Studio', 'Legacy description.', 'legacy@example.test',
+          '+2348031234567', 'NG', '1 Legacy Road',
+          'Africa/Lagos', '[{"day":"monday","opensAt":"09:00","closesAt":"17:00"}]'::jsonb,
+          'NGN'
+        )
+      `,
+      [profileId],
+    );
+    await client.query(
+      `
+        INSERT INTO catalogue_entries (
+          id, name, description, price_minor, currency_code,
+          is_active, availability_notes
+        )
+        VALUES (
+          $1, 'Legacy wedding photography', 'Legacy full-day coverage.',
+          175000, 'NGN', true, 'Weekends by arrangement.'
+        )
+      `,
+      [catalogueId],
+    );
+    await client.query(
+      `
+        INSERT INTO knowledge_entries (
+          id, title, answer, entry_type, is_active
+        )
+        VALUES (
+          $1, 'Legacy refund policy', 'Legacy deposits are non-refundable.',
+          'policy', true
+        )
+      `,
+      [knowledgeId],
+    );
+    await client.query(
+      `
+        INSERT INTO reply_drafts (
+          id, lead_id, intent, summary, missing_information, draft_reply,
+          provider, is_demo, status, sources, approved_at, created_at,
+          updated_at
+        )
+        VALUES (
+          $1, $2, 'pricing', 'Legacy saved draft.', '["Preferred date"]',
+          'Legacy saved reply.', 'mock', true, 'approved', $3::jsonb, $4,
+          '2026-02-03T08:00:00Z', '2026-02-04T08:00:00Z'
+        )
+      `,
+      [draftId, leadId, JSON.stringify(sources), approvedAt],
+    );
+
+    for (const file of workspaceMigrations) {
+      await client.query(
+        await readFile(join(MIGRATIONS_DIR, file), "utf8"),
+      );
+    }
+
+    const lead = await client.query<{
+      id: string;
+      workspace_id: string;
+      name: string;
+      status: string;
+      next_follow_up_at: Date | null;
+    }>(
+      `
+        SELECT id, workspace_id, name, status, next_follow_up_at
+        FROM leads
+        WHERE id = $1
+      `,
+      [leadId],
+    );
+    assert.equal(lead.rows[0]?.id, leadId);
+    assert.equal(lead.rows[0]?.workspace_id, LEGACY_WORKSPACE_ID);
+    assert.equal(lead.rows[0]?.name, "Legacy Client");
+    assert.equal(lead.rows[0]?.status, "Quoted");
+    assert.equal(
+      lead.rows[0]?.next_follow_up_at?.toISOString(),
+      "2026-04-01T09:00:00.000Z",
+    );
+
+    const profile = await client.query<{
+      id: string;
+      workspace_id: string;
+      business_name: string;
+      currency_code: string;
+      contact_phone: string;
+    }>(
+      `
+        SELECT id, workspace_id, business_name, currency_code, contact_phone
+        FROM business_profiles
+        WHERE id = $1
+      `,
+      [profileId],
+    );
+    assert.deepEqual(profile.rows[0], {
+      id: profileId,
+      workspace_id: LEGACY_WORKSPACE_ID,
+      business_name: "Legacy Studio",
+      currency_code: "NGN",
+      contact_phone: "+2348031234567",
+    });
+
+    const catalogue = await client.query<{
+      id: string;
+      workspace_id: string;
+      price_minor: string;
+      currency_code: string;
+    }>(
+      `
+        SELECT id, workspace_id, price_minor, currency_code
+        FROM catalogue_entries
+        WHERE id = $1
+      `,
+      [catalogueId],
+    );
+    assert.deepEqual(catalogue.rows[0], {
+      id: catalogueId,
+      workspace_id: LEGACY_WORKSPACE_ID,
+      price_minor: "175000",
+      currency_code: "NGN",
+    });
+
+    const knowledge = await client.query<{
+      id: string;
+      workspace_id: string;
+      title: string;
+    }>(
+      `
+        SELECT id, workspace_id, title
+        FROM knowledge_entries
+        WHERE id = $1
+      `,
+      [knowledgeId],
+    );
+    assert.deepEqual(knowledge.rows[0], {
+      id: knowledgeId,
+      workspace_id: LEGACY_WORKSPACE_ID,
+      title: "Legacy refund policy",
+    });
+
+    const draft = await client.query<{
+      id: string;
+      lead_id: string;
+      workspace_id: string;
+      status: string;
+      approved_at: Date;
+      sources: unknown;
+    }>(
+      `
+        SELECT id, lead_id, workspace_id, status, approved_at, sources
+        FROM reply_drafts
+        WHERE id = $1
+      `,
+      [draftId],
+    );
+    assert.equal(draft.rows[0]?.id, draftId);
+    assert.equal(draft.rows[0]?.lead_id, leadId);
+    assert.equal(draft.rows[0]?.workspace_id, LEGACY_WORKSPACE_ID);
+    assert.equal(draft.rows[0]?.status, "approved");
+    assert.equal(
+      draft.rows[0]?.approved_at.toISOString(),
+      approvedAt,
+    );
+    assert.deepEqual(draft.rows[0]?.sources, sources);
+
+    const singleton = await client.query<{ column_name: string }>(
+      `
+        SELECT column_name
+        FROM information_schema.columns
+        WHERE table_schema = $1
+          AND table_name = 'business_profiles'
+          AND column_name = 'singleton'
+      `,
+      [schema],
+    );
+    assert.equal(singleton.rows.length, 0);
+
+    const legacy = await client.query<{
+      id: string;
+      name: string;
+    }>(
+      "SELECT id, name FROM workspaces WHERE id = $1",
+      [LEGACY_WORKSPACE_ID],
+    );
+    assert.deepEqual(legacy.rows[0], {
+      id: LEGACY_WORKSPACE_ID,
+      name: "Legacy development workspace",
+    });
+
+    const legacyMembers = await client.query<{ count: number }>(
+      `
+        SELECT count(*)::int AS count
+        FROM workspace_memberships
+        WHERE workspace_id = $1
+      `,
+      [LEGACY_WORKSPACE_ID],
+    );
+    assert.equal(legacyMembers.rows[0]?.count, 0);
+
+    const otherWorkspaceId = randomUUID();
+    await client.query(
+      "INSERT INTO workspaces (id, name) VALUES ($1, 'Other workspace')",
+      [otherWorkspaceId],
+    );
+    await assert.rejects(
+      client.query(
+        `
+          INSERT INTO reply_drafts (
+            workspace_id,
+            lead_id,
+            intent,
+            summary,
+            missing_information,
+            draft_reply,
+            provider,
+            is_demo,
+            status,
+            sources,
+            approved_at
+          )
+          VALUES (
+            $1, $2, 'general-enquiry', 'Cross workspace', '[]',
+            'Must fail.', 'mock', true, 'draft', '[]', NULL
+          )
+        `,
+        [otherWorkspaceId, leadId],
+      ),
+      /reply_drafts_lead_workspace_fkey|foreign key/i,
+    );
+  } finally {
+    try {
+      await client.query("ROLLBACK");
+    } catch {
+      // The transaction may already be aborted by the expected constraint test.
+    }
+    client.release();
+  }
+});
+
+test("WhatsApp configuration is optional but all-or-none", () => {
+  assert.equal(loadWhatsAppConfig({}), null);
+  assert.equal(
+    loadWhatsAppConfig({
+      WHATSAPP_WEBHOOK_VERIFY_TOKEN: "   ",
+      WHATSAPP_APP_SECRET: "",
+    }),
+    null,
+  );
+
+  let error: unknown;
+  try {
+    loadWhatsAppConfig({
+      WHATSAPP_WEBHOOK_VERIFY_TOKEN: "super-secret-verify-token",
+      WHATSAPP_APP_SECRET: "super-secret-app-secret-value",
+    });
+  } catch (caught) {
+    error = caught;
+  }
+
+  assert.ok(error instanceof Error);
+  assert.match(error.message, /WHATSAPP_TEST_PHONE_NUMBER_ID/);
+  assert.match(error.message, /WHATSAPP_TEST_WORKSPACE_ID/);
+  assert.doesNotMatch(error.message, /super-secret/);
+
+  assert.throws(
+    () =>
+      loadWhatsAppConfig({
+        WHATSAPP_WEBHOOK_VERIFY_TOKEN: TEST_WHATSAPP_VERIFY_TOKEN,
+        WHATSAPP_APP_SECRET: TEST_WHATSAPP_APP_SECRET,
+        WHATSAPP_TEST_PHONE_NUMBER_ID: "not-numeric",
+        WHATSAPP_TEST_WORKSPACE_ID: randomUUID(),
+      }),
+    /WHATSAPP_TEST_PHONE_NUMBER_ID/,
+  );
+
+  assert.deepEqual(
+    loadWhatsAppConfig({
+      WHATSAPP_WEBHOOK_VERIFY_TOKEN: TEST_WHATSAPP_VERIFY_TOKEN,
+      WHATSAPP_APP_SECRET: TEST_WHATSAPP_APP_SECRET,
+      WHATSAPP_TEST_PHONE_NUMBER_ID: TEST_WHATSAPP_PHONE_NUMBER_ID,
+      WHATSAPP_TEST_WORKSPACE_ID: requireSession().workspace.id,
+    }),
+    testWhatsAppConfig(),
+  );
+});
+
+test("WhatsApp webhook is disabled when configuration is absent", async () => {
+  const challenge = await nativeFetch(
+    `${baseUrl}/api/webhooks/whatsapp?hub.mode=subscribe&hub.verify_token=${TEST_WHATSAPP_VERIFY_TOKEN}&hub.challenge=test`,
+    { headers: { "x-forwarded-for": TEST_CLIENT_IP } },
+  );
+  assert.equal(challenge.status, 503);
+  assert.deepEqual(await readJson(challenge), {
+    error: "WhatsApp webhook is not configured",
+  });
+
+  const body = whatsappEnvelope([
+    whatsappChange({ messages: [textWhatsAppMessage()] }),
+  ]);
+  const post = await postWhatsApp({ baseUrl }, body);
+  assert.equal(post.status, 503);
+});
+
+test("WhatsApp webhook challenge requires the configured verify token and subscribe mode", async () => {
+  const app = await startWhatsAppServer();
+
+  try {
+    const success = await nativeFetch(
+      `${app.baseUrl}/api/webhooks/whatsapp?hub.mode=subscribe&hub.verify_token=${encodeURIComponent(TEST_WHATSAPP_VERIFY_TOKEN)}&hub.challenge=challenge-123`,
+      { headers: { "x-forwarded-for": TEST_CLIENT_IP } },
+    );
+    assert.equal(success.status, 200);
+    assert.equal(await success.text(), "challenge-123");
+
+    const wrongToken = await nativeFetch(
+      `${app.baseUrl}/api/webhooks/whatsapp?hub.mode=subscribe&hub.verify_token=wrong-token&hub.challenge=challenge-123`,
+      { headers: { "x-forwarded-for": TEST_CLIENT_IP } },
+    );
+    assert.equal(wrongToken.status, 403);
+
+    const invalidMode = await nativeFetch(
+      `${app.baseUrl}/api/webhooks/whatsapp?hub.mode=unsubscribe&hub.verify_token=${encodeURIComponent(TEST_WHATSAPP_VERIFY_TOKEN)}&hub.challenge=challenge-123`,
+      { headers: { "x-forwarded-for": TEST_CLIENT_IP } },
+    );
+    assert.equal(invalidMode.status, 400);
+
+    const missingChallenge = await nativeFetch(
+      `${app.baseUrl}/api/webhooks/whatsapp?hub.mode=subscribe&hub.verify_token=${encodeURIComponent(TEST_WHATSAPP_VERIFY_TOKEN)}`,
+      { headers: { "x-forwarded-for": TEST_CLIENT_IP } },
+    );
+    assert.equal(missingChallenge.status, 400);
+  } finally {
+    await stopServer(app.server);
+  }
+});
+
+test("WhatsApp webhook validates signatures against the exact raw body", async () => {
+  const app = await startWhatsAppServer();
+  const body = whatsappEnvelope([
+    whatsappChange({ messages: [textWhatsAppMessage()] }),
+  ]);
+
+  try {
+    const invalid = await postWhatsApp(app, body, {
+      signature: `sha256=${"a".repeat(64)}`,
+    });
+    assert.equal(invalid.status, 401);
+
+    const missing = await postWhatsApp(app, body, { signature: null });
+    assert.equal(missing.status, 401);
+
+    const malformed = await postWhatsApp(app, body, {
+      signature: "sha256=not-hex",
+    });
+    assert.equal(malformed.status, 401);
+
+    const changedBytes = await postWhatsApp(app, `${body}\n`, {
+      signature: signWhatsAppBody(body),
+    });
+    assert.equal(changedBytes.status, 401);
+
+    const valid = await postWhatsApp(app, body);
+    assert.equal(valid.status, 200);
+    assert.deepEqual(await readJson<WhatsAppWebhookPayload>(valid), {
+      status: "ok",
+      stored: 1,
+      duplicates: 0,
+    });
+  } finally {
+    await stopServer(app.server);
+  }
+});
+
+test("WhatsApp webhook persists a text message and exposes it in the protected inbox", async () => {
+  const app = await startWhatsAppServer();
+  const providerMessageId = `wamid.${randomUUID()}`;
+  const timestamp = "1760000000";
+  const text = "Do you have availability in June?";
+  const body = whatsappEnvelope([
+    whatsappChange({
+      messages: [
+        textWhatsAppMessage({
+          id: providerMessageId,
+          text,
+          timestamp,
+        }),
+      ],
+      contacts: [
+        {
+          wa_id: TEST_WHATSAPP_CUSTOMER_WA_ID,
+          profile: { name: "Sheena Nelson" },
+        },
+      ],
+    }),
+  ]);
+
+  try {
+    const response = await postWhatsApp(app, body);
+    assert.equal(response.status, 200);
+    assert.deepEqual(await readJson<WhatsAppWebhookPayload>(response), {
+      status: "ok",
+      stored: 1,
+      duplicates: 0,
+    });
+
+    const conversations = await pool.query<{
+      id: string;
+      workspace_id: string;
+      phone_number_id: string;
+      customer_wa_id: string;
+      contact_name: string | null;
+      lead_id: string | null;
+      last_message_at: Date;
+    }>(
+      `
+        SELECT
+          id,
+          workspace_id,
+          phone_number_id,
+          customer_wa_id,
+          contact_name,
+          lead_id,
+          last_message_at
+        FROM whatsapp_conversations
+        WHERE workspace_id = $1
+      `,
+      [requireSession().workspace.id],
+    );
+    assert.equal(conversations.rows.length, 1);
+    const conversation = conversations.rows[0];
+    assert.ok(conversation);
+    assert.equal(conversation.phone_number_id, TEST_WHATSAPP_PHONE_NUMBER_ID);
+    assert.equal(conversation.customer_wa_id, TEST_WHATSAPP_CUSTOMER_WA_ID);
+    assert.equal(conversation.contact_name, "Sheena Nelson");
+    assert.equal(conversation.lead_id, null);
+    assert.equal(
+      conversation.last_message_at.toISOString(),
+      new Date(Number(timestamp) * 1_000).toISOString(),
+    );
+
+    const storedMessages = await pool.query<{
+      provider_message_id: string;
+      conversation_id: string;
+      workspace_id: string;
+      direction: string;
+      message_type: string;
+      text_content: string | null;
+      provider_timestamp: Date;
+      processing_status: string;
+    }>(
+      `
+        SELECT
+          provider_message_id,
+          conversation_id,
+          workspace_id,
+          direction,
+          message_type,
+          text_content,
+          provider_timestamp,
+          processing_status
+        FROM whatsapp_messages
+        WHERE workspace_id = $1
+      `,
+      [requireSession().workspace.id],
+    );
+    assert.equal(storedMessages.rows.length, 1);
+    assert.deepEqual(
+      {
+        ...storedMessages.rows[0],
+        provider_timestamp:
+          storedMessages.rows[0]?.provider_timestamp.toISOString(),
+      },
+      {
+        provider_message_id: providerMessageId,
+        conversation_id: conversation.id,
+        workspace_id: requireSession().workspace.id,
+        direction: "inbound",
+        message_type: "text",
+        text_content: text,
+        provider_timestamp: new Date(Number(timestamp) * 1_000).toISOString(),
+        processing_status: "stored",
+      },
+    );
+
+    const inbox = await fetch(`${baseUrl}/api/whatsapp/conversations`);
+    assert.equal(inbox.status, 200);
+    const inboxPayload =
+      await readJson<WhatsAppConversationsPayload>(inbox);
+    assert.equal(inboxPayload.conversations.length, 1);
+    assert.equal(inboxPayload.conversations[0]?.id, conversation.id);
+    assert.equal(inboxPayload.conversations[0]?.contactName, "Sheena Nelson");
+    assert.equal(inboxPayload.conversations[0]?.lastMessagePreview, text);
+    assert.equal(inboxPayload.conversations[0]?.lastMessageType, "text");
+    assert.equal(inboxPayload.conversations[0]?.lastMessageStatus, "stored");
+    assert.equal(inboxPayload.conversations[0]?.leadId, null);
+
+    const thread = await fetch(
+      `${baseUrl}/api/whatsapp/conversations/${conversation.id}/messages`,
+    );
+    assert.equal(thread.status, 200);
+    const threadPayload =
+      await readJson<WhatsAppConversationMessagesPayload>(thread);
+    assert.equal(threadPayload.conversation.id, conversation.id);
+    assert.equal(threadPayload.messages.length, 1);
+    assert.equal(threadPayload.messages[0]?.text, text);
+    assert.equal(threadPayload.messages[0]?.processingStatus, "stored");
+    assert.equal(threadPayload.messages[0]?.direction, "inbound");
+  } finally {
+    await stopServer(app.server);
+  }
+});
+
+test("WhatsApp webhook supports BSUID senders when phone numbers are omitted", async () => {
+  const app = await startWhatsAppServer();
+  const businessScopedUserId = TEST_WHATSAPP_BSUID;
+  const message: TestWhatsAppMessage = {
+    id: `wamid.${randomUUID()}`,
+    from_user_id: businessScopedUserId,
+    timestamp: "1760000050",
+    type: "text",
+    text: { body: "Message from a username-enabled customer" },
+  };
+  const body = whatsappEnvelope([
+    whatsappChange({
+      messages: [message],
+      contacts: [
+        {
+          user_id: businessScopedUserId,
+          profile: { name: "Username Customer" },
+        },
+      ],
+    }),
+  ]);
+
+  try {
+    const response = await postWhatsApp(app, body);
+    assert.equal(response.status, 200);
+    assert.deepEqual(await readJson<WhatsAppWebhookPayload>(response), {
+      status: "ok",
+      stored: 1,
+      duplicates: 0,
+    });
+
+    const conversation = await pool.query<{
+      id: string;
+      customer_wa_id: string;
+      contact_name: string | null;
+      lead_id: string | null;
+    }>(
+      `
+        SELECT id, customer_wa_id, contact_name, lead_id
+        FROM whatsapp_conversations
+        WHERE workspace_id = $1
+      `,
+      [requireSession().workspace.id],
+    );
+    const stored = conversation.rows[0];
+    assert.ok(stored);
+    assert.equal(stored.customer_wa_id, businessScopedUserId);
+    assert.equal(stored.contact_name, "Username Customer");
+    assert.equal(stored.lead_id, null);
+
+    const inbox = await fetch(`${baseUrl}/api/whatsapp/conversations`);
+    const inboxPayload =
+      await readJson<WhatsAppConversationsPayload>(inbox);
+    assert.equal(
+      inboxPayload.conversations[0]?.customerWaId,
+      businessScopedUserId,
+    );
+    assert.equal(
+      inboxPayload.conversations[0]?.contactName,
+      "Username Customer",
+    );
+  } finally {
+    await stopServer(app.server);
+  }
+});
+
+test("WhatsApp webhook stores messages from multiple entries and changes once", async () => {
+  const app = await startWhatsAppServer();
+  const first = textWhatsAppMessage({
+    id: `wamid.${randomUUID()}`,
+    text: "First message",
+    timestamp: "1760000100",
+  });
+  const second = textWhatsAppMessage({
+    id: `wamid.${randomUUID()}`,
+    text: "Second message",
+    timestamp: "1760000200",
+  });
+  const third = textWhatsAppMessage({
+    id: `wamid.${randomUUID()}`,
+    text: "Third message",
+    timestamp: "1760000300",
+  });
+  const body = JSON.stringify({
+    object: "whatsapp_business_account",
+    entry: [
+      {
+        id: "waba-first",
+        changes: [
+          whatsappChange({ messages: [first] }),
+          whatsappChange({ messages: [third] }),
+        ],
+      },
+      {
+        id: "waba-second",
+        changes: [whatsappChange({ messages: [second] })],
+      },
+    ],
+  });
+
+  try {
+    const response = await postWhatsApp(app, body);
+    assert.equal(response.status, 200);
+    assert.deepEqual(await readJson<WhatsAppWebhookPayload>(response), {
+      status: "ok",
+      stored: 3,
+      duplicates: 0,
+    });
+
+    const conversations = await pool.query<{
+      id: string;
+      last_message_at: Date;
+    }>(
+      `
+        SELECT id, last_message_at
+        FROM whatsapp_conversations
+        WHERE workspace_id = $1
+      `,
+      [requireSession().workspace.id],
+    );
+    assert.equal(conversations.rows.length, 1);
+    assert.equal(
+      conversations.rows[0]?.last_message_at.toISOString(),
+      new Date(1_760_000_300 * 1_000).toISOString(),
+    );
+
+    const thread = await fetch(
+      `${baseUrl}/api/whatsapp/conversations/${conversations.rows[0]?.id}/messages`,
+    );
+    const threadPayload =
+      await readJson<WhatsAppConversationMessagesPayload>(thread);
+    assert.deepEqual(
+      threadPayload.messages.map((message) => message.text),
+      ["First message", "Second message", "Third message"],
+    );
+  } finally {
+    await stopServer(app.server);
+  }
+});
+
+test("WhatsApp webhook persists unsupported message types without inventing text", async () => {
+  const app = await startWhatsAppServer();
+  const message: TestWhatsAppMessage = {
+    id: `wamid.${randomUUID()}`,
+    from: TEST_WHATSAPP_CUSTOMER_WA_ID,
+    timestamp: "1760000400",
+    type: "image",
+    image: { id: "media-test-id", mime_type: "image/jpeg" },
+  };
+  const body = whatsappEnvelope([whatsappChange({ messages: [message] })]);
+
+  try {
+    const response = await postWhatsApp(app, body);
+    assert.equal(response.status, 200);
+    assert.deepEqual(await readJson<WhatsAppWebhookPayload>(response), {
+      status: "ok",
+      stored: 1,
+      duplicates: 0,
+    });
+
+    const conversation = await pool.query<{ id: string }>(
+      "SELECT id FROM whatsapp_conversations WHERE workspace_id = $1",
+      [requireSession().workspace.id],
+    );
+    const stored = await pool.query<{
+      message_type: string;
+      text_content: string | null;
+      processing_status: string;
+    }>(
+      `
+        SELECT message_type, text_content, processing_status
+        FROM whatsapp_messages
+        WHERE workspace_id = $1
+      `,
+      [requireSession().workspace.id],
+    );
+    assert.deepEqual(stored.rows[0], {
+      message_type: "image",
+      text_content: null,
+      processing_status: "unsupported",
+    });
+
+    const inbox = await fetch(`${baseUrl}/api/whatsapp/conversations`);
+    const inboxPayload =
+      await readJson<WhatsAppConversationsPayload>(inbox);
+    assert.equal(inboxPayload.conversations[0]?.lastMessagePreview, null);
+    assert.equal(inboxPayload.conversations[0]?.lastMessageType, "image");
+    assert.equal(
+      inboxPayload.conversations[0]?.lastMessageStatus,
+      "unsupported",
+    );
+
+    const thread = await fetch(
+      `${baseUrl}/api/whatsapp/conversations/${conversation.rows[0]?.id}/messages`,
+    );
+    const threadPayload =
+      await readJson<WhatsAppConversationMessagesPayload>(thread);
+    assert.equal(threadPayload.messages[0]?.messageType, "image");
+    assert.equal(threadPayload.messages[0]?.text, null);
+    assert.equal(threadPayload.messages[0]?.processingStatus, "unsupported");
+  } finally {
+    await stopServer(app.server);
+  }
+});
+
+test("WhatsApp webhook ignores status and unrelated changes", async () => {
+  const app = await startWhatsAppServer();
+  const body = JSON.stringify({
+    object: "whatsapp_business_account",
+    entry: [
+      {
+        id: "waba-test",
+        changes: [
+          {
+            field: "messages",
+            value: {
+              messaging_product: "whatsapp",
+              metadata: {
+                display_phone_number: "15550783881",
+                phone_number_id: TEST_WHATSAPP_PHONE_NUMBER_ID,
+              },
+              statuses: [{ id: "wamid.status", status: "delivered" }],
+            },
+          },
+          {
+            field: "message_template_status_update",
+            value: { event: "APPROVED" },
+          },
+        ],
+      },
+    ],
+  });
+
+  try {
+    const response = await postWhatsApp(app, body);
+    assert.equal(response.status, 200);
+    assert.deepEqual(await readJson<WhatsAppWebhookPayload>(response), {
+      status: "ignored",
+    });
+
+    const counts = await pool.query<{
+      conversations: number;
+      messages: number;
+    }>(`
+      SELECT
+        (SELECT count(*) FROM whatsapp_conversations)::int AS conversations,
+        (SELECT count(*) FROM whatsapp_messages)::int AS messages
+    `);
+    assert.deepEqual(counts.rows[0], { conversations: 0, messages: 0 });
+  } finally {
+    await stopServer(app.server);
+  }
+});
+
+test("WhatsApp webhook rejects malformed signed payloads", async () => {
+  const app = await startWhatsAppServer();
+
+  try {
+    const invalidJson = await postWhatsApp(app, "{not-json");
+    assert.equal(invalidJson.status, 400);
+
+    const missingChanges = await postWhatsApp(
+      app,
+      JSON.stringify({
+        object: "whatsapp_business_account",
+        entry: [{}],
+      }),
+    );
+    assert.equal(missingChanges.status, 400);
+
+    const missingMetadata = await postWhatsApp(
+      app,
+      JSON.stringify({
+        object: "whatsapp_business_account",
+        entry: [
+          {
+            changes: [
+              {
+                field: "messages",
+                value: {
+                  messaging_product: "whatsapp",
+                  messages: [textWhatsAppMessage()],
+                },
+              },
+            ],
+          },
+        ],
+      }),
+    );
+    assert.equal(missingMetadata.status, 400);
+
+    const counts = await pool.query<{ count: number }>(
+      "SELECT count(*)::int AS count FROM whatsapp_messages",
+    );
+    assert.equal(counts.rows[0]?.count, 0);
+  } finally {
+    await stopServer(app.server);
+  }
+});
+
+test("WhatsApp webhook ignores messages for a different business phone number", async () => {
+  const app = await startWhatsAppServer();
+  const body = whatsappEnvelope([
+    whatsappChange({
+      phoneNumberId: "109999999999999",
+      messages: [textWhatsAppMessage()],
+    }),
+  ]);
+
+  try {
+    const response = await postWhatsApp(app, body);
+    assert.equal(response.status, 200);
+    assert.deepEqual(await readJson<WhatsAppWebhookPayload>(response), {
+      status: "ignored",
+    });
+
+    const counts = await pool.query<{ count: number }>(
+      "SELECT count(*)::int AS count FROM whatsapp_messages",
+    );
+    assert.equal(counts.rows[0]?.count, 0);
+  } finally {
+    await stopServer(app.server);
+  }
+});
+
+test("WhatsApp webhook acknowledges duplicate provider message IDs without new activity", async () => {
+  const app = await startWhatsAppServer();
+  const body = whatsappEnvelope([
+    whatsappChange({
+      messages: [
+        textWhatsAppMessage({
+          id: `wamid.${randomUUID()}`,
+          text: "Only once",
+          timestamp: "1760000500",
+        }),
+      ],
+    }),
+  ]);
+
+  try {
+    const first = await postWhatsApp(app, body);
+    assert.equal(first.status, 200);
+    assert.deepEqual(await readJson<WhatsAppWebhookPayload>(first), {
+      status: "ok",
+      stored: 1,
+      duplicates: 0,
+    });
+
+    const before = await pool.query<{
+      id: string;
+      last_message_at: Date;
+      updated_at: Date;
+    }>(
+      `
+        SELECT id, last_message_at, updated_at
+        FROM whatsapp_conversations
+        WHERE workspace_id = $1
+      `,
+      [requireSession().workspace.id],
+    );
+
+    const duplicate = await postWhatsApp(app, body);
+    assert.equal(duplicate.status, 200);
+    assert.deepEqual(await readJson<WhatsAppWebhookPayload>(duplicate), {
+      status: "ok",
+      stored: 0,
+      duplicates: 1,
+    });
+
+    const after = await pool.query<{
+      id: string;
+      last_message_at: Date;
+      updated_at: Date;
+    }>(
+      `
+        SELECT id, last_message_at, updated_at
+        FROM whatsapp_conversations
+        WHERE workspace_id = $1
+      `,
+      [requireSession().workspace.id],
+    );
+    assert.equal(after.rows.length, 1);
+    assert.equal(after.rows[0]?.id, before.rows[0]?.id);
+    assert.equal(
+      after.rows[0]?.last_message_at.toISOString(),
+      before.rows[0]?.last_message_at.toISOString(),
+    );
+    assert.equal(
+      after.rows[0]?.updated_at.toISOString(),
+      before.rows[0]?.updated_at.toISOString(),
+    );
+
+    const counts = await pool.query<{ count: number }>(
+      `
+        SELECT count(*)::int AS count
+        FROM whatsapp_messages
+        WHERE workspace_id = $1
+      `,
+      [requireSession().workspace.id],
+    );
+    assert.equal(counts.rows[0]?.count, 1);
+  } finally {
+    await stopServer(app.server);
+  }
+});
+
+test("WhatsApp webhook rejects a missing configured workspace", async () => {
+  const app = await startWhatsAppServer({ workspaceId: randomUUID() });
+  const body = whatsappEnvelope([
+    whatsappChange({ messages: [textWhatsAppMessage()] }),
+  ]);
+
+  try {
+    const response = await postWhatsApp(app, body);
+    assert.equal(response.status, 503);
+    assert.deepEqual(await readJson(response), {
+      error: "WhatsApp integration is unavailable",
+    });
+
+    const counts = await pool.query<{ count: number }>(
+      "SELECT count(*)::int AS count FROM whatsapp_messages",
+    );
+    assert.equal(counts.rows[0]?.count, 0);
+  } finally {
+    await stopServer(app.server);
+  }
+});
+
+test("WhatsApp persistence failures are not acknowledged as stored", async () => {
+  const unavailablePool = new Pool({
+    connectionString:
+      "postgresql://replypilot:invalid@127.0.0.1:1/replypilot_unavailable",
+    connectionTimeoutMillis: 250,
+  });
+  unavailablePool.on("error", () => {
+    // The webhook test intentionally triggers connection errors.
+  });
+  const app = await startServer(
+    unavailablePool,
+    undefined,
+    {},
+    testWhatsAppConfig(),
+  );
+  const body = whatsappEnvelope([
+    whatsappChange({ messages: [textWhatsAppMessage()] }),
+  ]);
+
+  try {
+    const response = await postWhatsApp(app, body);
+    assert.equal(response.status, 500);
+    assert.deepEqual(await readJson(response), {
+      error: "Internal server error",
+    });
+  } finally {
+    await stopServer(app.server);
+    await unavailablePool.end();
+  }
+});
+
+test("WhatsApp conversations associate only with an exact existing lead number", async () => {
+  const app = await startWhatsAppServer();
+  const lead = await createDraftLead({
+    name: "Exact Match",
+    whatsappNumber: "+1 (650) 555-1234",
+  });
+  assert.equal(lead.whatsappNumber, TEST_WHATSAPP_CUSTOMER_WA_ID);
+
+  const matchingBody = whatsappEnvelope([
+    whatsappChange({
+      messages: [
+        {
+          ...textWhatsAppMessage({
+            id: `wamid.${randomUUID()}`,
+            from: TEST_WHATSAPP_CUSTOMER_WA_ID,
+          }),
+          from_user_id: TEST_WHATSAPP_BSUID,
+        },
+      ],
+      contacts: [
+        {
+          wa_id: TEST_WHATSAPP_CUSTOMER_WA_ID,
+          user_id: TEST_WHATSAPP_BSUID,
+          profile: { name: "Exact Match" },
+        },
+      ],
+    }),
+  ]);
+  const unmatchedSender = "2348031234567";
+  const unmatchedBody = whatsappEnvelope([
+    whatsappChange({
+      messages: [
+        textWhatsAppMessage({
+          id: `wamid.${randomUUID()}`,
+          from: unmatchedSender,
+        }),
+      ],
+    }),
+  ]);
+
+  try {
+    assert.equal((await postWhatsApp(app, matchingBody)).status, 200);
+    assert.equal((await postWhatsApp(app, unmatchedBody)).status, 200);
+
+    const conversations = await pool.query<{
+      customer_wa_id: string;
+      lead_id: string | null;
+    }>(
+      `
+        SELECT customer_wa_id, lead_id
+        FROM whatsapp_conversations
+        WHERE workspace_id = $1
+        ORDER BY customer_wa_id
+      `,
+      [requireSession().workspace.id],
+    );
+    assert.equal(conversations.rows.length, 2);
+    const matchedConversation = conversations.rows.find(
+      (conversation) => conversation.customer_wa_id === TEST_WHATSAPP_BSUID,
+    );
+    const unmatchedConversation = conversations.rows.find(
+      (conversation) => conversation.customer_wa_id === unmatchedSender,
+    );
+    assert.equal(matchedConversation?.lead_id, lead.id);
+    assert.equal(unmatchedConversation?.lead_id, null);
+  } finally {
+    await stopServer(app.server);
+  }
+});
+
+test("WhatsApp inbox is workspace-scoped and rejects cross-workspace IDs", async () => {
+  const app = await startWhatsAppServer();
+  const owner = requireSession();
+  const body = whatsappEnvelope([
+    whatsappChange({
+      messages: [
+        textWhatsAppMessage({
+          id: `wamid.${randomUUID()}`,
+          text: "Owner-only message",
+        }),
+      ],
+    }),
+  ]);
+
+  try {
+    assert.equal((await postWhatsApp(app, body)).status, 200);
+
+    const ownerConversations = await pool.query<{ id: string }>(
+      "SELECT id FROM whatsapp_conversations WHERE workspace_id = $1",
+      [owner.workspace.id],
+    );
+    const conversationId = ownerConversations.rows[0]?.id;
+    assert.ok(conversationId);
+
+    const ownerList = await requestAs(
+      owner,
+      "/api/whatsapp/conversations",
+    );
+    assert.equal(ownerList.status, 200);
+    const ownerListPayload =
+      await readJson<WhatsAppConversationsPayload>(ownerList);
+    assert.equal(ownerListPayload.conversations[0]?.id, conversationId);
+
+    const ownerThread = await requestAs(
+      owner,
+      `/api/whatsapp/conversations/${conversationId}/messages`,
+    );
+    assert.equal(ownerThread.status, 200);
+
+    const other = await registerUser();
+    assert.notEqual(other.workspace.id, owner.workspace.id);
+
+    const otherList = await requestAs(
+      other,
+      "/api/whatsapp/conversations",
+    );
+    assert.equal(otherList.status, 200);
+    assert.deepEqual(
+      await readJson<WhatsAppConversationsPayload>(otherList),
+      { conversations: [] },
+    );
+
+    const guessedThread = await requestAs(
+      other,
+      `/api/whatsapp/conversations/${conversationId}/messages`,
+    );
+    assert.equal(guessedThread.status, 404);
+    assert.deepEqual(await readJson(guessedThread), {
+      error: "Conversation not found",
+    });
+
+    let foreignKeyCode: string | undefined;
+    try {
+      await pool.query(
+        `
+          INSERT INTO whatsapp_messages (
+            workspace_id,
+            conversation_id,
+            provider_message_id,
+            direction,
+            message_type,
+            text_content,
+            provider_timestamp,
+            processing_status
+          )
+          VALUES ($1, $2, $3, 'inbound', 'text', 'Cross workspace', now(), 'stored')
+        `,
+        [other.workspace.id, conversationId, `wamid.${randomUUID()}`],
+      );
+    } catch (error) {
+      foreignKeyCode =
+        typeof error === "object" && error !== null && "code" in error
+          ? String(error.code)
+          : undefined;
+    }
+    assert.equal(foreignKeyCode, "23503");
+  } finally {
+    await stopServer(app.server);
+  }
 });

@@ -16,6 +16,7 @@ const leadSchema = z.object({
   channel: z.enum(LEAD_CHANNELS),
   status: z.enum(LEAD_STATUSES),
   lastMessage: z.string(),
+  whatsappNumber: z.string().nullable(),
   nextFollowUpAt: z.iso.datetime({ offset: true }).nullable(),
   createdAt: z.iso.datetime({ offset: true }),
   updatedAt: z.iso.datetime({ offset: true }),

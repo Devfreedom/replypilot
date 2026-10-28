@@ -20,11 +20,26 @@ You can start editing the page by modifying `app/page.tsx`. The page auto-update
 
 This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
 
-## API and local PostgreSQL
+## API, authentication, and local PostgreSQL
 
-> **Development-only warning:** the API has no authentication or tenant isolation. The business-profile, catalogue, knowledge-base, and reply-draft endpoints expose and accept business data without access control. Do not expose this application publicly or use it with real customer or business data until authentication and tenant isolation are implemented.
+> **Not production-ready warning:** email/password authentication and workspace isolation are implemented, but this application still needs HTTPS, production origin and cookie review, email verification, password recovery, deployment hardening, operational monitoring, and a complete security review before production use. Reply generation remains mock-only. WhatsApp is a single-number, inbound-only test integration with no outbound sending or automatic replies. Do not use real customer or business data yet.
 
-The Express API is a separate development service. It binds to `127.0.0.1` and must not be exposed publicly. It has no authentication or WhatsApp integration. The browser dashboard is a separate Next.js app; it proxies `/api/*` requests to `API_ORIGIN`, which defaults to `http://127.0.0.1:4000`.
+The Express API is a separate development service. It binds to `127.0.0.1` and must not be exposed publicly. The browser dashboard is a separate Next.js app; it proxies `/api/*` requests to `API_ORIGIN`, which defaults to `http://127.0.0.1:4000`. This keeps Better Auth and business API requests same-origin from the browser, so session cookies flow through the rewrite.
+
+### Authentication architecture
+
+Authentication uses [Better Auth](https://www.better-auth.com/) `1.7.14` with its official email/password and PostgreSQL integration. Better Auth owns user records, password hashing, session tokens, session expiry, session invalidation, origin checks, and rate limiting. The repository does not implement its own password hashing, session tokens, or JWTs.
+
+- The Better Auth handler is mounted in Express at `/api/auth/*splat` **before** `express.json()`, so Better Auth receives the raw request body.
+- Browser requests reach it through the existing Next.js `/api/:path*` rewrite.
+- Sessions are HTTP-only, `SameSite=Lax` cookies. Better Auth uses `Secure` cookies when `BETTER_AUTH_URL` is HTTPS.
+- Auth POST requests must come from a trusted origin. Local development trusts `http://localhost:3000` and `http://127.0.0.1:3000`; configure production origins explicitly.
+- Better Auth applies its built-in sign-in/sign-up rate limits. The production app leaves rate limiting enabled.
+- Signing out invalidates the server-side session; the browser session cookie alone cannot be reused.
+
+Registration creates one personal workspace and an owner membership through a Better Auth database hook. If that hook is interrupted, the first authenticated private request runs a recoverable workspace initialization path. The server never accepts a workspace ID from the browser as proof of ownership.
+
+The browser uses `src/lib/auth-client.ts`, an authenticated workspace context, and a protected app wrapper. These provide redirects and a clear loading/unauthenticated state. They are user-experience controls only; every private API request is authorized again on the server.
 
 ### Start the database
 
@@ -44,9 +59,23 @@ npm run db:migrate
 npm run db:seed
 ```
 
-The migrations create the `leads` table plus the business-profile, catalogue, and knowledge-base tables. Migration `003_limit_catalogue_price.sql` adds the safe-integer price constraint without changing existing leads. Migration `004_add_profile_phone_country_currency.sql` adds nullable profile phone-country and currency columns without defaults or backfills, so existing profiles remain unconfigured until the owner saves a choice. Migration `005_create_reply_drafts.sql` adds the `reply_drafts` table for saved drafts and their server-generated business-fact snapshots; it does not alter existing leads or business records. Running migrations again is a no-op; existing data is preserved. The seed is idempotent: running `npm run db:seed` again does not create duplicates. It uses fixed UUIDs and `ON CONFLICT DO NOTHING`, so existing records are not overwritten.
+The migrations create the `leads` table plus the business-profile, catalogue, knowledge-base, and saved-draft tables. Migration `003_limit_catalogue_price.sql` adds the safe-integer price constraint without changing existing leads. Migration `004_add_profile_phone_country_currency.sql` adds nullable profile phone-country and currency columns without defaults or backfills, so existing profiles remain unconfigured until the owner saves a choice. Migration `005_create_reply_drafts.sql` adds the `reply_drafts` table for saved drafts and their server-generated business-fact snapshots.
 
-Environment variables are loaded by Node.js `--env-file-if-exists=.env` in the API scripts. Values already set in the environment take precedence, and no dotenv dependency is needed. The API validates `DATABASE_URL`, `PORT`, and `NODE_ENV` at startup.
+Migration `006_create_auth_and_workspaces.sql` adds the Better Auth tables (`auth_users`, `auth_sessions`, `auth_accounts`, `auth_verifications`), `workspaces`, and `workspace_memberships` with UUID keys, owner/member roles, foreign keys, indexes, and a partial unique index that permits exactly one default workspace per user.
+
+Migration `007_scope_business_data_to_workspaces.sql` is the non-destructive tenant migration. It creates the explicit legacy workspace `00000000-0000-4000-8000-000000000001` (`Legacy development workspace`), adds `workspace_id` to leads, profiles, catalogue, knowledge, and reply drafts, backfills existing rows to that workspace, then adds non-null constraints, foreign keys, and indexes. Drafts receive a composite `(lead_id, workspace_id)` foreign key so a draft cannot reference a lead from another workspace. Existing IDs, values, follow-up dates, approval status, and source snapshots are preserved. The old single-profile `singleton` column is replaced by a unique profile per workspace.
+
+Migration `008_add_whatsapp_inbox.sql` adds the inbound WhatsApp test tables and a nullable `leads.whatsapp_number` column used only for exact sender matching. Existing leads remain unassociated. Conversations and messages are workspace-scoped with composite foreign keys, and `(workspace_id, provider_message_id)` is unique so repeated Meta deliveries cannot create duplicate messages.
+
+Running migrations again through `npm run db:migrate` is a no-op; existing data is preserved. The seed is idempotent and requires the explicit workspace supplied by its CLI. It uses fixed UUIDs and `ON CONFLICT DO NOTHING`, so existing records are not overwritten.
+
+Environment variables are loaded by Node.js `--env-file-if-exists=.env` in the API scripts. Values already set in the environment take precedence, and no dotenv dependency is needed. The API validates `DATABASE_URL`, `PORT`, `NODE_ENV`, and `BETTER_AUTH_SECRET` (32+ characters) at startup. Production also requires an HTTPS `BETTER_AUTH_URL`. Generate a secret without printing it into source control:
+
+```bash
+openssl rand -base64 32
+```
+
+Put the generated value only in your local `.env` (or your deployment's secret store), then set `BETTER_AUTH_URL` to the public frontend origin. Add any additional production frontend origins to `BETTER_AUTH_TRUSTED_ORIGINS`; do not add wildcard or attacker-controlled origins.
 
 ### Run the API
 
@@ -90,22 +119,52 @@ docker compose exec db createdb -U replypilot replypilot_test
 
 Run this only once; skip it if the database already exists.
 
-The test suite runs migrations against `TEST_DATABASE_URL` and truncates its `reply_drafts`, `leads`, `business_profiles`, `catalogue_entries`, and `knowledge_entries` tables before each test. It fails with a clear error if `TEST_DATABASE_URL` is missing, points at the same database as `DATABASE_URL`, or points at a maintenance database. Tests are never silently skipped.
+The test suite runs migrations against `TEST_DATABASE_URL` and truncates its auth, workspace, and business tables before each test. It then registers a real Better Auth account through `/api/auth/sign-up/email` and uses the returned HTTP-only session cookie for authenticated API calls; there is no authentication bypass. The shared test app disables rate limiting to avoid tripping sign-up limits between unrelated tests, while a dedicated app instance verifies the real Better Auth limit. Tests cover session creation, sign-in/sign-out, expiry, origin checks, workspace creation, bootstrap guards, migration backfill, cross-workspace reads/writes/deletes/approvals/regeneration, source snapshots, database constraints, and member read-only behavior.
+
+The suite fails with a clear error if `TEST_DATABASE_URL` is missing, points at the same database as `DATABASE_URL`, or points at a maintenance database. Tests are never silently skipped.
+
+### Legacy development workspace bootstrap
+
+Existing development data is not automatically attached to the first person who registers. It stays in the explicit legacy workspace until a local operator assigns it to a chosen, already-registered account with the guarded CLI. There is no public HTTP endpoint for this operation.
+
+1. Back up the development database if the data matters.
+2. Apply migrations with `npm run db:migrate`.
+3. Start the API and Next.js app, then create the intended account through `/sign-up`.
+4. Find the account ID if needed: `SELECT id, email FROM auth_users WHERE email = 'owner@example.test';`
+5. Run exactly one of the following with the real account ID or email:
+
+```bash
+npm run db:bootstrap-legacy -- --user-id <uuid> --confirm
+npm run db:bootstrap-legacy -- --user-email owner@example.test --confirm
+```
+
+The command refuses to run without `--confirm`, refuses both selectors at once, refuses an unknown account, and refuses if the legacy workspace already has any member. It makes the legacy workspace the selected account's default and requires a deliberately one-time decision. Re-running it never reassigns ownership. This is a local-development procedure only; production account administration is not implemented.
 
 ### Endpoints
 
+All business endpoints below require a valid Better Auth session and workspace membership. Unauthenticated requests return `401 {"error":"Authentication required"}`. Authenticated members can read business data, but writes require the `owner` role and return `403 {"error":"Forbidden"}` otherwise. The server derives the workspace from the session and rejects request bodies that include a `workspaceId` or other unknown fields.
+
 | Method | Path | Behaviour |
 | --- | --- | --- |
-| `GET` | `/api/health` | `200 {"status":"ok"}` when PostgreSQL responds; `503 {"status":"unavailable"}` otherwise. |
-| `GET` | `/api/leads` | `200 {"leads":[...]}` ordered newest first. |
-| `POST` | `/api/leads` | Accepts `name`, `service`, and `lastMessage`; optional `channel`, `status`, and `nextFollowUpAt`. Returns `201 {"lead":{...}}`. Defaults: `Manual`, `New`. |
+| `POST` | `/api/auth/sign-up/email` | Better Auth email/password registration with `email`, `password`, and `name`. Creates a session cookie and, through the database hook, an owner workspace. Returns `422` for an existing email and `400` for invalid input. |
+| `POST` | `/api/auth/sign-in/email` | Better Auth email/password sign-in. Returns a session cookie, `401` for invalid credentials, `403` for an untrusted/missing origin, and `429` when rate-limited. |
+| `POST` | `/api/auth/sign-out` | Invalidates the server-side session and clears the session cookie. |
+| `GET` | `/api/auth/get-session` | Returns the current Better Auth session and user, or no session when unauthenticated. |
+| `GET` | `/api/workspace` | Requires a session. Returns the authenticated user, the resolved default workspace, and the member's `owner`/`member` role. |
+| `GET` | `/api/health` | `200 {"status":"ok"}` when PostgreSQL responds; `503 {"status":"unavailable"}` otherwise. Public. |
+| `GET` | `/api/webhooks/whatsapp` | Public Meta verification endpoint. Returns the challenge as plain text only for `hub.mode=subscribe` and the configured verify token; otherwise `400` or `403`. Returns `503` when WhatsApp is not configured. |
+| `POST` | `/api/webhooks/whatsapp` | Public Meta event endpoint. Requires a valid `X-Hub-Signature-256` over the exact raw body. Stores matching inbound messages, acknowledges unrelated events, and returns `400` for malformed payloads, `401` for bad signatures, `500` for persistence failures, or `503` when the configured workspace is unavailable. |
+| `GET` | `/api/whatsapp/conversations` | Protected. Lists conversations in the session workspace, with contact details and the latest message preview/type. |
+| `GET` | `/api/whatsapp/conversations/:id/messages` | Protected. Returns `200 {"conversation":{...},"messages":[...]}` only when the conversation belongs to the session workspace; otherwise `404`. |
+| `GET` | `/api/leads` | `200 {"leads":[...]}` for the session workspace, ordered newest first. |
+| `POST` | `/api/leads` | Accepts `name`, `service`, and `lastMessage`; optional `channel`, `status`, `whatsappNumber`, and `nextFollowUpAt`. Returns `201 {"lead":{...}}`, or `409` if the optional WhatsApp number is already used in the workspace. Defaults: `Manual`, `New`. |
 | `PATCH` | `/api/leads/:id` | Accepts `{ "status": "New" \| "Contacted" \| "Quoted" \| "Booked" }`. Returns the updated lead, `400` for malformed input, or `404` for an unknown valid UUID. |
 | `POST` | `/api/leads/:id/draft-reply` | Returns a non-persistent mock demonstration analysis and suggested reply for an existing lead. Kept for compatibility; the response omits the saved-draft fields and sources. Returns `400` for a malformed ID or `404` for an unknown valid UUID. |
 | `POST` | `/api/leads/:id/reply-drafts` | Generates and saves a mock draft with a server-generated business-fact snapshot. Returns `201 {"draft":{...}}`. Optional body `{"draftId":"..."}` regenerates that saved draft in place and returns `200`; it must belong to the lead. |
 | `GET` | `/api/leads/:id/reply-drafts` | `200 {"drafts":[...]}` for that lead, newest first. Returns `404` for an unknown lead. |
 | `PATCH` | `/api/leads/:leadId/reply-drafts/:draftId` | Accepts `{"draftReply":"..."}` to save edited text, or `{"status":"approved"\|"draft"}` to change review status. Text edits return the draft to `draft`; approving records `approvedAt`. Returns `200 {"draft":{...}}`, `400`, or `404`. |
 | `GET` | `/api/business/profile` | `200 {"profile":{...}}`, or `200 {"profile":null}` when no profile has been created. |
-| `POST` | `/api/business/profile` | Creates the single development business profile. Returns `201 {"profile":{...}}`, `400` for invalid data, or `409` if a profile already exists. |
+| `POST` | `/api/business/profile` | Creates the single business profile for the session workspace. Returns `201 {"profile":{...}}`, `400` for invalid data, or `409` if that workspace already has a profile. |
 | `PATCH` | `/api/business/profile` | Replaces the profile's editable fields using the same body shape as creation. Returns the updated profile, `400`, or `404` when no profile exists. |
 | `GET` | `/api/business/catalogue` | `200 {"entries":[...]}` including active and inactive entries, newest first. |
 | `POST` | `/api/business/catalogue` | Creates a catalogue entry. Returns `201 {"entry":{...}}` or `400`. |
@@ -116,7 +175,7 @@ The test suite runs migrations against `TEST_DATABASE_URL` and truncates its `re
 | `PATCH` | `/api/business/knowledge/:id` | Replaces the entry's editable fields. Returns the updated entry, `400`, or `404`. |
 | `DELETE` | `/api/business/knowledge/:id` | Deactivates the entry rather than deleting it. Returns `200 {"entry":{...}}` with `isActive:false`, or `404`. |
 
-Each lead response field is: `id`, `name`, `service`, `channel`, `status`, `lastMessage`, `nextFollowUpAt`, `createdAt`, and `updatedAt`. `nextFollowUpAt` is an ISO 8601 timestamp with an explicit offset or `null`.
+Each lead response field is: `id`, `name`, `service`, `channel`, `status`, `lastMessage`, `whatsappNumber`, `nextFollowUpAt`, `createdAt`, and `updatedAt`. `nextFollowUpAt` is an ISO 8601 timestamp with an explicit offset or `null`. `whatsappNumber` is optional, stored as a normalized digit string, and used only for exact WhatsApp sender matching.
 
 Database errors are not returned to clients. Validation responses contain field-level messages without echoing submitted values. Malformed IDs and bodies return `400`.
 
@@ -301,7 +360,156 @@ The saved `sources` snapshot preserves the original approved values even if a ca
 
 The Draft Reply dialog shows the enquiry summary, missing information, **Business information used**, editable text, demo labeling, review status, save/regenerate/copy/approve actions, and previously saved drafts for the lead. Reopening it restores the latest saved text, snapshot, and status; if the lead has no saved draft, it generates and saves one. Editing warns that changes may no longer be supported by the original facts.
 
+### WhatsApp Cloud API inbound test integration
 
+This milestone implements **inbound-only** WhatsApp Cloud API handling for exactly one Meta test phone number and one configured ReplyPilot workspace. It does not send WhatsApp messages, generate automatic replies, call the AI provider, download media, or implement Meta Embedded Signup.
+
+Supported behavior:
+
+- Meta's `GET` webhook challenge verification.
+- HMAC-SHA256 verification of `X-Hub-Signature-256` against the exact raw request bytes before JSON parsing.
+- Inbound text messages, plus safe persistence and clear labeling for unsupported message types such as images, audio, documents, and stickers.
+- Phone-number and business-scoped user ID (BSUID) senders. Current Meta payloads can omit a phone number when a customer has adopted a username; the BSUID is then used as the stable conversation identifier.
+- Multiple entries, changes, and messages in one webhook delivery.
+- Transactional conversation/message persistence, duplicate provider-message detection, and exact lead association.
+- A protected read-only test inbox at `/whatsapp` in the authenticated dashboard.
+
+#### Required environment variables
+
+Add these server-only values to `.env` (or your deployment's secret store). Leave all four empty to disable the integration. If any one is set, all four must be valid or the API refuses to start; startup errors name variables but never print their values.
+
+| Variable | Purpose |
+| --- | --- |
+| `WHATSAPP_WEBHOOK_VERIFY_TOKEN` | A string you choose and also enter in Meta's webhook configuration. |
+| `WHATSAPP_APP_SECRET` | Meta App Dashboard → App settings → Basic → App secret. Used to verify webhook signatures. |
+| `WHATSAPP_TEST_PHONE_NUMBER_ID` | The numeric business phone-number ID from WhatsApp → API Setup. This is not the displayed phone number. |
+| `WHATSAPP_TEST_WORKSPACE_ID` | UUID of the one existing ReplyPilot workspace that receives these conversations. |
+
+The workspace must already exist. Sign in and use `GET /api/workspace` to find its UUID, or query it locally:
+
+```sql
+SELECT w.id, w.name
+FROM workspaces w
+JOIN workspace_memberships m ON m.workspace_id = w.id
+JOIN auth_users u ON u.id = m.user_id
+WHERE u.email = 'owner@example.test';
+```
+
+There is no public or browser endpoint for changing the configured workspace or phone-number ID. The Meta access token is not needed for inbound-only processing, so do not add one for this milestone.
+
+Apply the migration and restart both services after configuring the variables:
+
+```bash
+npm run db:migrate
+npm run dev:api
+npm run dev
+```
+
+#### Webhook verification and signature behavior
+
+`GET /api/webhooks/whatsapp` accepts Meta's verification request:
+
+- `hub.mode` must be `subscribe`.
+- `hub.verify_token` must match `WHATSAPP_WEBHOOK_VERIFY_TOKEN` using a constant-time comparison.
+- A valid request returns `200` with the raw `hub.challenge` body.
+- Missing parameters or an invalid mode return `400`; a wrong token returns `403`.
+- If WhatsApp configuration is absent, the endpoint returns `503` rather than accepting unverified traffic.
+
+`POST /api/webhooks/whatsapp`:
+
+- Uses `express.raw()` only for this route, mounted **before** the shared `express.json()` parser. This preserves the exact bytes Meta signed.
+- Requires `X-Hub-Signature-256: sha256=<64 hex characters>`.
+- Computes HMAC-SHA256 with `WHATSAPP_APP_SECRET`, checks lengths before a timing-safe comparison, and rejects missing, malformed, or invalid signatures with `401`.
+- Parses only `whatsapp_business_account` events for the configured `phone_number_id`. Status-only events, template events, other business numbers, and unknown event types return `200 {"status":"ignored"}`.
+- Returns `400` for malformed signed payloads, `503` if the configured workspace no longer exists, and `500` if persistence fails. A non-200 response causes Meta to retry, so a failed store is never falsely acknowledged.
+- Does not log raw payloads, signatures, message bodies, or secret values.
+- Never calls the Graph API, the AI provider, or any sending function.
+
+#### Conversation and message persistence
+
+Migration `008` creates `whatsapp_conversations` and `whatsapp_messages`. Every row carries a `workspace_id`. Composite foreign keys ensure a message cannot reference a conversation in another workspace, and a conversation cannot reference a lead in another workspace. `(workspace_id, provider_message_id)` is unique, so a repeated Meta delivery is acknowledged but does not insert another message or update conversation activity.
+
+The webhook runs conversation creation, message insertion, lead association, and last-message updates in one transaction. `last_message_at` uses the maximum provider timestamp so out-of-order deliveries do not move the conversation backwards.
+
+A conversation is linked to a lead only when Meta supplies the sender's phone number and it exactly equals a saved `leads.whatsapp_number` in the same workspace. The new-lead form includes an optional WhatsApp number field for this purpose. Business-scoped user IDs and names are never used to guess a lead match. Unmatched senders remain unassociated; this milestone does not auto-create leads or provide a manual linking UI.
+
+The protected inbox derives the workspace from the authenticated server session. It never accepts a workspace ID from the browser. A user who guesses another workspace's conversation UUID receives `404`, and all conversation/message queries are scoped by the session workspace. The inbox is read-only: there are no send, template, reply, or approval-to-send controls.
+
+#### Test webhook behavior locally with a signed fixture
+
+Start the API and Next.js app, then load the environment into your shell without printing it:
+
+```bash
+set -a
+. ./.env
+set +a
+```
+
+Verify the challenge directly against the API:
+
+```bash
+curl -i "http://127.0.0.1:4000/api/webhooks/whatsapp?hub.mode=subscribe&hub.verify_token=${WHATSAPP_WEBHOOK_VERIFY_TOKEN}&hub.challenge=local-challenge"
+```
+
+Send a signed text-message fixture. Replace the sender with a fictional test number if desired; keep the phone-number ID equal to the configured one. The JSON string is signed and sent byte-for-byte, so do not reformat it between the two commands:
+
+```bash
+BODY='{"object":"whatsapp_business_account","entry":[{"id":"waba-local-test","changes":[{"field":"messages","value":{"messaging_product":"whatsapp","metadata":{"display_phone_number":"15550783881","phone_number_id":"'"${WHATSAPP_TEST_PHONE_NUMBER_ID}"'"},"contacts":[{"wa_id":"16505551234","profile":{"name":"Local Test Customer"}}],"messages":[{"from":"16505551234","id":"wamid.local.'"$(date +%s)"'","timestamp":"'"$(date +%s)"'","type":"text","text":{"body":"Hello from a signed local fixture"}}]}}]}]}'
+
+SIGNATURE=$(BODY="$BODY" node -e 'const { createHmac } = require("node:crypto"); process.stdout.write("sha256=" + createHmac("sha256", process.env.WHATSAPP_APP_SECRET).update(process.env.BODY, "utf8").digest("hex"));')
+
+curl -i -X POST "http://127.0.0.1:4000/api/webhooks/whatsapp" \
+  -H "Content-Type: application/json" \
+  -H "X-Hub-Signature-256: ${SIGNATURE}" \
+  --data-binary "$BODY"
+```
+
+A successful response is `200 {"status":"ok","stored":1,"duplicates":0}`. Re-send the exact same body to confirm `duplicates:1` and no second inbox message. Then open `http://localhost:3000/whatsapp` while signed in to the configured workspace.
+
+Automated tests use their own test-only secret and signed fixtures. They do not require real Meta credentials, external network calls, or an actual WhatsApp message.
+
+#### Configure Meta's test assets and webhook subscription
+
+1. Create or open an app at [Meta for Developers](https://developers.facebook.com/apps/) with the WhatsApp Business Platform use case.
+2. In **WhatsApp → API Setup**, add your personal WhatsApp number as a test recipient, then copy the **Phone number ID** for the test business number. Copy the app secret from **App settings → Basic**.
+3. Put the Phone number ID, app secret, your chosen verify token, and the ReplyPilot workspace UUID into `.env`, then restart the API.
+4. Expose the local app over HTTPS with a tunnel or deploy it. Meta requires a publicly reachable callback with a valid TLS certificate; self-signed certificates are not supported.
+5. In **WhatsApp → Configuration** (or the app's webhook configuration), set the callback URL to `https://<your-public-host>/api/webhooks/whatsapp` and the verify token to exactly `WHATSAPP_WEBHOOK_VERIFY_TOKEN`. Complete Meta's **Verify and save** step.
+6. Subscribe the WhatsApp Business Account to the **messages** webhook field. Follow the current [Meta webhook endpoint guide](https://developers.facebook.com/documentation/business-messaging/whatsapp/webhooks/create-webhook-endpoint) and [payload reference](https://developers.facebook.com/docs/whatsapp/cloud-api/webhooks/payload-examples) for dashboard details that may change.
+7. From the test recipient, send a text message to the Meta test business number. It should appear at `/whatsapp` after a refresh. If the dashboard does not deliver the event, confirm the app/webhook subscription state, callback URL, verify token, and that the event's `phone_number_id` matches `WHATSAPP_TEST_PHONE_NUMBER_ID`.
+
+The Next.js `/api/*` rewrite can forward the public callback to the local Express API. Alternatively, route the same HTTPS path to the API with your own reverse proxy. Keep `/api/webhooks/whatsapp` public for Meta, but keep the rest of the API private.
+
+#### Inbound WhatsApp limitations
+
+- Exactly one configured test phone-number ID and one workspace. There is no Embedded Signup, multi-number management, or workspace-selection UI.
+- Inbound only. There are no outbound Graph API calls, templates, automatic replies, AI calls, delivery-status displays, or send controls.
+- No media download or transcription. Unsupported types are stored with their provider type and shown as unsupported.
+- No automatic lead creation or name-based matching. A conversation links only by exact saved WhatsApp number; otherwise it stays unassociated.
+- No live Meta webhook delivery is exercised by the automated test suite. Tests prove the local verification, signature, parsing, persistence, idempotency, isolation, and inbox behavior only.
+- The next integration step is to connect a selected conversation and saved draft for owner review, while keeping any outbound send action explicit and separately authorized.
+
+### Manual authentication and isolation checks
+
+These checks verify the browser flow and the server boundary. Use fictional data.
+
+1. Configure `.env` from `.env.example` with a unique `BETTER_AUTH_SECRET`, then start PostgreSQL, the API, and Next.js as described above.
+2. Visit `http://localhost:3000` in a private window. The dashboard must redirect to `/sign-in`; the private API endpoints must return `401` when called without a session cookie.
+3. Create an account through `/sign-up`. You should land on an owner workspace with no leads and no business profile. The sidebar must show the account email, workspace name, `Workspace owner`, and a working sign-out control.
+4. Add a lead and some business details, then open a saved draft. Confirm the draft uses only facts you saved and that approval remains a manual review action.
+5. Sign out. The old page must no longer load private data, and signing back in must restore the same workspace.
+6. Create a second account in a separate private window. Confirm it has a different workspace UUID and cannot see the first account's leads, profile, catalogue, knowledge entries, or drafts. Direct requests using the first account's record IDs must return `404` or `403`, not another workspace's data.
+7. If you need the legacy development records, follow the guarded bootstrap procedure above and confirm they appear in the selected account's workspace without ID or value changes.
+
+### Limitations and production work still required
+
+- Email verification and password recovery are not configured. Better Auth's password reset flow needs an email provider and deliberate templates before it can be enabled.
+- Workspace membership administration is deliberately minimal. Registration creates one owner workspace, the owner/member roles are enforced server-side, and members are read-only in this milestone. There is no invitation, member-management, role-change, or account-deletion UI/API.
+- The legacy workspace is assigned only by the guarded local CLI. There is no public bootstrap endpoint, first-user claim, or production admin console.
+- Production requires HTTPS, `BETTER_AUTH_URL` with an HTTPS origin, a secret from a deployment secret store, explicit trusted origins, secure reverse-proxy/header handling, backups, and a security review. The API currently binds to `127.0.0.1` for local development.
+- Better Auth's default rate-limit storage and the Express process model need review before horizontal scaling. Use a shared, reviewed rate-limit store if multiple API instances are deployed. Rate limiting also needs a trustworthy client IP: deploy behind a trusted reverse proxy that supplies one validated `X-Forwarded-For` value, and configure Better Auth trusted proxies (or equivalent) for multi-hop deployments. Without a resolvable IP, Better Auth falls back to a shared per-path bucket.
+- Reply generation is still a deterministic mock. WhatsApp is an inbound-only single-number test integration; there is no live AI provider, outbound WhatsApp sending, approved-template sending, webhook media download, scheduling, or customer-message delivery. Approval never sends a message.
+- There is no audit log for business-record changes, no account recovery support workflow, and no automated backup/restore verification. Do not treat passing tests as evidence that the application is production-ready.
 
 ## Learn More
 
