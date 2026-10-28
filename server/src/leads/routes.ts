@@ -29,6 +29,7 @@ import {
 } from "../reply-drafts/service.js";
 import {
   createLead,
+  DuplicateLeadWhatsAppNumberError,
   getLeadById,
   listLeads,
   updateLeadStatus,
@@ -91,8 +92,18 @@ export function createLeadsRouter({
     }
 
     const { workspace } = getAuthContext(response);
-    const lead = await createLead(pool, workspace.id, parsed.data);
-    response.status(201).json({ lead });
+
+    try {
+      const lead = await createLead(pool, workspace.id, parsed.data);
+      response.status(201).json({ lead });
+    } catch (error) {
+      if (error instanceof DuplicateLeadWhatsAppNumberError) {
+        response.status(409).json({ error: error.message });
+        return;
+      }
+
+      throw error;
+    }
   });
 
   router.patch("/:id", requireOwner, async (request, response) => {

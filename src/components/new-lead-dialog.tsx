@@ -6,6 +6,7 @@ export type NewLeadValues = {
   name: string;
   service: string;
   message: string;
+  whatsappNumber: string;
   nextFollowUpAt: string;
 };
 
@@ -54,6 +55,7 @@ export function NewLeadDialog({
     name: "",
     service: "",
     message: "",
+    whatsappNumber: "",
     nextFollowUpAt: "",
   });
   const [errors, setErrors] = useState<FieldErrors>({});
@@ -66,7 +68,7 @@ export function NewLeadDialog({
     if (!dialog) return;
 
     if (open && !dialog.open) {
-      setValues({ name: "", service: "", message: "", nextFollowUpAt: "" });
+      setValues({ name: "", service: "", message: "", whatsappNumber: "", nextFollowUpAt: "" });
       setErrors({});
       setSubmitError(null);
       dialog.showModal();
@@ -93,6 +95,16 @@ export function NewLeadDialog({
       }
     });
 
+    const whatsappDigits = values.whatsappNumber.replace(/\D/g, "");
+
+    if (
+      values.whatsappNumber.trim() &&
+      (whatsappDigits.length < 5 || whatsappDigits.length > 32)
+    ) {
+      nextErrors.whatsappNumber =
+        "Enter 5 to 32 digits, including the country code.";
+    }
+
     if (Object.values(nextErrors).some(Boolean)) {
       setErrors(nextErrors);
       return;
@@ -106,6 +118,7 @@ export function NewLeadDialog({
         name: values.name.trim(),
         service: values.service.trim(),
         message: values.message.trim(),
+        whatsappNumber: values.whatsappNumber.trim(),
         nextFollowUpAt: values.nextFollowUpAt,
       });
       dialogRef.current?.close();
@@ -190,6 +203,29 @@ export function NewLeadDialog({
             placeholder="What did the customer ask for?"
             className={`${inputClassName} resize-y`}
           />
+        </Field>
+
+        <Field
+          id="lead-whatsapp-number"
+          label="WhatsApp number (optional)"
+          error={errors.whatsappNumber}
+        >
+          <input
+            id="lead-whatsapp-number"
+            name="whatsappNumber"
+            inputMode="tel"
+            value={values.whatsappNumber}
+            onChange={(event) => setField("whatsappNumber", event.target.value)}
+            aria-invalid={Boolean(errors.whatsappNumber)}
+            aria-describedby={
+              errors.whatsappNumber ? "lead-whatsapp-number-error" : undefined
+            }
+            placeholder="e.g. 2348031234567"
+            className={inputClassName}
+          />
+          <p className="mt-1.5 text-xs text-slate-400">
+            Used only for an exact match with WhatsApp test-inbox senders.
+          </p>
         </Field>
 
         <Field

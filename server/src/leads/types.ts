@@ -11,6 +11,7 @@ export type Lead = Readonly<{
   channel: LeadChannel;
   status: LeadStatus;
   lastMessage: string;
+  whatsappNumber: string | null;
   nextFollowUpAt: string | null;
   createdAt: string;
   updatedAt: string;
@@ -23,6 +24,7 @@ export type LeadRow = Readonly<{
   channel: LeadChannel;
   status: LeadStatus;
   last_message: string;
+  whatsapp_number: string | null;
   next_follow_up_at: Date | null;
   created_at: Date;
   updated_at: Date;
@@ -36,6 +38,7 @@ export function mapLeadRow(row: LeadRow): Lead {
     channel: row.channel,
     status: row.status,
     lastMessage: row.last_message,
+    whatsappNumber: row.whatsapp_number,
     nextFollowUpAt: row.next_follow_up_at
       ? row.next_follow_up_at.toISOString()
       : null,

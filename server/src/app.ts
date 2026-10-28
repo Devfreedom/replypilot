@@ -13,6 +13,9 @@ import {
 } from "./auth/config.js";
 import { createBusinessRouter } from "./business/routes.js";
 import { createLeadsRouter } from "./leads/routes.js";
+import { createWhatsAppInboxRouter } from "./whatsapp/inbox-routes.js";
+import type { WhatsAppIntegrationConfig } from "./whatsapp/types.js";
+import { createWhatsAppWebhookRouter } from "./whatsapp/webhook-routes.js";
 import { createWorkspaceRouter } from "./workspaces/routes.js";
 
 const JSON_BODY_LIMIT = "10kb";
@@ -28,10 +31,12 @@ export function createApp({
   pool,
   auth: authOptions,
   replyDraftProvider,
+  whatsapp = null,
 }: {
   pool: Pool;
   auth: AppAuthOptions;
   replyDraftProvider?: ReplyDraftProvider;
+  whatsapp?: WhatsAppIntegrationConfig | null;
 }): Express {
   const app = express();
   const auth = createAuth({
@@ -47,6 +52,13 @@ export function createApp({
   // Better Auth must receive the raw request before a JSON body parser.
   // Browser requests reach this handler through the Next.js /api rewrite.
   app.all("/api/auth/*splat", toNodeHandler(auth));
+
+  // Meta signs the exact raw body bytes, so the webhook's raw parser must run
+  // before the shared JSON parser. Only this route receives a raw body.
+  app.use(
+    "/api/webhooks/whatsapp",
+    createWhatsAppWebhookRouter({ pool, config: whatsapp }),
+  );
 
   app.use(express.json({ limit: JSON_BODY_LIMIT }));
 
@@ -68,6 +80,7 @@ export function createApp({
     createLeadsRouter({ pool, auth, replyDraftProvider }),
   );
   app.use("/api/business", createBusinessRouter({ pool, auth }));
+  app.use("/api/whatsapp", createWhatsAppInboxRouter({ pool, auth }));
 
   app.use((_request: Request, response: Response) => {
     response.status(404).json({ error: "Not found" });

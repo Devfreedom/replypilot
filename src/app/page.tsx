@@ -210,6 +210,7 @@ function Dashboard() {
         name: values.name,
         service: values.service,
         lastMessage: values.message,
+        whatsappNumber: values.whatsappNumber || null,
         channel: "Manual",
         status: "New",
         nextFollowUpAt,
@@ -347,6 +348,12 @@ function Dashboard() {
                 {VIEW_TITLES[navView].title}
               </button>
             ))}
+            <Link
+              href="/whatsapp"
+              className="whitespace-nowrap rounded-lg bg-white px-3 py-2 text-sm font-medium text-slate-600 ring-1 ring-slate-200 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
+            >
+              WhatsApp inbox
+            </Link>
             <Link
               href="/settings"
               className="whitespace-nowrap rounded-lg bg-white px-3 py-2 text-sm font-medium text-slate-600 ring-1 ring-slate-200 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"

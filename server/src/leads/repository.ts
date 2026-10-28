@@ -1,4 +1,4 @@
-import type { Pool } from "pg";
+import type { Pool, QueryResult } from "pg";
 import type { CreateLeadInput } from "./schemas.js";
 import {
   mapLeadRow,
@@ -14,10 +14,29 @@ const LEAD_COLUMNS = `
   channel,
   status,
   last_message,
+  whatsapp_number,
   next_follow_up_at,
   created_at,
   updated_at
 `;
+
+export class DuplicateLeadWhatsAppNumberError extends Error {
+  constructor() {
+    super("A lead with this WhatsApp number already exists.");
+    this.name = "DuplicateLeadWhatsAppNumberError";
+  }
+}
+
+function isDuplicateWhatsAppNumberError(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    error.code === "23505" &&
+    "constraint" in error &&
+    error.constraint === "leads_workspace_whatsapp_number_uidx"
+  );
+}
 
 export async function listLeads(
   pool: Pool,
@@ -59,30 +78,42 @@ export async function createLead(
   workspaceId: string,
   input: CreateLeadInput,
 ): Promise<Lead> {
-  const result = await pool.query<LeadRow>(
-    `
-      INSERT INTO leads (
-        workspace_id,
-        name,
-        service,
-        channel,
-        status,
-        last_message,
-        next_follow_up_at
-      )
-      VALUES ($1, $2, $3, $4, $5, $6, $7)
-      RETURNING ${LEAD_COLUMNS}
-    `,
-    [
-      workspaceId,
-      input.name,
-      input.service,
-      input.channel,
-      input.status,
-      input.lastMessage,
-      input.nextFollowUpAt ?? null,
-    ],
-  );
+  let result: QueryResult<LeadRow>;
+
+  try {
+    result = await pool.query<LeadRow>(
+      `
+        INSERT INTO leads (
+          workspace_id,
+          name,
+          service,
+          channel,
+          status,
+          last_message,
+          whatsapp_number,
+          next_follow_up_at
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        RETURNING ${LEAD_COLUMNS}
+      `,
+      [
+        workspaceId,
+        input.name,
+        input.service,
+        input.channel,
+        input.status,
+        input.lastMessage,
+        input.whatsappNumber,
+        input.nextFollowUpAt ?? null,
+      ],
+    );
+  } catch (error) {
+    if (isDuplicateWhatsAppNumberError(error)) {
+      throw new DuplicateLeadWhatsAppNumberError();
+    }
+
+    throw error;
+  }
 
   const row = result.rows[0];
 

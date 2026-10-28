@@ -1,4 +1,6 @@
 import { z } from "zod";
+import { loadWhatsAppConfig } from "./whatsapp/config.js";
+import type { WhatsAppIntegrationConfig } from "./whatsapp/types.js";
 
 function isPostgresConnectionString(value: string): boolean {
   try {
@@ -74,6 +76,7 @@ export type ServerConfig = Readonly<{
   betterAuthSecret: string;
   betterAuthUrl: string;
   trustedOrigins: string[];
+  whatsapp: WhatsAppIntegrationConfig | null;
 }>;
 
 function parseTrustedOrigins(
@@ -136,5 +139,6 @@ export function loadConfig(
     betterAuthSecret: result.data.BETTER_AUTH_SECRET,
     betterAuthUrl,
     trustedOrigins: [...new Set(trustedOrigins)],
+    whatsapp: loadWhatsAppConfig(environment),
   };
 }

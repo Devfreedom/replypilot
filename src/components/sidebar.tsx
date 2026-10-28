@@ -94,6 +94,14 @@ export function Sidebar({
         Business settings
       </Link>
 
+      <Link
+        href="/whatsapp"
+        className="mt-2 flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium text-slate-600 hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
+      >
+        <Icon path="M21 11.5a8.4 8.4 0 0 1-9 8.4 8.9 8.9 0 0 1-4.1-1L3 20l1.2-4.7A8.4 8.4 0 1 1 21 11.5z" />
+        WhatsApp test inbox
+      </Link>
+
       <div className="mt-10">
         <p className="mb-1 px-3 text-xs font-semibold uppercase tracking-widest text-slate-400">
           Workspace
