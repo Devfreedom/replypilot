@@ -624,56 +624,37 @@ export function BusinessSettings() {
   const showSetupState = profile === null && !showProfileForm;
 
   return (
-    <main className="min-h-screen bg-hushed">
-      <header className="border-b border-line bg-surface">
-        <div className="mx-auto flex max-w-5xl items-center justify-between gap-4 px-5 py-4 sm:px-8">
-          <div>
-            <p className="truncate text-xs text-ink-soft">
-              <span className="font-medium text-ink-soft">
-                {workspace?.name ?? "Workspace"}
-              </span>{" "}
-              /{" "}
-              <span className="font-semibold text-ink">
-                Business settings
-              </span>
-            </p>
-            <h1 className="mt-1 text-xl font-bold text-ink">
-              Business settings
-            </h1>
-          </div>
-          <Link href="/" className={secondaryButtonClass}>
-            Back to leads
-          </Link>
+    <div className="mx-auto max-w-5xl px-4 py-8 sm:px-6 lg:px-8">
+      <div className="mb-6 space-y-4">
+        <div>
+          <h1 className="text-2xl font-bold tracking-tight text-ink sm:text-3xl">
+            Business settings
+          </h1>
+          <p className="mt-2 max-w-2xl text-sm leading-6 text-ink-soft">
+            Approved facts that reply drafts may use. Everything here is scoped
+            to your workspace.
+          </p>
         </div>
-      </header>
-
-      <div className="mx-auto max-w-5xl px-5 py-8 sm:px-8">
-        <p className="mb-6 rounded-xl border border-[color-mix(in_oklab,var(--rp-accent)_25%,transparent)] bg-accent-soft px-4 py-3 text-sm text-accent-ink">
+        <Alert tone="info" role="status">
           Signed in to <strong>{workspace?.name ?? "this workspace"}</strong>.
           Business details and reply context are scoped to this workspace.
-        </p>
+        </Alert>
 
         {!canManage ? (
-          <p className="mb-6 rounded-xl border border-[color-mix(in_oklab,var(--rp-warning)_25%,transparent)] bg-warning-soft px-4 py-3 text-sm text-warning-ink">
+          <Alert tone="warning" role="status">
             You are a workspace member. Settings are read-only for your role;
             only the workspace owner can make changes.
-          </p>
+          </Alert>
         ) : null}
 
         {notice ? (
-          <p
-            role="status"
-            className="mb-4 rounded-xl bg-success-soft px-4 py-3 text-sm text-success-ink"
-          >
+          <Alert tone="success" role="status">
             {notice}
-          </p>
+          </Alert>
         ) : null}
 
         {error ? (
-          <div
-            role="alert"
-            className="mb-4 rounded-xl bg-danger-soft px-4 py-3 text-sm text-danger-ink"
-          >
+          <Alert tone="danger">
             {error}{" "}
             <button
               type="button"
@@ -682,10 +663,11 @@ export function BusinessSettings() {
             >
               Try again
             </button>
-          </div>
+          </Alert>
         ) : null}
+      </div>
 
-        {loading ? (
+      {loading ? (
           <p
             role="status"
             className="py-16 text-center text-sm text-ink-soft"
@@ -1155,7 +1137,7 @@ export function BusinessSettings() {
           </fieldset>
         )}
       </div>
-    </main>
+    </div>
   );
 }
 
