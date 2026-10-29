@@ -138,3 +138,38 @@ export function formatCreatedAt(timestamp: string): string {
     year: "numeric",
   }).format(date);
 }
+
+/** Short follow-up date used in follow-up lists and indicators. */
+export function formatFollowUpDate(timestamp: string): string | null {
+  const date = new Date(timestamp);
+
+  if (Number.isNaN(date.getTime())) {
+    return null;
+  }
+
+  return new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  }).format(date);
+}
+
+/**
+ * Presentational helper for overdue context. The due rule itself stays in
+ * `isFollowUpDue` (due or overdue = followUpAt is in the past and lead not booked).
+ */
+export function followUpOverdueDays(lead: Lead, now = Date.now()): number {
+  if (lead.nextFollowUpAt === null) {
+    return 0;
+  }
+
+  const followUpAt = Date.parse(lead.nextFollowUpAt);
+
+  if (!Number.isFinite(followUpAt) || followUpAt > now) {
+    return 0;
+  }
+
+  return Math.max(0, Math.floor((now - followUpAt) / 86_400_000));
+}
+

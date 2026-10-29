@@ -123,13 +123,20 @@ function DashboardNavList({
   );
 }
 
-function AccountNavList({ active }: { active: ShellActiveKey }) {
+function AccountNavList({
+  active,
+  onNavigate,
+}: {
+  active: ShellActiveKey;
+  onNavigate?: () => void;
+}) {
   return (
     <nav className="space-y-1" aria-label="Application pages">
       {ACCOUNT_NAV_ITEMS.map((item) => (
         <Link
           key={item.key}
           href={item.href}
+          onClick={onNavigate}
           aria-current={active === item.key ? "page" : undefined}
           className="nav-item"
         >
@@ -323,9 +330,9 @@ export function AppShell({
         onClose={closeDrawer}
         onClick={handleDrawerBackdropClick}
         aria-label="Navigation"
-        className="fixed mr-auto h-dvh w-72 max-w-[86vw] max-h-none bg-surface p-0 text-ink shadow-2xl max-w-none backdrop:bg-[var(--rp-overlay)] focus-visible:outline-none"
+        className="fixed left-0 top-0 m-0 h-dvh w-72 bg-surface p-0 text-ink shadow-2xl"
       >
-        <div className="flex h-full w-72 max-w-[86vw] flex-col overflow-y-auto px-5 py-6">
+        <div className="flex h-full w-72 flex-col overflow-y-auto px-5 py-6">
           <div className="flex items-center justify-between">
             <BrandBlock />
             <button
@@ -364,11 +371,11 @@ export function AppShell({
             </div>
           ) : null}
 
-          <div className={dashboardControls ? "mt-6" : "mt-6"}>
+          <div className="mt-6">
             <p className="mb-1 px-3 text-xs font-semibold uppercase tracking-widest text-ink-faint">
               Navigate
             </p>
-            <AccountNavList active={active} />
+            <AccountNavList active={active} onNavigate={closeDrawer} />
           </div>
 
           <div className="mt-8">
