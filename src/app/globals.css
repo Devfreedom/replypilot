@@ -38,6 +38,9 @@
   --rp-danger: #dc2626;
   --rp-danger-soft: #fdeeee;
   --rp-danger-ink: #b91c1c;
+  --rp-violet: #7c3aed;
+  --rp-violet-soft: #efeafd;
+  --rp-violet-ink: #6d28d9;
   --rp-overlay: rgb(15 23 42 / 0.45);
   --rp-shadow-card: 0 1px 2px rgb(15 23 42 / 0.05);
   --rp-shadow-float: 0 10px 30px rgb(15 23 42 / 0.12);
@@ -69,6 +72,9 @@
   --rp-danger: #ef4444;
   --rp-danger-soft: #2e1517;
   --rp-danger-ink: #fca5a5;
+  --rp-violet: #a78bfa;
+  --rp-violet-soft: #262040;
+  --rp-violet-ink: #c4b5fd;
   --rp-overlay: rgb(2 6 16 / 0.65);
   --rp-shadow-card: 0 1px 2px rgb(0 0 0 / 0.3);
   --rp-shadow-float: 0 10px 30px rgb(0 0 0 / 0.45);
@@ -99,6 +105,9 @@
   --color-danger: var(--rp-danger);
   --color-danger-soft: var(--rp-danger-soft);
   --color-danger-ink: var(--rp-danger-ink);
+  --color-violet: var(--rp-violet);
+  --color-violet-soft: var(--rp-violet-soft);
+  --color-violet-ink: var(--rp-violet-ink);
   --font-sans: var(--font-geist-sans), system-ui, sans-serif;
   --font-mono: var(--font-geist-mono), monospace;
 }
@@ -170,7 +179,7 @@
   /* Action buttons --------------------------------------------------------- */
 
   .btn {
-    @apply inline-flex cursor-pointer items-center justify-center gap-2 rounded-xl text-sm font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-60;
+    @apply inline-flex cursor-pointer items-center justify-center gap-2 whitespace-nowrap rounded-xl text-sm font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-60;
   }
 
   .btn-primary {
@@ -200,11 +209,7 @@
   }
 
   .badge-contacted {
-    @apply bg-[#efeafd] text-[#6d28d9];
-  }
-
-  [data-theme="dark"] .badge-contacted {
-    @apply bg-[#262040] text-[#c4b5fd];
+    @apply bg-violet-soft text-violet-ink;
   }
 
   .badge-quoted {

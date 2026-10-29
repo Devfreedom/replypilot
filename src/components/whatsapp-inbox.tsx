@@ -279,7 +279,7 @@ export function WhatsAppInbox() {
                     >
                       <div className="flex items-start justify-between gap-3">
                         <p
-                          className={`truncate text-sm font-semibold ${
+                          className={`min-w-0 truncate text-sm font-semibold ${
                             selected ? "text-accent-ink" : "text-ink"
                           }`}
                         >
@@ -312,7 +312,7 @@ export function WhatsAppInbox() {
 
         <section
           aria-labelledby="message-thread-title"
-          className="card flex min-h-[30rem] flex-col overflow-hidden"
+          className="card flex min-h-[16rem] flex-col overflow-hidden lg:min-h-[30rem]"
         >
           {selectedConversation ? (
             <>

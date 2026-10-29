@@ -126,7 +126,7 @@ export function ThemeSelect() {
           aria-pressed={choice === option.value}
           onClick={() => selectTheme(option.value)}
           title={`Theme: ${option.label}`}
-          className={`cursor-pointer rounded-lg px-2.5 py-1.5 text-xs font-semibold transition-colors ${
+          className={`cursor-pointer rounded-lg px-2.5 py-2 text-xs font-semibold transition-colors ${
             choice === option.value
               ? "bg-surface text-ink shadow-sm"
               : "text-ink-soft hover:text-ink"
@@ -135,8 +135,11 @@ export function ThemeSelect() {
           <span aria-hidden="true">
             {option.value === "light" ? "☀" : option.value === "dark" ? "☾" : "◐"}
           </span>
-          <span className="hidden md:inline">{option.label}</span>
-          <span className="md:hidden">{option.label.slice(0, 3)}</span>
+          {/* Below sm the control shows icons only so the mobile top bar keeps
+              room for the breadcrumb; the label stays available to screen
+              readers. */}
+          <span className="hidden sm:inline">{option.label}</span>
+          <span className="sr-only sm:hidden">{option.label}</span>
         </button>
       ))}
     </div>

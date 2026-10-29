@@ -2,7 +2,7 @@ import type { ReactNode } from "react";
 
 /** Consistent inline alert banner. */
 const ALERT_TONES = {
-  info: "border-accent-soft bg-accent-soft text-accent-ink",
+  info: "border-[color-mix(in_oklab,var(--rp-accent)_25%,transparent)] bg-accent-soft text-accent-ink",
   warning: "border-[color-mix(in_oklab,var(--rp-warning)_25%,transparent)] bg-warning-soft text-warning-ink",
   danger: "border-[color-mix(in_oklab,var(--rp-danger)_25%,transparent)] bg-danger-soft text-danger-ink",
   success: "border-[color-mix(in_oklab,var(--rp-success)_25%,transparent)] bg-success-soft text-success-ink",

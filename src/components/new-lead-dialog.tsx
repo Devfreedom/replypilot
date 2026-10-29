@@ -145,7 +145,7 @@ export function NewLeadDialog({
       onClose={onClose}
       onClick={handleBackdropClick}
       aria-labelledby="new-lead-title"
-      className="m-auto w-[calc(100%-2rem)] max-w-lg rounded-2xl bg-raised p-6 text-ink shadow-2xl sm:p-8"
+      className="m-auto max-h-[90dvh] w-[calc(100%-2rem)] max-w-lg overflow-y-auto rounded-2xl bg-raised p-6 text-ink shadow-2xl sm:p-8"
     >
       <div className="flex items-start justify-between gap-4">
         <div>

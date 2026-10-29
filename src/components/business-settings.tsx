@@ -676,7 +676,7 @@ export function BusinessSettings() {
             disabled={!canManage}
             className="m-0 min-w-0 space-y-8 border-0 p-0"
           >
-            <section className="rounded-2xl border border-line bg-surface p-5 shadow-sm sm:p-6">
+            <section className="card p-5 sm:p-6">
               <h2 className="text-lg font-bold text-ink">
                 Business profile
               </h2>
@@ -880,7 +880,7 @@ export function BusinessSettings() {
               )}
             </section>
 
-            <section className="rounded-2xl border border-line bg-surface p-5 shadow-sm sm:p-6">
+            <section className="card p-5 sm:p-6">
               <h2 className="text-lg font-bold text-ink">
                 Products &amp; services
               </h2>
@@ -1043,7 +1043,7 @@ export function BusinessSettings() {
               />
             </section>
 
-            <section className="rounded-2xl border border-line bg-surface p-5 shadow-sm sm:p-6">
+            <section className="card p-5 sm:p-6">
               <h2 className="text-lg font-bold text-ink">
                 FAQs &amp; policies
               </h2>

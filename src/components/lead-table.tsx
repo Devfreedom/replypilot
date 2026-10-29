@@ -192,25 +192,27 @@ export function LeadTable({
         <table className="w-full text-left">
           <thead className="bg-hushed">
             <tr className="text-xs font-semibold uppercase tracking-wider text-ink-faint">
-              <th scope="col" className="px-6 py-3.5 font-semibold">
+              <th scope="col" className="px-4 py-3.5 font-semibold xl:px-6">
                 Customer
               </th>
-              <th scope="col" className="px-6 py-3.5 font-semibold">
+              <th scope="col" className="px-4 py-3.5 font-semibold xl:px-6">
                 Service / enquiry
               </th>
-              <th scope="col" className="px-6 py-3.5 font-semibold">
+              {/* Channel and Received are secondary context: they stay available
+                  via horizontal scroll at md and on the mobile card layout. */}
+              <th scope="col" className="hidden px-4 py-3.5 font-semibold lg:table-cell xl:px-6">
                 Channel
               </th>
-              <th scope="col" className="px-6 py-3.5 font-semibold">
+              <th scope="col" className="px-4 py-3.5 font-semibold xl:px-6">
                 Status
               </th>
-              <th scope="col" className="px-6 py-3.5 font-semibold">
+              <th scope="col" className="px-4 py-3.5 font-semibold xl:px-6">
                 Follow-up
               </th>
-              <th scope="col" className="px-6 py-3.5 font-semibold">
+              <th scope="col" className="hidden whitespace-nowrap px-4 py-3.5 font-semibold xl:table-cell xl:px-6">
                 Received
               </th>
-              <th scope="col" className="px-6 py-3.5 font-semibold">
+              <th scope="col" className="px-4 py-3.5 font-semibold xl:px-6">
                 Action
               </th>
             </tr>
@@ -219,7 +221,7 @@ export function LeadTable({
           <tbody className="divide-y divide-line">
             {leads.map((lead) => (
               <tr key={lead.id} className="transition-colors hover:bg-hushed/60">
-                <td className="px-6 py-4">
+                <td className="px-4 py-4 xl:px-6">
                   <div className="flex items-center gap-3">
                     <Avatar name={lead.name} />
                     <span className="whitespace-nowrap text-sm font-semibold text-ink">
@@ -228,18 +230,18 @@ export function LeadTable({
                   </div>
                 </td>
 
-                <td className="max-w-xs px-6 py-4">
+                <td className="max-w-xs px-4 py-4 xl:px-6">
                   <p className="text-sm font-medium text-ink">{lead.service}</p>
                   <p className="mt-1 truncate text-xs text-ink-faint">
                     {lead.lastMessage}
                   </p>
                 </td>
 
-                <td className="px-6 py-4">
+                <td className="hidden px-4 py-4 lg:table-cell xl:px-6">
                   <Channel lead={lead} />
                 </td>
 
-                <td className="px-6 py-4">
+                <td className="px-4 py-4 xl:px-6">
                   {canManage ? (
                     <StatusSelect
                       lead={lead}
@@ -251,15 +253,15 @@ export function LeadTable({
                   )}
                 </td>
 
-                <td className="px-6 py-4">
+                <td className="px-4 py-4 xl:px-6">
                   <FollowUpIndicator lead={lead} />
                 </td>
 
-                <td className="whitespace-nowrap px-6 py-4 text-xs text-ink-soft">
+                <td className="hidden whitespace-nowrap px-4 py-4 text-xs text-ink-soft xl:table-cell xl:px-6">
                   {formatCreatedAt(lead.createdAt)}
                 </td>
 
-                <td className="px-6 py-4">
+                <td className="px-4 py-4 xl:px-6">
                   {canManage ? (
                     <DraftReplyButton lead={lead} onDraftReply={onDraftReply} />
                   ) : (

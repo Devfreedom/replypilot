@@ -281,7 +281,7 @@ export function AppShell({
   return (
     <div className="flex min-h-screen bg-canvas text-ink">
       {/* Desktop sidebar */}
-      <aside className="sticky top-0 hidden h-screen w-64 shrink-0 flex-col border-r border-line bg-surface px-5 py-6 lg:flex">
+      <aside className="sticky top-0 hidden h-screen w-64 shrink-0 flex-col overflow-y-auto border-r border-line bg-surface px-5 py-6 lg:flex">
         <BrandBlock />
 
         <div className="mt-6 rounded-xl bg-hushed px-3 py-2.5">
@@ -409,7 +409,7 @@ export function AppShell({
               </svg>
             </button>
 
-            <nav aria-label="Breadcrumb" className="min-w-0">
+            <nav aria-label="Breadcrumb" className="min-w-0 flex-1">
               <p className="truncate text-xs text-ink-faint">
                 <span className="font-medium text-ink-soft">
                   {workspace?.name ?? "Workspace"}

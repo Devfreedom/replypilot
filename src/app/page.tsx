@@ -396,7 +396,6 @@ function Dashboard() {
       New lead
     </button>
   ) : null;
-
   const sectionTitle =
     view === "follow-ups"
       ? "Enquiries needing attention"
@@ -413,7 +412,11 @@ function Dashboard() {
       followUpCount={followUpCount}
       canManage={canManage}
       title={VIEW_TITLES[view].title}
-      actions={newLeadButton}
+      /* The primary action sits in the page heading below sm so the mobile
+         top bar keeps room for the breadcrumb and theme control. */
+      actions={newLeadButton ? (
+        <span className="hidden sm:inline-flex">{newLeadButton}</span>
+      ) : null}
     >
       <div className="mx-auto max-w-7xl px-4 py-8 sm:px-6 lg:px-8">
         {!canManage ? (
@@ -429,7 +432,9 @@ function Dashboard() {
         <PageHeading
           title={VIEW_TITLES[view].title}
           description={VIEW_TITLES[view].description}
-        />
+        >
+          {newLeadButton ? <span className="sm:hidden">{newLeadButton}</span> : null}
+        </PageHeading>
 
         {view === "overview" && (
           <>
@@ -518,7 +523,7 @@ function Dashboard() {
                 label="Quotes sent"
                 value={quotedCount}
                 detail="Awaiting a decision"
-                dotColor="bg-[#7c3aed]"
+                dotColor="bg-violet"
               />
               <StatCard
                 label="Bookings"
@@ -534,7 +539,7 @@ function Dashboard() {
                 <div className="border-b border-line px-5 py-4 sm:px-6">
                   <h2 className="font-bold text-ink">{sectionTitle}</h2>
                   <p className="mt-0.5 text-xs text-ink-soft">
-                   The most recent enquiries come first.
+                    The most recent enquiries come first.
                   </p>
                 </div>
                 {buildLeadsSection()}
