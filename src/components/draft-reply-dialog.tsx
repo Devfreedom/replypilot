@@ -64,17 +64,11 @@ function StatusBadge({ status }: { status: SavedReplyDraft["status"] }) {
   const approved = status === "approved";
 
   return (
-    <span
-      className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-semibold ${
-        approved
-          ? "bg-emerald-100 text-emerald-800"
-          : "bg-amber-100 text-amber-800"
-      }`}
-    >
+    <span className={`badge ${approved ? "badge-approved" : "badge-draft"}`}>
       <span
         aria-hidden="true"
         className={`h-1.5 w-1.5 rounded-full ${
-          approved ? "bg-emerald-600" : "bg-amber-600"
+          approved ? "bg-success" : "bg-warning"
         }`}
       />
       {approved ? "Approved for review" : "Draft"}
@@ -91,13 +85,13 @@ function BusinessInformationUsed({
     <section aria-labelledby="business-information-used">
       <h3
         id="business-information-used"
-        className="text-sm font-semibold text-slate-800"
+        className="text-sm font-semibold text-ink"
       >
         Business information used
       </h3>
 
       {draft.sources.length === 0 ? (
-        <p className="mt-2 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm leading-6 text-slate-600">
+        <p className="mt-2 rounded-xl border border-line bg-hushed px-4 py-3 text-sm leading-6 text-ink-soft">
           No matching approved business facts were found for this enquiry. The
           draft asks for missing information instead of inventing details.
         </p>
@@ -106,20 +100,20 @@ function BusinessInformationUsed({
           {draft.sources.map((source) => (
             <li
               key={`${source.type}:${source.id}`}
-              className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3"
+              className="rounded-xl border border-line bg-hushed px-4 py-3"
             >
               <div className="flex flex-wrap items-center gap-2">
-                <span className="rounded-md bg-white px-2 py-0.5 text-[0.6875rem] font-semibold uppercase tracking-wide text-slate-500 ring-1 ring-slate-200">
+                <span className="badge badge-neutral rounded-md uppercase tracking-wide">
                   {sourceTypeLabels[source.type]}
                 </span>
-                <span className="text-sm font-semibold text-slate-800">
+                <span className="text-sm font-semibold text-ink">
                   {source.title}
                 </span>
               </div>
-              <p className="mt-2 whitespace-pre-wrap break-words text-sm leading-6 text-slate-600">
+              <p className="mt-2 whitespace-pre-wrap break-words text-sm leading-6 text-ink-soft">
                 {source.content}
               </p>
-              <p className="mt-2 text-xs leading-5 text-slate-500">
+              <p className="mt-2 text-xs leading-5 text-ink-soft">
                 {source.reason}
               </p>
             </li>
@@ -127,7 +121,7 @@ function BusinessInformationUsed({
         </ul>
       )}
 
-      <p className="mt-2 text-xs leading-5 text-slate-500">
+      <p className="mt-2 text-xs leading-5 text-ink-soft">
         This is the approved information captured when the draft was generated
         on {formatDraftTime(draft.createdAt)}. Business records may have changed
         since then, so review the facts before relying on them.
@@ -473,18 +467,18 @@ export function DraftReplyDialog({
       onClick={handleBackdropClick}
       aria-labelledby="draft-reply-title"
       aria-describedby="draft-reply-demo"
-      className="m-auto max-h-[90vh] w-[calc(100%-2rem)] max-w-3xl overflow-y-auto rounded-2xl bg-white p-6 text-slate-900 shadow-2xl backdrop:bg-slate-950/40 sm:p-8"
+      className="m-auto max-h-[90dvh] w-[calc(100%-2rem)] max-w-3xl overflow-y-auto rounded-2xl bg-raised p-6 text-ink shadow-2xl sm:p-8"
     >
       <div className="flex items-start justify-between gap-4">
         <div>
           <h2
             id="draft-reply-title"
-            className="text-xl font-bold text-slate-950"
+            className="text-xl font-bold text-ink"
           >
             Draft reply
           </h2>
           {lead ? (
-            <p className="mt-2 text-sm leading-6 text-slate-500">
+            <p className="mt-2 text-sm leading-6 text-ink-soft">
               For {lead.name} · {lead.service}
             </p>
           ) : null}
@@ -493,7 +487,7 @@ export function DraftReplyDialog({
           type="button"
           onClick={() => dialogRef.current?.close()}
           aria-label="Close draft reply"
-          className="rounded-lg px-3 py-1 text-xl text-slate-400 hover:bg-slate-100 hover:text-slate-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
+          className="rounded-lg px-3 py-1 text-2xl leading-none text-ink-faint hover:bg-hushed hover:text-ink"
         >
           &times;
         </button>
@@ -501,7 +495,7 @@ export function DraftReplyDialog({
 
       <p
         id="draft-reply-demo"
-        className="mt-5 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm leading-6 text-amber-900"
+        className="mt-5 rounded-xl border border-[color-mix(in_oklab,var(--rp-warning)_25%,transparent)] bg-warning-soft px-4 py-3 text-sm leading-6 text-warning-ink"
       >
         Demonstration output from ReplyPilot&apos;s mock provider. No live AI
         model was used. Review before sending manually; approval here does not
@@ -509,20 +503,20 @@ export function DraftReplyDialog({
       </p>
 
       {isLoading ? (
-        <div role="status" className="py-12 text-center text-sm text-slate-500">
+        <div role="status" className="py-12 text-center text-sm text-ink-soft">
           Loading saved drafts and preparing demonstration content…
         </div>
       ) : error ? (
         <div role="alert" className="py-10 text-center">
-          <h3 className="font-semibold text-slate-900">
+          <h3 className="font-semibold text-ink">
             Unable to prepare a draft
           </h3>
-          <p className="mt-1 text-sm text-slate-500">{error}</p>
+          <p className="mt-1 text-sm text-ink-soft">{error}</p>
           {lead ? (
             <button
               type="button"
               onClick={() => void loadDrafts(lead)}
-              className="mt-4 rounded-lg text-sm font-semibold text-blue-700 hover:text-blue-800 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
+              className="btn btn-quiet mt-4"
             >
               Try again
             </button>
@@ -533,68 +527,69 @@ export function DraftReplyDialog({
           <div className="flex flex-wrap items-center justify-between gap-3">
             <StatusBadge status={selectedDraft.status} />
             {selectedDraft.approvedAt ? (
-              <p className="text-xs text-slate-500">
+              <p className="text-xs text-ink-soft">
                 Approved {formatDraftTime(selectedDraft.approvedAt)}
               </p>
             ) : null}
           </div>
 
-          <dl className="grid gap-4 rounded-xl bg-slate-50 p-4 sm:grid-cols-2">
-            <div>
-              <dt className="text-xs font-semibold uppercase tracking-wide text-slate-400">
-                Intent
-              </dt>
-              <dd className="mt-1 text-sm font-medium text-slate-800">
-                {intentLabels[selectedDraft.intent]}
-              </dd>
-            </div>
-            <div>
-              <dt className="text-xs font-semibold uppercase tracking-wide text-slate-400">
-                Provider
-              </dt>
-              <dd className="mt-1 text-sm font-medium text-slate-800">
-                Mock demonstration
-              </dd>
-            </div>
-          </dl>
-
-          <div>
-            <h3 className="text-sm font-semibold text-slate-800">
-              Enquiry summary
+          {/* Lead and enquiry context */}
+          <section
+            aria-labelledby="draft-enquiry-title"
+            className="rounded-xl border border-line bg-hushed p-4"
+          >
+            <h3
+              id="draft-enquiry-title"
+              className="text-xs font-semibold uppercase tracking-wide text-ink-faint"
+            >
+              Lead and enquiry context
             </h3>
-            <p className="mt-1 text-sm leading-6 text-slate-600">
+            <p className="mt-2 text-sm leading-6 text-ink">
               {selectedDraft.summary}
             </p>
-          </div>
+            <dl className="mt-3 grid gap-3 text-sm sm:grid-cols-2">
+              <div>
+                <dt className="text-xs font-medium text-ink-soft">Intent</dt>
+                <dd className="font-medium text-ink">
+                  {intentLabels[selectedDraft.intent]}
+                </dd>
+              </div>
+              <div>
+                <dt className="text-xs font-medium text-ink-soft">Provider</dt>
+                <dd className="font-medium text-ink">Mock demonstration</dd>
+              </div>
+            </dl>
+            <div className="mt-3">
+              <h4 className="text-xs font-semibold uppercase tracking-wide text-ink-faint">
+                Information to confirm
+              </h4>
+              {selectedDraft.missingInformation.length > 0 ? (
+                <ul className="mt-1.5 list-disc space-y-1 pl-5 text-sm leading-6 text-ink">
+                  {selectedDraft.missingInformation.map((item) => (
+                    <li key={item}>{item}</li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="mt-1.5 text-sm text-ink-soft">
+                  No additional information identified.
+                </p>
+              )}
+            </div>
+            <div className="mt-3">
+              <BusinessInformationUsed draft={selectedDraft} />
+            </div>
+          </section>
 
-          <div>
-            <h3 className="text-sm font-semibold text-slate-800">
-              Information to confirm
-            </h3>
-            {selectedDraft.missingInformation.length > 0 ? (
-              <ul className="mt-2 list-disc space-y-1 pl-5 text-sm leading-6 text-slate-600">
-                {selectedDraft.missingInformation.map((item) => (
-                  <li key={item}>{item}</li>
-                ))}
-              </ul>
-            ) : (
-              <p className="mt-1 text-sm text-slate-500">
-                No additional information identified.
-              </p>
-            )}
-          </div>
-
-          <BusinessInformationUsed draft={selectedDraft} />
-
-          <div>
+          {/* Generated, editable reply */}
+          <section aria-labelledby="draft-reply-editor-title">
             <div className="flex items-center justify-between gap-3">
-              <label
-                htmlFor="draft-reply"
-                className="text-sm font-semibold text-slate-800"
+              <h3
+                id="draft-reply-editor-title"
+                className="text-sm font-semibold text-ink"
               >
                 Suggested reply
-              </label>
-              <span className="text-xs text-slate-400">
+              </h3>
+              <span className="text-xs text-ink-faint">
                 {editedReply.length}/2000
               </span>
             </div>
@@ -612,42 +607,45 @@ export function DraftReplyDialog({
               maxLength={2000}
               aria-invalid={validationError ? true : undefined}
               aria-describedby="draft-reply-edit-warning"
-              className="mt-2 w-full resize-y rounded-xl border border-slate-200 bg-white px-3.5 py-3 text-sm leading-6 text-slate-700 outline-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
+              className="textarea mt-2"
             />
             <p
               id="draft-reply-edit-warning"
-              className="mt-2 text-xs leading-5 text-slate-500"
+              className="help-text mt-2"
             >
               {hasUnsavedChanges
                 ? "You have edited this reply. Your changes may no longer be supported by the original business facts and require your own review."
                 : "Editing this reply may make parts of it unsupported by the original business facts. Saving changes returns the draft to draft status."}
             </p>
             {validationError ? (
-              <p role="alert" className="mt-1 text-xs text-red-700">
+              <p role="alert" className="mt-1 text-xs font-medium text-danger-ink">
                 {validationError}
               </p>
             ) : null}
-          </div>
+          </section>
 
           {actionError ? (
             <p
               role="alert"
-              className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800"
+              className="rounded-xl border border-[color-mix(in_oklab,var(--rp-danger)_25%,transparent)] bg-danger-soft px-4 py-3 text-sm text-danger-ink"
             >
               {actionError}
             </p>
           ) : null}
 
-          <p aria-live="polite" className="text-sm text-slate-600">
+          <p
+            aria-live="polite"
+            className={`text-sm ${notice || copyMessage ? "text-ink" : ""}`}
+          >
             {notice ?? copyMessage ?? ""}
           </p>
 
-          <div className="flex flex-col-reverse gap-3 border-t border-slate-100 pt-5 sm:flex-row sm:flex-wrap sm:justify-end">
+          <div className="flex flex-col-reverse gap-3 border-t border-line pt-5 sm:flex-row sm:flex-wrap sm:justify-end">
             <button
               type="button"
               onClick={() => void regenerateDraft()}
               disabled={isBusy}
-              className="rounded-xl border border-slate-200 px-4 py-3 text-sm font-semibold text-slate-600 hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 disabled:cursor-not-allowed disabled:opacity-60"
+              className="btn btn-secondary"
             >
               {pendingAction === "regenerate"
                 ? "Regenerating…"
@@ -657,7 +655,7 @@ export function DraftReplyDialog({
               type="button"
               onClick={() => void copyReply()}
               disabled={!editedReply.trim() || isBusy}
-              className="rounded-xl border border-slate-200 px-4 py-3 text-sm font-semibold text-slate-600 hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 disabled:cursor-not-allowed disabled:opacity-60"
+              className="btn btn-secondary"
             >
               Copy reply
             </button>
@@ -667,7 +665,7 @@ export function DraftReplyDialog({
               disabled={
                 isBusy || !hasUnsavedChanges || !editedReply.trim()
               }
-              className="rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm font-semibold text-blue-700 hover:bg-blue-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 disabled:cursor-not-allowed disabled:opacity-60"
+              className="btn btn-secondary"
             >
               {pendingAction === "save" ? "Saving…" : "Save changes"}
             </button>
@@ -676,7 +674,7 @@ export function DraftReplyDialog({
                 type="button"
                 onClick={() => void updateStatus("draft")}
                 disabled={isBusy}
-                className="rounded-xl border border-slate-200 px-4 py-3 text-sm font-semibold text-slate-600 hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 disabled:cursor-not-allowed disabled:opacity-60"
+                className="btn btn-secondary"
               >
                 {pendingAction === "unapprove"
                   ? "Returning…"
@@ -687,7 +685,7 @@ export function DraftReplyDialog({
                 type="button"
                 onClick={() => void updateStatus("approved")}
                 disabled={isBusy || hasUnsavedChanges}
-                className="rounded-xl bg-blue-600 px-5 py-3 text-sm font-semibold text-white hover:bg-blue-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 disabled:cursor-not-allowed disabled:opacity-60"
+                className="btn btn-primary"
               >
                 {pendingAction === "approve" ? "Approving…" : "Approve draft"}
               </button>
@@ -695,21 +693,25 @@ export function DraftReplyDialog({
           </div>
 
           {hasUnsavedChanges ? (
-            <p className="-mt-3 text-right text-xs text-slate-500">
+            <p className="-mt-3 text-right text-xs text-ink-soft">
               Save your edits before approving them. Saving returns the draft
               to draft status for a separate review.
             </p>
           ) : null}
 
-          <div>
-            <h3 className="text-sm font-semibold text-slate-800">
+          {/* Draft history */}
+          <section aria-labelledby="draft-history-title">
+            <h3
+              id="draft-history-title"
+              className="text-sm font-semibold text-ink"
+            >
               Previously saved drafts
             </h3>
-            <p className="mt-1 text-xs leading-5 text-slate-500">
+            <p className="help-text mt-1">
               Select a saved draft to restore its text, business facts, and
               review status. Switching drafts discards unsaved edits.
             </p>
-            <ul className="mt-3 divide-y divide-slate-100 rounded-xl border border-slate-200">
+            <ul className="mt-3 divide-y divide-line rounded-xl border border-line">
               {drafts.map((draft) => {
                 const selected = draft.id === selectedDraftId;
 
@@ -720,18 +722,18 @@ export function DraftReplyDialog({
                       onClick={() => selectDraft(draft)}
                       disabled={isBusy}
                       aria-current={selected ? "true" : undefined}
-                      className={`flex w-full flex-col gap-2 px-4 py-3 text-left hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-blue-600 disabled:cursor-not-allowed disabled:opacity-60 sm:flex-row sm:items-center sm:justify-between ${
-                        selected ? "bg-blue-50/70" : ""
+                      className={`flex w-full flex-col gap-2 px-4 py-3 text-left transition-colors disabled:cursor-not-allowed disabled:opacity-60 sm:flex-row sm:items-center sm:justify-between ${
+                        selected ? "bg-accent-soft" : "hover:bg-hushed"
                       }`}
                     >
                       <span className="flex flex-wrap items-center gap-2">
                         <StatusBadge status={draft.status} />
-                        <span className="text-xs text-slate-500">
+                        <span className="text-xs text-ink-soft">
                           {intentLabels[draft.intent]} ·{" "}
                           {formatDraftTime(draft.updatedAt)}
                         </span>
                       </span>
-                      <span className="max-w-full truncate text-xs text-slate-500 sm:max-w-xs">
+                      <span className="max-w-full truncate text-xs text-ink-soft sm:max-w-xs">
                         {draft.draftReply}
                       </span>
                     </button>
@@ -739,19 +741,19 @@ export function DraftReplyDialog({
                 );
               })}
             </ul>
-          </div>
+          </section>
         </div>
       ) : (
         <div className="py-10 text-center">
-          <h3 className="font-semibold text-slate-900">No saved draft</h3>
-          <p className="mt-1 text-sm text-slate-500">
+          <h3 className="font-semibold text-ink">No saved draft</h3>
+          <p className="mt-1 text-sm text-ink-soft">
             There is no saved draft to review for this lead yet.
           </p>
           {lead ? (
             <button
               type="button"
               onClick={() => void loadDrafts(lead)}
-              className="mt-4 rounded-lg text-sm font-semibold text-blue-700 hover:text-blue-800 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
+              className="btn btn-quiet mt-4"
             >
               Try again
             </button>
