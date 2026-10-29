@@ -139,7 +139,7 @@ export function AuthForm({ mode }: { mode: AuthMode }) {
 
   if (!isLoading && user) {
     return (
-      <main className="flex min-h-screen items-center justify-center bg-hushed px-6">
+      <main className="flex min-h-screen items-center justify-center bg-canvas px-6">
         <p role="status" className="text-sm text-ink-soft">
           Opening your workspace…
         </p>
@@ -148,10 +148,10 @@ export function AuthForm({ mode }: { mode: AuthMode }) {
   }
 
   return (
-    <main className="flex min-h-screen items-center justify-center bg-hushed px-4 py-12">
+    <main className="flex min-h-screen items-center justify-center bg-canvas px-4 py-12">
       <div className="w-full max-w-md">
         <div className="mb-8 flex items-center gap-3">
-          <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-accent text-lg font-bold text-white">
+          <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-accent text-lg font-bold text-on-accent">
             R
           </div>
           <div>
@@ -162,7 +162,7 @@ export function AuthForm({ mode }: { mode: AuthMode }) {
           </div>
         </div>
 
-        <section className="rounded-2xl border border-line bg-surface p-6 shadow-sm sm:p-8">
+        <section className="card p-6 sm:p-8">
           <h1 className="text-2xl font-bold tracking-tight text-ink">
             {isSignUp ? "Create your account" : "Sign in to ReplyPilot"}
           </h1>
@@ -185,7 +185,7 @@ export function AuthForm({ mode }: { mode: AuthMode }) {
                   value={name}
                   onChange={(event) => setName(event.target.value)}
                   disabled={isSubmitting}
-                  className="mt-1 w-full rounded-xl border border-line bg-surface px-3 py-2.5 text-sm text-ink outline-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 disabled:opacity-60"
+                  className="input mt-1"
                 />
               </label>
             ) : null}
@@ -200,7 +200,7 @@ export function AuthForm({ mode }: { mode: AuthMode }) {
                 value={email}
                 onChange={(event) => setEmail(event.target.value)}
                 disabled={isSubmitting}
-                className="mt-1 w-full rounded-xl border border-line bg-surface px-3 py-2.5 text-sm text-ink outline-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 disabled:opacity-60"
+                className="input mt-1"
               />
             </label>
 
@@ -217,7 +217,7 @@ export function AuthForm({ mode }: { mode: AuthMode }) {
                 onChange={(event) => setPassword(event.target.value)}
                 disabled={isSubmitting}
                 aria-describedby={isSignUp ? "password-help" : undefined}
-                className="mt-1 w-full rounded-xl border border-line bg-surface px-3 py-2.5 text-sm text-ink outline-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 disabled:opacity-60"
+                className="input mt-1"
               />
             </label>
 
@@ -240,7 +240,7 @@ export function AuthForm({ mode }: { mode: AuthMode }) {
             <button
               type="submit"
               disabled={isSubmitting}
-              className="w-full rounded-xl bg-accent px-4 py-2.5 text-sm font-semibold text-white hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-60 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
+              className="btn btn-primary w-full"
             >
               {isSubmitting
                 ? isSignUp
@@ -256,7 +256,7 @@ export function AuthForm({ mode }: { mode: AuthMode }) {
             {isSignUp ? "Already have an account?" : "New to ReplyPilot?"}{" "}
             <Link
               href={isSignUp ? "/sign-in" : "/sign-up"}
-              className="font-semibold text-accent-ink hover:text-accent-ink"
+              className="font-semibold text-accent-ink hover:underline"
             >
               {isSignUp ? "Sign in" : "Create an account"}
             </Link>
