@@ -45,16 +45,17 @@ function applyTheme(choice: ThemeChoice) {
 }
 
 // Runs before paint on the client and is a no-op during server rendering.
-const useBeforePaint = typeof window !== "undefined" ? useLayoutEffect : useEffect;
+const useBeforePaint =
+  typeof window !== "undefined" ? useLayoutEffect : useEffect;
 
 /**
  * Light/Dark/System theme selector.
  *
  * - The resolved theme (`data-theme` on <html>) is applied by the inline script
  *   in the root layout before the first paint, so there is no flash.
- * - This selector only manages the persisted preference and keeps
- *   `data-theme` in sync after the selection changes or the OS theme changes
- *   while System is selected.
+ * - This selector manages the persisted preference and keeps `data-theme` in
+ *   sync after the selection changes or the OS theme changes while System is
+ *   selected.
  */
 export function ThemeSelect() {
   const [choice, setChoice] = useState<ThemeChoice>("system");
@@ -131,11 +132,7 @@ export function ThemeSelect() {
               : "text-ink-soft hover:text-ink"
           }`}
         >
-{(compact ? false : true) && (
-            <span className="hidden md:inline">{option.label}</span>
-        )}
-          <span className="md:hidden">{option.label.slice(0, 3)}</span>
-</think><tool_call>edit<arg_key>newString</arg_key><arg_value>          <span aria-hidden="true">
+          <span aria-hidden="true">
             {option.value === "light" ? "☀" : option.value === "dark" ? "☾" : "◐"}
           </span>
           <span className="hidden md:inline">{option.label}</span>
