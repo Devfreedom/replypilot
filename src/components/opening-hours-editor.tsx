@@ -12,7 +12,7 @@ import {
 } from "@/lib/opening-hours";
 
 const timeInputClass =
-  "mt-1 block w-full min-w-0 rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-800 outline-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 disabled:bg-slate-50";
+  "mt-1 block w-full min-w-0 rounded-xl border border-line bg-surface px-3 py-2.5 text-sm text-ink outline-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 disabled:bg-hushed";
 
 type OpeningHoursEditorProps = {
   schedule: WeeklySchedule;
@@ -42,15 +42,15 @@ export function OpeningHoursEditor({
 
   return (
     <fieldset
-      className="min-w-0 rounded-2xl border border-slate-200 bg-slate-50/60 p-4 sm:col-span-2 sm:p-5"
+      className="min-w-0 rounded-2xl border border-line bg-hushed/60 p-4 sm:col-span-2 sm:p-5"
       disabled={disabled}
     >
-      <legend className="px-1 text-sm font-semibold text-slate-800">
+      <legend className="px-1 text-sm font-semibold text-ink">
         Opening hours
       </legend>
 
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-        <p className="max-w-2xl text-sm leading-6 text-slate-600">
+        <p className="max-w-2xl text-sm leading-6 text-ink-soft">
           Choose the days you operate, then set one opening and closing time
           for each open day. Closed days are saved without times.
         </p>
@@ -59,25 +59,25 @@ export function OpeningHoursEditor({
           onClick={() => onChange(copyMondayToWeekdays(schedule))}
           disabled={disabled || !copyEnabled}
           aria-describedby={`${idPrefix}-copy-help`}
-          className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 disabled:cursor-not-allowed disabled:opacity-50"
+          className="rounded-xl border border-line bg-surface px-3 py-2 text-sm font-semibold text-ink hover:bg-hushed focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 disabled:cursor-not-allowed disabled:opacity-50"
         >
           Copy Monday to weekdays
         </button>
       </div>
 
-      <p id={`${idPrefix}-copy-help`} className="mt-1 text-xs text-slate-500">
+      <p id={`${idPrefix}-copy-help`} className="mt-1 text-xs text-ink-soft">
         {copyEnabled
           ? "This copies Monday's hours to Tuesday–Friday only. It does not save the profile."
           : "Set valid Monday opening and closing times to enable copying to Tuesday–Friday."}
       </p>
 
-      <p className="mt-2 text-xs text-slate-500">
+      <p className="mt-2 text-xs text-ink-soft">
         One same-day period per day is supported. Overnight hours and split
         shifts are not supported yet.
       </p>
 
       {allClosed ? (
-        <p className="mt-3 rounded-xl border border-blue-100 bg-blue-50 px-3 py-2 text-sm text-blue-900">
+        <p className="mt-3 rounded-xl border border-[color-mix(in_oklab,var(--rp-accent)_25%,transparent)] bg-accent-soft px-3 py-2 text-sm text-accent-ink">
           No days are open yet. Select Open for the days you operate. Nothing is
           saved until you save the profile.
         </p>
@@ -86,13 +86,13 @@ export function OpeningHoursEditor({
       {hasErrors ? (
         <p
           role="alert"
-          className="mt-3 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm font-medium text-red-800"
+          className="mt-3 rounded-xl border border-[color-mix(in_oklab,var(--rp-danger)_25%,transparent)] bg-danger-soft px-3 py-2 text-sm font-medium text-danger-ink"
         >
           Please correct the highlighted opening-hours fields.
         </p>
       ) : null}
 
-      <ul className="mt-4 divide-y divide-slate-200 border-t border-slate-200">
+      <ul className="mt-4 divide-y divide-line border-t border-line">
         {schedule.map((row) => {
           const label = WEEKDAY_LABELS[row.day];
           const dayErrors = errors[row.day];
@@ -108,14 +108,14 @@ export function OpeningHoursEditor({
               >
                 <p
                   id={dayLabelId}
-                  className="text-sm font-semibold text-slate-800"
+                  className="text-sm font-semibold text-ink"
                 >
                   {label}
                 </p>
 
                 <label
                   htmlFor={toggleId}
-                  className="inline-flex w-fit cursor-pointer items-center gap-2 text-sm font-medium text-slate-700"
+                  className="inline-flex w-fit cursor-pointer items-center gap-2 text-sm font-medium text-ink"
                 >
                   <input
                     id={toggleId}
@@ -127,7 +127,7 @@ export function OpeningHoursEditor({
                       )
                     }
                     aria-label={`${label} open`}
-                    className="h-4 w-4 rounded border-slate-300 text-blue-600 accent-blue-600 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
+                    className="h-4 w-4 rounded border-line-strong text-blue-600 accent-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
                   />
                   {row.isOpen ? "Open" : "Closed"}
                 </label>
@@ -137,7 +137,7 @@ export function OpeningHoursEditor({
                     <div className="min-w-0">
                       <label
                         htmlFor={fieldId(row.day, "opensAt")}
-                        className="block text-xs font-medium text-slate-600"
+                        className="block text-xs font-medium text-ink-soft"
                       >
                         Opens
                       </label>
@@ -162,13 +162,13 @@ export function OpeningHoursEditor({
                             : undefined
                         }
                         className={`${timeInputClass} ${
-                          dayErrors?.opensAt ? "border-red-300 bg-red-50" : ""
+                          dayErrors?.opensAt ? "border-[color-mix(in_oklab,var(--rp-danger)_25%,transparent)] bg-danger-soft" : ""
                         }`}
                       />
                       {dayErrors?.opensAt ? (
                         <p
                           id={errorId(row.day, "opensAt")}
-                          className="mt-1 text-xs font-medium text-red-700"
+                          className="mt-1 text-xs font-medium text-danger-ink"
                         >
                           {dayErrors.opensAt}
                         </p>
@@ -178,7 +178,7 @@ export function OpeningHoursEditor({
                     <div className="min-w-0">
                       <label
                         htmlFor={fieldId(row.day, "closesAt")}
-                        className="block text-xs font-medium text-slate-600"
+                        className="block text-xs font-medium text-ink-soft"
                       >
                         Closes
                       </label>
@@ -203,13 +203,13 @@ export function OpeningHoursEditor({
                             : undefined
                         }
                         className={`${timeInputClass} ${
-                          dayErrors?.closesAt ? "border-red-300 bg-red-50" : ""
+                          dayErrors?.closesAt ? "border-[color-mix(in_oklab,var(--rp-danger)_25%,transparent)] bg-danger-soft" : ""
                         }`}
                       />
                       {dayErrors?.closesAt ? (
                         <p
                           id={errorId(row.day, "closesAt")}
-                          className="mt-1 text-xs font-medium text-red-700"
+                          className="mt-1 text-xs font-medium text-danger-ink"
                         >
                           {dayErrors.closesAt}
                         </p>
@@ -217,7 +217,7 @@ export function OpeningHoursEditor({
                     </div>
                   </div>
                 ) : (
-                  <p className="self-center text-sm text-slate-500">
+                  <p className="self-center text-sm text-ink-soft">
                     Closed all day
                   </p>
                 )}

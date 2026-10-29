@@ -13,9 +13,9 @@ import {
 } from "@/lib/search-option";
 
 const triggerClass =
-  "mt-1 flex w-full min-w-0 items-center justify-between gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-left text-sm text-slate-800 outline-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 disabled:cursor-not-allowed disabled:bg-slate-50 disabled:text-slate-500";
+  "mt-1 flex w-full min-w-0 items-center justify-between gap-2 rounded-xl border border-line bg-surface px-3 py-2.5 text-left text-sm text-ink outline-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 disabled:cursor-not-allowed disabled:bg-hushed disabled:text-ink-soft";
 const searchInputClass =
-  "w-full min-w-0 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800 outline-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600";
+  "w-full min-w-0 rounded-lg border border-line bg-surface px-3 py-2 text-sm text-ink outline-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600";
 
 type SearchableComboboxProps = {
   id: string;
@@ -220,7 +220,7 @@ export function SearchableCombobox({
         <label
           id={labelId}
           htmlFor={id}
-          className="block text-sm font-medium text-slate-700"
+          className="block text-sm font-medium text-ink"
         >
           {label}
         </label>
@@ -233,7 +233,7 @@ export function SearchableCombobox({
             }}
             disabled={disabled}
             aria-label={`Clear ${label}`}
-            className="text-xs font-semibold text-slate-500 underline-offset-2 hover:text-slate-800 hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 disabled:opacity-60"
+            className="text-xs font-semibold text-ink-soft underline-offset-2 hover:text-ink hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 disabled:opacity-60"
           >
             Clear
           </button>
@@ -258,32 +258,32 @@ export function SearchableCombobox({
           }
         }}
         className={`${triggerClass} ${
-          error ? "border-red-400" : ""
+          error ? "border-[color-mix(in_oklab,var(--rp-danger)_25%,transparent)]" : ""
         }`}
       >
         <span className="truncate">
           {selectedOption?.label ?? placeholder}
         </span>
-        <span aria-hidden="true" className="shrink-0 text-slate-400">
+        <span aria-hidden="true" className="shrink-0 text-ink-faint">
           ▾
         </span>
       </button>
 
       {helpText ? (
-        <p id={helpId} className="mt-1 text-xs text-slate-500">
+        <p id={helpId} className="mt-1 text-xs text-ink-soft">
           {helpText}
         </p>
       ) : null}
 
       {error ? (
-        <p id={errorId} role="alert" className="mt-1 text-xs text-red-700">
+        <p id={errorId} role="alert" className="mt-1 text-xs text-danger-ink">
           {error}
         </p>
       ) : null}
 
       {isOpen ? (
-        <div className="absolute left-0 right-0 z-20 mt-1 max-h-72 overflow-auto rounded-xl border border-slate-200 bg-white shadow-lg">
-          <div className="sticky top-0 border-b border-slate-100 bg-white p-2">
+        <div className="absolute left-0 right-0 z-20 mt-1 max-h-72 overflow-auto rounded-xl border border-line bg-surface shadow-lg">
+          <div className="sticky top-0 border-b border-line bg-surface p-2">
             <input
               autoFocus
               value={query}
@@ -304,7 +304,7 @@ export function SearchableCombobox({
           </div>
 
           {filteredOptions.length === 0 ? (
-            <p role="status" className="px-3 py-4 text-sm text-slate-500">
+            <p role="status" className="px-3 py-4 text-sm text-ink-soft">
               No matches found.
             </p>
           ) : (
@@ -325,7 +325,7 @@ export function SearchableCombobox({
                     {showGroup ? (
                       <li
                         role="presentation"
-                        className="px-3 pb-1 pt-2 text-xs font-semibold uppercase tracking-wide text-slate-400"
+                        className="px-3 pb-1 pt-2 text-xs font-semibold uppercase tracking-wide text-ink-faint"
                       >
                         {option.group}
                       </li>
@@ -339,13 +339,13 @@ export function SearchableCombobox({
                       onClick={() => selectOption(option)}
                       className={`cursor-pointer px-3 py-2 text-sm ${
                         index === activeIndex
-                          ? "bg-blue-50 text-blue-950"
-                          : "text-slate-800"
+                          ? "bg-accent-soft text-ink"
+                          : "text-ink"
                       }`}
                     >
                       <span className="block break-words">{option.label}</span>
                       {option.description ? (
-                        <span className="mt-0.5 block break-words text-xs text-slate-500">
+                        <span className="mt-0.5 block break-words text-xs text-ink-soft">
                           {option.description}
                         </span>
                       ) : null}

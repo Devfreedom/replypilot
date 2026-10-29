@@ -49,12 +49,12 @@ import { PhoneNumberField } from "./phone-number-field";
 import { SearchableCombobox } from "./searchable-combobox";
 
 const inputClass =
-  "mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-800 outline-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600";
-const labelClass = "block text-sm font-medium text-slate-700";
+  "mt-1 w-full rounded-xl border border-line bg-surface px-3 py-2.5 text-sm text-ink outline-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600";
+const labelClass = "block text-sm font-medium text-ink";
 const secondaryButtonClass =
-  "rounded-xl border border-slate-200 px-4 py-2.5 text-sm font-semibold text-slate-700 hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600";
+  "rounded-xl border border-line px-4 py-2.5 text-sm font-semibold text-ink hover:bg-hushed focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600";
 const primaryButtonClass =
-  "rounded-xl bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-blue-700 disabled:opacity-60 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600";
+  "rounded-xl bg-accent px-4 py-2.5 text-sm font-semibold text-white hover:bg-accent-hover disabled:opacity-60 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600";
 
 async function readJson(response: Response): Promise<unknown> {
   try {
@@ -624,20 +624,20 @@ export function BusinessSettings() {
   const showSetupState = profile === null && !showProfileForm;
 
   return (
-    <main className="min-h-screen bg-slate-50">
-      <header className="border-b border-slate-200 bg-white">
+    <main className="min-h-screen bg-hushed">
+      <header className="border-b border-line bg-surface">
         <div className="mx-auto flex max-w-5xl items-center justify-between gap-4 px-5 py-4 sm:px-8">
           <div>
-            <p className="truncate text-xs text-slate-500">
-              <span className="font-medium text-slate-600">
+            <p className="truncate text-xs text-ink-soft">
+              <span className="font-medium text-ink-soft">
                 {workspace?.name ?? "Workspace"}
               </span>{" "}
               /{" "}
-              <span className="font-semibold text-slate-700">
+              <span className="font-semibold text-ink">
                 Business settings
               </span>
             </p>
-            <h1 className="mt-1 text-xl font-bold text-slate-950">
+            <h1 className="mt-1 text-xl font-bold text-ink">
               Business settings
             </h1>
           </div>
@@ -648,13 +648,13 @@ export function BusinessSettings() {
       </header>
 
       <div className="mx-auto max-w-5xl px-5 py-8 sm:px-8">
-        <p className="mb-6 rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-900">
+        <p className="mb-6 rounded-xl border border-[color-mix(in_oklab,var(--rp-accent)_25%,transparent)] bg-accent-soft px-4 py-3 text-sm text-accent-ink">
           Signed in to <strong>{workspace?.name ?? "this workspace"}</strong>.
           Business details and reply context are scoped to this workspace.
         </p>
 
         {!canManage ? (
-          <p className="mb-6 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+          <p className="mb-6 rounded-xl border border-[color-mix(in_oklab,var(--rp-warning)_25%,transparent)] bg-warning-soft px-4 py-3 text-sm text-warning-ink">
             You are a workspace member. Settings are read-only for your role;
             only the workspace owner can make changes.
           </p>
@@ -663,7 +663,7 @@ export function BusinessSettings() {
         {notice ? (
           <p
             role="status"
-            className="mb-4 rounded-xl bg-emerald-50 px-4 py-3 text-sm text-emerald-800"
+            className="mb-4 rounded-xl bg-success-soft px-4 py-3 text-sm text-success-ink"
           >
             {notice}
           </p>
@@ -672,7 +672,7 @@ export function BusinessSettings() {
         {error ? (
           <div
             role="alert"
-            className="mb-4 rounded-xl bg-red-50 px-4 py-3 text-sm text-red-700"
+            className="mb-4 rounded-xl bg-danger-soft px-4 py-3 text-sm text-danger-ink"
           >
             {error}{" "}
             <button
@@ -688,7 +688,7 @@ export function BusinessSettings() {
         {loading ? (
           <p
             role="status"
-            className="py-16 text-center text-sm text-slate-500"
+            className="py-16 text-center text-sm text-ink-soft"
           >
             Loading business settings…
           </p>
@@ -697,17 +697,17 @@ export function BusinessSettings() {
             disabled={!canManage}
             className="m-0 min-w-0 space-y-8 border-0 p-0"
           >
-            <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6">
-              <h2 className="text-lg font-bold text-slate-900">
+            <section className="rounded-2xl border border-line bg-surface p-5 shadow-sm sm:p-6">
+              <h2 className="text-lg font-bold text-ink">
                 Business profile
               </h2>
 
               {showSetupState ? (
-                <div className="mt-4 rounded-xl border border-dashed border-slate-300 bg-slate-50 p-5">
-                  <h3 className="text-base font-semibold text-slate-900">
+                <div className="mt-4 rounded-xl border border-dashed border-line-strong bg-hushed p-5">
+                  <h3 className="text-base font-semibold text-ink">
                     Your business profile is not set up yet
                   </h3>
-                  <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-600">
+                  <p className="mt-2 max-w-2xl text-sm leading-6 text-ink-soft">
                     Add your approved business details so future reply drafts
                     can use real information instead of guessing. Nothing has
                     been saved for your business yet.
@@ -722,7 +722,7 @@ export function BusinessSettings() {
                 </div>
               ) : (
                 <>
-                  <p className="mt-1 text-sm text-slate-500">
+                  <p className="mt-1 text-sm text-ink-soft">
                     Add only facts you approve for future reply context.
                   </p>
                   <form
@@ -808,13 +808,13 @@ export function BusinessSettings() {
                       />
                     </label>
                     {legacyOpeningHours !== null ? (
-                      <div className="min-w-0 rounded-2xl border border-amber-200 bg-amber-50 p-4 sm:col-span-2 sm:p-5">
-                        <h3 className="text-sm font-semibold text-amber-950">
+                      <div className="min-w-0 rounded-2xl border border-[color-mix(in_oklab,var(--rp-warning)_25%,transparent)] bg-warning-soft p-4 sm:col-span-2 sm:p-5">
+                        <h3 className="text-sm font-semibold text-ink">
                           Opening hours
                         </h3>
                         <div
                           role="alert"
-                          className="mt-2 text-sm leading-6 text-amber-900"
+                          className="mt-2 text-sm leading-6 text-warning-ink"
                         >
                           <p>
                             This saved schedule cannot be shown safely in the
@@ -828,10 +828,10 @@ export function BusinessSettings() {
                           </ul>
                         </div>
 
-                        <p className="mt-4 text-sm font-medium text-amber-950">
+                        <p className="mt-4 text-sm font-medium text-ink">
                           Saved entries
                         </p>
-                        <ul className="mt-1 space-y-1 text-sm text-amber-900">
+                        <ul className="mt-1 space-y-1 text-sm text-warning-ink">
                           {legacyOpeningHours.map((entry, index) => (
                             <li key={`${entry.day}-${index}`}>
                               {WEEKDAY_LABELS[entry.day] ?? entry.day}:{" "}
@@ -847,7 +847,7 @@ export function BusinessSettings() {
                         >
                           Replace with weekly schedule
                         </button>
-                        <p className="mt-2 text-xs text-amber-800">
+                        <p className="mt-2 text-xs text-warning-ink">
                           The editor starts with the first saved interval for
                           each day. Nothing is replaced until you save the
                           profile.
@@ -858,7 +858,7 @@ export function BusinessSettings() {
                         {scheduleIssues.length > 0 ? (
                           <div
                             role="status"
-                            className="min-w-0 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900 sm:col-span-2"
+                            className="min-w-0 rounded-xl border border-[color-mix(in_oklab,var(--rp-warning)_25%,transparent)] bg-warning-soft px-4 py-3 text-sm text-warning-ink sm:col-span-2"
                           >
                             <p className="font-medium">
                               Some saved opening hours need review:
@@ -901,8 +901,8 @@ export function BusinessSettings() {
               )}
             </section>
 
-            <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6">
-              <h2 className="text-lg font-bold text-slate-900">
+            <section className="rounded-2xl border border-line bg-surface p-5 shadow-sm sm:p-6">
+              <h2 className="text-lg font-bold text-ink">
                 Products &amp; services
               </h2>
               <form
@@ -941,7 +941,7 @@ export function BusinessSettings() {
                 </label>
                 <p
                   id="currency-help"
-                  className="-mt-2 text-xs text-slate-500 sm:col-span-2"
+                  className="-mt-2 text-xs text-ink-soft sm:col-span-2"
                 >
                   Use a current ISO 4217 code in uppercase, for example NGN or
                   USD. New services default to the business currency (
@@ -973,7 +973,7 @@ export function BusinessSettings() {
                 </label>
                 <p
                   id="price-help"
-                  className="-mt-2 text-xs text-slate-500 sm:col-span-2"
+                  className="-mt-2 text-xs text-ink-soft sm:col-span-2"
                 >
                   Optional whole minor units only (for example 150000). Leave
                   blank when pricing is not fixed.
@@ -988,7 +988,7 @@ export function BusinessSettings() {
                     className={inputClass}
                   />
                 </label>
-                <label className="flex items-center gap-2 text-sm text-slate-700 sm:col-span-2">
+                <label className="flex items-center gap-2 text-sm text-ink sm:col-span-2">
                   <input
                     name="isActive"
                     key={`active-${editingCatalogue?.id ?? "new"}`}
@@ -1018,10 +1018,10 @@ export function BusinessSettings() {
                 empty="No services added yet."
                 render={(entry) => (
                   <>
-                    <p className="font-semibold text-slate-800">
+                    <p className="font-semibold text-ink">
                       {entry.name}
                     </p>
-                    <p className="mt-1 text-sm text-slate-500">
+                    <p className="mt-1 text-sm text-ink-soft">
                       {entry.priceMinor === null
                         ? "Price on request"
                         : `${entry.currencyCode} ${entry.priceMinor} minor units`}{" "}
@@ -1031,7 +1031,7 @@ export function BusinessSettings() {
                       <button
                         type="button"
                         onClick={() => setEditingCatalogue(entry)}
-                        className="text-sm font-semibold text-blue-700"
+                        className="text-sm font-semibold text-accent-ink"
                       >
                         Edit
                       </button>
@@ -1040,7 +1040,7 @@ export function BusinessSettings() {
                           type="button"
                           disabled={busy}
                           onClick={() => void deactivate("catalogue", entry.id)}
-                          className="text-sm font-semibold text-red-700 disabled:opacity-60"
+                          className="text-sm font-semibold text-danger-ink disabled:opacity-60"
                         >
                           Deactivate
                         </button>
@@ -1051,8 +1051,8 @@ export function BusinessSettings() {
               />
             </section>
 
-            <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6">
-              <h2 className="text-lg font-bold text-slate-900">
+            <section className="rounded-2xl border border-line bg-surface p-5 shadow-sm sm:p-6">
+              <h2 className="text-lg font-bold text-ink">
                 FAQs &amp; policies
               </h2>
               <form
@@ -1092,7 +1092,7 @@ export function BusinessSettings() {
                     className={inputClass}
                   />
                 </label>
-                <label className="flex items-center gap-2 text-sm text-slate-700 sm:col-span-2">
+                <label className="flex items-center gap-2 text-sm text-ink sm:col-span-2">
                   <input
                     name="isActive"
                     key={`knowledge-active-${editingKnowledge?.id ?? "new"}`}
@@ -1122,8 +1122,8 @@ export function BusinessSettings() {
                 empty="No FAQs or policies added yet."
                 render={(entry) => (
                   <>
-                    <p className="font-semibold text-slate-800">{entry.title}</p>
-                    <p className="mt-1 text-sm text-slate-500">
+                    <p className="font-semibold text-ink">{entry.title}</p>
+                    <p className="mt-1 text-sm text-ink-soft">
                       {entry.entryType === "faq" ? "FAQ" : "Policy"} ·{" "}
                       {entry.isActive ? "Active" : "Inactive"}
                     </p>
@@ -1131,7 +1131,7 @@ export function BusinessSettings() {
                       <button
                         type="button"
                         onClick={() => setEditingKnowledge(entry)}
-                        className="text-sm font-semibold text-blue-700"
+                        className="text-sm font-semibold text-accent-ink"
                       >
                         Edit
                       </button>
@@ -1142,7 +1142,7 @@ export function BusinessSettings() {
                           onClick={() =>
                             void deactivate("knowledge", entry.id)
                           }
-                          className="text-sm font-semibold text-red-700 disabled:opacity-60"
+                          className="text-sm font-semibold text-danger-ink disabled:opacity-60"
                         >
                           Deactivate
                         </button>
@@ -1169,11 +1169,11 @@ function EntryList<T extends { id: string }>({
   render: (entry: T) => ReactNode;
 }) {
   if (entries.length === 0) {
-    return <p className="mt-6 text-sm text-slate-500">{empty}</p>;
+    return <p className="mt-6 text-sm text-ink-soft">{empty}</p>;
   }
 
   return (
-    <ul className="mt-6 divide-y divide-slate-100 border-t border-slate-100">
+    <ul className="mt-6 divide-y divide-line border-t border-line">
       {entries.map((entry) => (
         <li key={entry.id} className="py-4">
           {render(entry)}
