@@ -232,7 +232,7 @@ export function LeadTable({
 
                 <td className="max-w-xs px-4 py-4 xl:px-6">
                   <p className="text-sm font-medium text-ink">{lead.service}</p>
-                  <p className="mt-1 truncate text-xs text-ink-faint">
+                  <p className="mt-1 line-clamp-2 text-xs text-ink-faint">
                     {lead.lastMessage}
                   </p>
                 </td>

@@ -533,7 +533,9 @@ function Dashboard() {
               />
             </div>
 
-            <div className="mt-6 grid gap-6 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
+            {/* Two columns only from 2xl: the leads table needs the full
+                content width below that to avoid constant horizontal scroll. */}
+            <div className="mt-6 grid gap-6 2xl:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
               {/* 3. Which leads should I review next? */}
               <section className="card overflow-hidden">
                 <div className="border-b border-line px-5 py-4 sm:px-6">
