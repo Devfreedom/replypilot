@@ -95,7 +95,7 @@ export function PhoneNumberField({
               aria-describedby={numberDescribedBy}
               aria-invalid={numberError ? true : undefined}
               placeholder="0803 123 4567"
-              className={`min-w-0 flex-1 rounded-r-xl border border-line bg-surface px-3 py-2.5 text-sm text-ink outline-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 ${
+              className={`min-w-0 flex-1 rounded-r-xl border border-line bg-surface px-3 py-2.5 text-sm text-ink outline-none ${
                 numberError ? "border-[color-mix(in_oklab,var(--rp-danger)_25%,transparent)]" : ""
               }`}
             />

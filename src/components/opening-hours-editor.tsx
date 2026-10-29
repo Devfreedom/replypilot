@@ -12,7 +12,7 @@ import {
 } from "@/lib/opening-hours";
 
 const timeInputClass =
-  "mt-1 block w-full min-w-0 rounded-xl border border-line bg-surface px-3 py-2.5 text-sm text-ink outline-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 disabled:bg-hushed";
+  "mt-1 block w-full min-w-0 rounded-xl border border-line bg-surface px-3 py-2.5 text-sm text-ink outline-none disabled:bg-hushed";
 
 type OpeningHoursEditorProps = {
   schedule: WeeklySchedule;
@@ -59,7 +59,7 @@ export function OpeningHoursEditor({
           onClick={() => onChange(copyMondayToWeekdays(schedule))}
           disabled={disabled || !copyEnabled}
           aria-describedby={`${idPrefix}-copy-help`}
-          className="rounded-xl border border-line bg-surface px-3 py-2 text-sm font-semibold text-ink hover:bg-hushed focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 disabled:cursor-not-allowed disabled:opacity-50"
+          className="btn btn-secondary px-3 py-2"
         >
           Copy Monday to weekdays
         </button>

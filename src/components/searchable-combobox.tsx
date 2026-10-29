@@ -13,9 +13,9 @@ import {
 } from "@/lib/search-option";
 
 const triggerClass =
-  "mt-1 flex w-full min-w-0 items-center justify-between gap-2 rounded-xl border border-line bg-surface px-3 py-2.5 text-left text-sm text-ink outline-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 disabled:cursor-not-allowed disabled:bg-hushed disabled:text-ink-soft";
+  "mt-1 flex w-full min-w-0 items-center justify-between gap-2 rounded-xl border border-line bg-surface px-3 py-2.5 text-left text-sm text-ink outline-none disabled:cursor-not-allowed disabled:bg-hushed disabled:text-ink-soft";
 const searchInputClass =
-  "w-full min-w-0 rounded-lg border border-line bg-surface px-3 py-2 text-sm text-ink outline-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600";
+  "w-full min-w-0 rounded-lg border border-line bg-surface px-3 py-2 text-sm text-ink outline-none";
 
 type SearchableComboboxProps = {
   id: string;
@@ -233,7 +233,7 @@ export function SearchableCombobox({
             }}
             disabled={disabled}
             aria-label={`Clear ${label}`}
-            className="text-xs font-semibold text-ink-soft underline-offset-2 hover:text-ink hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 disabled:opacity-60"
+            className="text-xs font-semibold text-ink-soft underline-offset-2 hover:text-ink hover:underline disabled:opacity-60"
           >
             Clear
           </button>
