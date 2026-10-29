@@ -404,8 +404,6 @@ function Dashboard() {
         ? "All customer enquiries"
         : "Recent leads";
 
-  const leadsToolbarEnabled = view !== "overview" ? true : true;
-
   return (
     <AppShell
       active="dashboard"
@@ -431,9 +429,7 @@ function Dashboard() {
         <PageHeading
           title={VIEW_TITLES[view].title}
           description={VIEW_TITLES[view].description}
-        >
-          {newLeadButton && <span className="sm:hidden">{newLeadButton}</span>}
-        </PageHeading>
+        />
 
         {view === "overview" && (
           <>
@@ -538,7 +534,7 @@ function Dashboard() {
                 <div className="border-b border-line px-5 py-4 sm:px-6">
                   <h2 className="font-bold text-ink">{sectionTitle}</h2>
                   <p className="mt-0.5 text-xs text-ink-soft">
-                   最受 recent enquiries are listed first.
+                   The most recent enquiries come first.
                   </p>
                 </div>
                 {buildLeadsSection()}
