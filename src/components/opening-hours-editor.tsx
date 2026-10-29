@@ -127,7 +127,7 @@ export function OpeningHoursEditor({
                       )
                     }
                     aria-label={`${label} open`}
-                    className="h-4 w-4 rounded border-line-strong text-blue-600 accent-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
+                    className="checkbox"
                   />
                   {row.isOpen ? "Open" : "Closed"}
                 </label>

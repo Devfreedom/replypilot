@@ -972,6 +972,7 @@ export function BusinessSettings() {
                     name="isActive"
                     key={`active-${editingCatalogue?.id ?? "new"}`}
                     type="checkbox"
+                    className="checkbox"
                     defaultChecked={editingCatalogue?.isActive ?? true}
                   />
                   Active and approved for future context
@@ -1087,7 +1088,7 @@ export function BusinessSettings() {
                   <input
                     name="isActive"
                     key={`knowledge-active-${editingKnowledge?.id ?? "new"}`}
-                    type="checkbox"
+                    className="checkbox"
                     defaultChecked={editingKnowledge?.isActive ?? true}
                   />
                   Active and approved for future context
