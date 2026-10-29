@@ -1,31 +1,265 @@
 @import "tailwindcss";
 
+/*
+ * ReplyPilot design system
+ *
+ * Semantic tokens are defined as plain CSS variables so they can flip between
+ * themes on `[data-theme]`. They are mapped to Tailwind utilities in
+ * `@theme inline`, so `bg-surface`, `text-ink-soft`, `border-line`, etc. work
+ * everywhere and automatically follow the active theme.
+ *
+ * Theme attribute contract (see src/components/theme.tsx and the inline script
+ * in src/app/layout.tsx):
+ *   <html data-theme="light"> or <html data-theme="dark">
+ */
+
 :root {
-  --background: #f6f8fc;
-  --surface: #ffffff;
-  --foreground: #0f172a;
-  --muted: #64748b;
-  --border: #e2e8f0;
-  --accent: #2563eb;
+  --rp-canvas: #f5f7fb;
+  --rp-surface: #ffffff;
+  --rp-raised: #ffffff;
+  --rp-hushed: #f1f5f9;
+  --rp-ink: #0f172a;
+  --rp-ink-soft: #46566b;
+  --rp-ink-faint: #8294ab;
+  --rp-line: #e2e8f0;
+  --rp-line-strong: #cbd5e1;
+  --rp-accent: #2563eb;
+  --rp-accent-hover: #1d4ed8;
+  --rp-accent-soft: #eef4fe;
+  --rp-accent-ink: #1d4ed8;
+  --rp-on-accent: #ffffff;
+  --rp-focus: #2563eb;
+  --rp-success: #059669;
+  --rp-success-soft: #e9f9f2;
+  --rp-success-ink: #047857;
+  --rp-warning: #d97706;
+  --rp-warning-soft: #fdf6e3;
+  --rp-warning-ink: #9a5b0a;
+  --rp-danger: #dc2626;
+  --rp-danger-soft: #fdeeee;
+  --rp-danger-ink: #b91c1c;
+  --rp-overlay: rgb(15 23 42 / 0.45);
+  --rp-shadow-card: 0 1px 2px rgb(15 23 42 / 0.05);
+  --rp-shadow-float: 0 10px 30px rgb(15 23 42 / 0.12);
+  color-scheme: light;
+}
+
+[data-theme="dark"] {
+  --rp-canvas: #0a101f;
+  --rp-surface: #101828;
+  --rp-raised: #141c30;
+  --rp-hushed: #19223a;
+  --rp-ink: #eff3f9;
+  --rp-ink-soft: #b6c2d4;
+  --rp-ink-faint: #8598b3;
+  --rp-line: #24314b;
+  --rp-line-strong: #35455f;
+  --rp-accent: #3b82f6;
+  --rp-accent-hover: #2f6fe0;
+  --rp-accent-soft: #172642;
+  --rp-accent-ink: #93c5fd;
+  --rp-on-accent: #ffffff;
+  --rp-focus: #60a5fa;
+  --rp-success: #34d399;
+  --rp-success-soft: #0d2c23;
+  --rp-success-ink: #6ee7b7;
+  --rp-warning: #f59e0b;
+  --rp-warning-soft: #2c2210;
+  --rp-warning-ink: #fcd34d;
+  --rp-danger: #ef4444;
+  --rp-danger-soft: #2e1517;
+  --rp-danger-ink: #fca5a5;
+  --rp-overlay: rgb(2 6 16 / 0.65);
+  --rp-shadow-card: 0 1px 2px rgb(0 0 0 / 0.3);
+  --rp-shadow-float: 0 10px 30px rgb(0 0 0 / 0.45);
+  color-scheme: dark;
 }
 
 @theme inline {
-  --color-background: var(--background);
-  --color-surface: var(--surface);
-  --color-foreground: var(--foreground);
-  --color-muted: var(--muted);
-  --color-line: var(--border);
-  --color-accent: var(--accent);
+  --color-canvas: var(--rp-canvas);
+  --color-surface: var(--rp-surface);
+  --color-raised: var(--rp-raised);
+  --color-hushed: var(--rp-hushed);
+  --color-ink: var(--rp-ink);
+  --color-ink-soft: var(--rp-ink-soft);
+  --color-ink-faint: var(--rp-ink-faint);
+  --color-line: var(--rp-line);
+  --color-line-strong: var(--rp-line-strong);
+  --color-accent: var(--rp-accent);
+  --color-accent-hover: var(--rp-accent-hover);
+  --color-accent-soft: var(--rp-accent-soft);
+  --color-accent-ink: var(--rp-accent-ink);
+  --color-on-accent: var(--rp-on-accent);
+  --color-success: var(--rp-success);
+  --color-success-soft: var(--rp-success-soft);
+  --color-success-ink: var(--rp-success-ink);
+  --color-warning: var(--rp-warning);
+  --color-warning-soft: var(--rp-warning-soft);
+  --color-warning-ink: var(--rp-warning-ink);
+  --color-danger: var(--rp-danger);
+  --color-danger-soft: var(--rp-danger-soft);
+  --color-danger-ink: var(--rp-danger-ink);
   --font-sans: var(--font-geist-sans), system-ui, sans-serif;
   --font-mono: var(--font-geist-mono), monospace;
 }
 
-dialog::backdrop {
-  background: rgb(2 6 23 / 0.45);
+@layer base {
+  body {
+    background: var(--rp-canvas);
+    color: var(--rp-ink);
+    font-family: var(--font-sans);
+  }
+
+  ::selection {
+    background: color-mix(in oklch, var(--rp-accent) 22%, transparent);
+  }
+
+  /* One consistent focus ring for every interactive element. */
+  :focus-visible {
+    outline: 2px solid var(--rp-focus);
+    outline-offset: 2px;
+  }
+
+  dialog::backdrop {
+    background: var(--rp-overlay);
+  }
 }
 
-body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: var(--font-sans);
+@layer components {
+  /* Surfaces ------------------------------------------------------------- */
+
+  .card {
+    @apply rounded-2xl border border-line bg-surface;
+    box-shadow: var(--rp-shadow-card);
+  }
+
+  /* Typography helpers ---------------------------------------------------- */
+
+  .field-label {
+    @apply block text-sm font-medium text-ink;
+  }
+
+  .help-text {
+    @apply mt-1 text-xs leading-5 text-ink-soft;
+  }
+
+  /* Form controls --------------------------------------------------------- */
+
+  .input,
+  .select,
+  .textarea {
+    @apply w-full rounded-xl border border-line bg-surface px-3 py-2.5 text-sm text-ink outline-none;
+    @apply placeholder:text-ink-faint disabled:cursor-not-allowed disabled:bg-hushed disabled:text-ink-faint;
+  }
+
+  .select {
+    @apply cursor-pointer;
+  }
+
+  .textarea {
+    @apply resize-y;
+  }
+
+  .input[aria-invalid="true"],
+  .select[aria-invalid="true"],
+  .input[data-invalid="true"],
+  .select[data-invalid="true"] {
+    @apply border-danger;
+  }
+
+  /* Action buttons --------------------------------------------------------- */
+
+  .btn {
+    @apply inline-flex cursor-pointer items-center justify-center gap-2 rounded-xl text-sm font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-60;
+  }
+
+  .btn-primary {
+    @apply bg-accent px-4 py-2.5 text-on-accent hover:bg-accent-hover;
+  }
+
+  .btn-secondary {
+    @apply border border-line bg-surface px-4 py-2.5 text-ink hover:bg-hushed;
+  }
+
+  .btn-quiet {
+    @apply px-3 py-2 text-accent-ink hover:bg-accent-soft;
+  }
+
+  .btn-danger-quiet {
+    @apply px-3 py-2 text-danger-ink hover:bg-danger-soft;
+  }
+
+  /* Badges ----------------------------------------------------------------- */
+
+  .badge {
+    @apply inline-flex items-center gap-1.5 whitespace-nowrap rounded-full px-2.5 py-0.5 text-xs font-semibold;
+  }
+
+  .badge-new {
+    @apply bg-accent-soft text-accent-ink;
+  }
+
+  .badge-contacted {
+    @apply bg-[#efeafd] text-[#6d28d9];
+  }
+
+  [data-theme="dark"] .badge-contacted {
+    @apply bg-[#262040] text-[#c4b5fd];
+  }
+
+  .badge-quoted {
+    @apply bg-warning-soft text-warning-ink;
+  }
+
+  .badge-booked {
+    @apply bg-success-soft text-success-ink;
+  }
+
+  .badge-draft {
+    @apply bg-warning-soft text-warning-ink;
+  }
+
+  .badge-approved {
+    @apply bg-success-soft text-success-ink;
+  }
+
+  .badge-neutral {
+    @apply bg-hushed text-ink-soft;
+  }
+
+  /* Checkbox accent -------------------------------------------------------- */
+
+  .checkbox {
+    @apply h-4 w-4 cursor-pointer;
+    accent-color: var(--rp-accent);
+  }
+
+  /* Navigation item (sidebar + mobile drawer) ------------------------------ */
+
+  .nav-item {
+    @apply flex w-full cursor-pointer items-center gap-3 rounded-xl px-3 py-2.5 text-left text-sm font-medium text-ink-soft hover:bg-hushed;
+  }
+
+  .nav-item[aria-current="page"],
+  .nav-item[aria-current="true"] {
+    @apply bg-accent-soft text-accent-ink;
+  }
+}
+
+/* Respect the OS motion preference for nonessential transitions. The loading
+ * spinner is an essential state, so it keeps animating. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+  }
+
+  .animate-spin {
+    animation-duration: 0.9s !important;
+    animation-iteration-count: infinite !important;
+  }
 }
