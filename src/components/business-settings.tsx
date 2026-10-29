@@ -1159,7 +1159,6 @@ export function BusinessSettings() {
           </fieldset>
         )}
       </div>
-    </div>
   );
 }
 
