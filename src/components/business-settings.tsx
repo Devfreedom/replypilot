@@ -1,6 +1,5 @@
 "use client";
 
-import Link from "next/link";
 import {
   type FormEvent,
   type ReactNode,
@@ -47,14 +46,12 @@ import { useAuth } from "./auth-provider";
 import { OpeningHoursEditor } from "./opening-hours-editor";
 import { PhoneNumberField } from "./phone-number-field";
 import { SearchableCombobox } from "./searchable-combobox";
+import { Alert } from "./ui";
 
-const inputClass =
-  "mt-1 w-full rounded-xl border border-line bg-surface px-3 py-2.5 text-sm text-ink outline-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600";
-const labelClass = "block text-sm font-medium text-ink";
-const secondaryButtonClass =
-  "rounded-xl border border-line px-4 py-2.5 text-sm font-semibold text-ink hover:bg-hushed focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600";
-const primaryButtonClass =
-  "rounded-xl bg-accent px-4 py-2.5 text-sm font-semibold text-white hover:bg-accent-hover disabled:opacity-60 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600";
+const inputClass = "input mt-1";
+const labelClass = "field-label";
+const secondaryButtonClass = "btn btn-secondary";
+const primaryButtonClass = "btn btn-primary";
 
 async function readJson(response: Response): Promise<unknown> {
   try {
@@ -1000,20 +997,32 @@ export function BusinessSettings() {
                 empty="No services added yet."
                 render={(entry) => (
                   <>
-                    <p className="font-semibold text-ink">
-                      {entry.name}
-                    </p>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <p className="font-semibold text-ink">
+                        {entry.name}
+                      </p>
+                      <span
+                        className={`badge ${
+                          entry.isActive ? "badge-booked" : "badge-neutral"
+                        }`}
+                      >
+                        {entry.isActive ? "Active" : "Inactive"}
+                      </span>
+                    </div>
                     <p className="mt-1 text-sm text-ink-soft">
                       {entry.priceMinor === null
                         ? "Price on request"
                         : `${entry.currencyCode} ${entry.priceMinor} minor units`}{" "}
-                      · {entry.isActive ? "Active" : "Inactive"}
+                      · {" "}
+                      {entry.isActive
+                        ? "used for future reply context"
+                        : "not used for reply context"}
                     </p>
-                    <div className="mt-2 flex gap-3">
+                    <div className="mt-2 flex gap-3 py-1">
                       <button
                         type="button"
                         onClick={() => setEditingCatalogue(entry)}
-                        className="text-sm font-semibold text-accent-ink"
+                        className="btn btn-quiet"
                       >
                         Edit
                       </button>
@@ -1022,7 +1031,7 @@ export function BusinessSettings() {
                           type="button"
                           disabled={busy}
                           onClick={() => void deactivate("catalogue", entry.id)}
-                          className="text-sm font-semibold text-danger-ink disabled:opacity-60"
+                          className="btn btn-danger-quiet"
                         >
                           Deactivate
                         </button>
@@ -1104,16 +1113,27 @@ export function BusinessSettings() {
                 empty="No FAQs or policies added yet."
                 render={(entry) => (
                   <>
-                    <p className="font-semibold text-ink">{entry.title}</p>
-                    <p className="mt-1 text-sm text-ink-soft">
-                      {entry.entryType === "faq" ? "FAQ" : "Policy"} ·{" "}
-                      {entry.isActive ? "Active" : "Inactive"}
+                    <div className="flex flex-wrap items-center gap-2">
+                      <p className="font-semibold text-ink">{entry.title}</p>
+                      <span className="badge badge-neutral">
+                        {entry.entryType === "faq" ? "FAQ" : "Policy"}
+                      </span>
+                      <span
+                        className={`badge ${
+                          entry.isActive ? "badge-booked" : "badge-neutral"
+                        }`}
+                      >
+                        {entry.isActive ? "Active" : "Inactive"}
+                      </span>
+                    </div>
+                    <p className="mt-1.5 max-w-2xl text-sm leading-6 text-ink-soft">
+                      {entry.answer}
                     </p>
-                    <div className="mt-2 flex gap-3">
+                    <div className="mt-2 flex gap-3 py-1">
                       <button
                         type="button"
                         onClick={() => setEditingKnowledge(entry)}
-                        className="text-sm font-semibold text-accent-ink"
+                        className="btn btn-quiet"
                       >
                         Edit
                       </button>
@@ -1124,7 +1144,7 @@ export function BusinessSettings() {
                           onClick={() =>
                             void deactivate("knowledge", entry.id)
                           }
-                          className="text-sm font-semibold text-danger-ink disabled:opacity-60"
+                          className="btn btn-danger-quiet"
                         >
                           Deactivate
                         </button>
