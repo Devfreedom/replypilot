@@ -13,6 +13,7 @@ import {
 } from "./auth/config.js";
 import { createBusinessRouter } from "./business/routes.js";
 import { createLeadsRouter } from "./leads/routes.js";
+import { createConversationsRouter } from "./whatsapp/conversation-routes.js";
 import { createWhatsAppInboxRouter } from "./whatsapp/inbox-routes.js";
 import type { WhatsAppIntegrationConfig } from "./whatsapp/types.js";
 import { createWhatsAppWebhookRouter } from "./whatsapp/webhook-routes.js";
@@ -81,6 +82,7 @@ export function createApp({
   );
   app.use("/api/business", createBusinessRouter({ pool, auth }));
   app.use("/api/whatsapp", createWhatsAppInboxRouter({ pool, auth }));
+  app.use("/api/conversations", createConversationsRouter({ pool, auth }));
 
   app.use((_request: Request, response: Response) => {
     response.status(404).json({ error: "Not found" });

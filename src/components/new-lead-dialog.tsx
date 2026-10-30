@@ -12,28 +12,30 @@ export type NewLeadValues = {
 
 type FieldErrors = Partial<Record<keyof NewLeadValues, string>>;
 
-const inputClassName =
-  "w-full rounded-xl border border-slate-200 bg-white px-3.5 py-3 text-sm outline-none placeholder:text-slate-400 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 aria-[invalid=true]:border-red-400";
+const inputClassName = "input";
 
 function Field({
   id,
   label,
   error,
+  hint,
   children,
 }: {
   id: string;
   label: string;
   error?: string;
+  hint?: string;
   children: React.ReactNode;
 }) {
   return (
     <div>
-      <label htmlFor={id} className="mb-2 block text-sm font-medium text-slate-700">
+      <label htmlFor={id} className="field-label mb-1.5 block">
         {label}
       </label>
       {children}
+      {hint ? <p className="help-text">{hint}</p> : null}
       {error ? (
-        <p id={`${id}-error`} role="alert" className="mt-1.5 text-xs text-red-600">
+        <p id={`${id}-error`} role="alert" className="mt-1.5 text-xs font-medium text-danger-ink">
           {error}
         </p>
       ) : null}
@@ -143,14 +145,14 @@ export function NewLeadDialog({
       onClose={onClose}
       onClick={handleBackdropClick}
       aria-labelledby="new-lead-title"
-      className="m-auto w-[calc(100%-2rem)] max-w-lg rounded-2xl bg-white p-6 text-slate-900 shadow-2xl backdrop:bg-slate-950/40 sm:p-8"
+      className="m-auto max-h-[90dvh] w-[calc(100%-2rem)] max-w-lg overflow-y-auto rounded-2xl bg-raised p-6 text-ink shadow-2xl sm:p-8"
     >
       <div className="flex items-start justify-between gap-4">
         <div>
-          <h2 id="new-lead-title" className="text-xl font-bold text-slate-950">
+          <h2 id="new-lead-title" className="text-xl font-bold text-ink">
             Add a new lead
           </h2>
-          <p className="mt-2 text-sm leading-6 text-slate-500">
+          <p className="mt-2 text-sm leading-6 text-ink-soft">
             Record a customer enquiry to keep it organised.
           </p>
         </div>
@@ -158,7 +160,7 @@ export function NewLeadDialog({
           type="button"
           onClick={() => dialogRef.current?.close()}
           aria-label="Close form"
-          className="rounded-lg px-3 py-1 text-xl text-slate-400 hover:bg-slate-100 hover:text-slate-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
+          className="rounded-lg px-3 py-1 text-2xl leading-none text-ink-faint hover:bg-hushed hover:text-ink"
         >
           &times;
         </button>
@@ -201,7 +203,7 @@ export function NewLeadDialog({
             aria-invalid={Boolean(errors.message)}
             aria-describedby={errors.message ? "lead-message-error" : undefined}
             placeholder="What did the customer ask for?"
-            className={`${inputClassName} resize-y`}
+            className={`${inputClassName} textarea`}
           />
         </Field>
 
@@ -209,6 +211,7 @@ export function NewLeadDialog({
           id="lead-whatsapp-number"
           label="WhatsApp number (optional)"
           error={errors.whatsappNumber}
+          hint="Used only for an exact match with WhatsApp test-inbox senders."
         >
           <input
             id="lead-whatsapp-number"
@@ -223,9 +226,6 @@ export function NewLeadDialog({
             placeholder="e.g. 2348031234567"
             className={inputClassName}
           />
-          <p className="mt-1.5 text-xs text-slate-400">
-            Used only for an exact match with WhatsApp test-inbox senders.
-          </p>
         </Field>
 
         <Field
@@ -248,7 +248,10 @@ export function NewLeadDialog({
         </Field>
 
         {submitError ? (
-          <p role="alert" className="rounded-xl bg-red-50 px-3.5 py-3 text-sm text-red-700">
+          <p
+            role="alert"
+            className="rounded-xl border border-[color-mix(in_oklab,var(--rp-danger)_25%,transparent)] bg-danger-soft px-3.5 py-3 text-sm text-danger-ink"
+          >
             {submitError}
           </p>
         ) : null}
@@ -258,14 +261,14 @@ export function NewLeadDialog({
             type="button"
             onClick={() => dialogRef.current?.close()}
             disabled={isSubmitting}
-            className="rounded-xl border border-slate-200 px-4 py-3 text-sm font-semibold text-slate-600 hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
+            className="btn btn-secondary"
           >
             Cancel
           </button>
           <button
             type="submit"
             disabled={isSubmitting}
-            className="rounded-xl bg-blue-600 px-5 py-3 text-sm font-semibold text-white hover:bg-blue-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 disabled:cursor-not-allowed disabled:opacity-60"
+            className="btn btn-primary"
           >
             {isSubmitting ? "Saving…" : "Save lead"}
           </button>

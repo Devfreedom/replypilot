@@ -139,8 +139,8 @@ export function AuthForm({ mode }: { mode: AuthMode }) {
 
   if (!isLoading && user) {
     return (
-      <main className="flex min-h-screen items-center justify-center bg-slate-50 px-6">
-        <p role="status" className="text-sm text-slate-500">
+      <main className="flex min-h-screen items-center justify-center bg-canvas px-6">
+        <p role="status" className="text-sm text-ink-soft">
           Opening your workspace…
         </p>
       </main>
@@ -148,25 +148,25 @@ export function AuthForm({ mode }: { mode: AuthMode }) {
   }
 
   return (
-    <main className="flex min-h-screen items-center justify-center bg-slate-50 px-4 py-12">
+    <main className="flex min-h-screen items-center justify-center bg-canvas px-4 py-12">
       <div className="w-full max-w-md">
         <div className="mb-8 flex items-center gap-3">
-          <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-blue-600 text-lg font-bold text-white">
+          <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-accent text-lg font-bold text-on-accent">
             R
           </div>
           <div>
-            <p className="text-xl font-bold tracking-tight text-slate-950">
+            <p className="text-xl font-bold tracking-tight text-ink">
               ReplyPilot
             </p>
-            <p className="text-xs text-slate-500">Customer workflow</p>
+            <p className="text-xs text-ink-soft">Customer workflow</p>
           </div>
         </div>
 
-        <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm sm:p-8">
-          <h1 className="text-2xl font-bold tracking-tight text-slate-950">
+        <section className="card p-6 sm:p-8">
+          <h1 className="text-2xl font-bold tracking-tight text-ink">
             {isSignUp ? "Create your account" : "Sign in to ReplyPilot"}
           </h1>
-          <p className="mt-2 text-sm leading-6 text-slate-500">
+          <p className="mt-2 text-sm leading-6 text-ink-soft">
             {isSignUp
               ? "Create a business workspace for your leads, service details, and reply drafts."
               : "Access the leads and business details in your workspace."}
@@ -174,7 +174,7 @@ export function AuthForm({ mode }: { mode: AuthMode }) {
 
           <form className="mt-6 space-y-4" onSubmit={(event) => void submit(event)}>
             {isSignUp ? (
-              <label className="block text-sm font-medium text-slate-700">
+              <label className="block text-sm font-medium text-ink">
                 Your name
                 <input
                   type="text"
@@ -185,12 +185,12 @@ export function AuthForm({ mode }: { mode: AuthMode }) {
                   value={name}
                   onChange={(event) => setName(event.target.value)}
                   disabled={isSubmitting}
-                  className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-800 outline-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 disabled:opacity-60"
+                  className="input mt-1"
                 />
               </label>
             ) : null}
 
-            <label className="block text-sm font-medium text-slate-700">
+            <label className="block text-sm font-medium text-ink">
               Email address
               <input
                 type="email"
@@ -200,11 +200,11 @@ export function AuthForm({ mode }: { mode: AuthMode }) {
                 value={email}
                 onChange={(event) => setEmail(event.target.value)}
                 disabled={isSubmitting}
-                className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-800 outline-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 disabled:opacity-60"
+                className="input mt-1"
               />
             </label>
 
-            <label className="block text-sm font-medium text-slate-700">
+            <label className="block text-sm font-medium text-ink">
               Password
               <input
                 type="password"
@@ -217,12 +217,12 @@ export function AuthForm({ mode }: { mode: AuthMode }) {
                 onChange={(event) => setPassword(event.target.value)}
                 disabled={isSubmitting}
                 aria-describedby={isSignUp ? "password-help" : undefined}
-                className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-800 outline-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 disabled:opacity-60"
+                className="input mt-1"
               />
             </label>
 
             {isSignUp ? (
-              <p id="password-help" className="text-xs leading-5 text-slate-500">
+              <p id="password-help" className="text-xs leading-5 text-ink-soft">
                 Use at least 8 characters. Email verification and password
                 recovery are not configured in this development build.
               </p>
@@ -231,7 +231,7 @@ export function AuthForm({ mode }: { mode: AuthMode }) {
             {error ? (
               <p
                 role="alert"
-                className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800"
+                className="rounded-xl border border-[color-mix(in_oklab,var(--rp-danger)_25%,transparent)] bg-danger-soft px-4 py-3 text-sm text-danger-ink"
               >
                 {error}
               </p>
@@ -240,7 +240,7 @@ export function AuthForm({ mode }: { mode: AuthMode }) {
             <button
               type="submit"
               disabled={isSubmitting}
-              className="w-full rounded-xl bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
+              className="btn btn-primary w-full"
             >
               {isSubmitting
                 ? isSignUp
@@ -252,18 +252,18 @@ export function AuthForm({ mode }: { mode: AuthMode }) {
             </button>
           </form>
 
-          <p className="mt-6 border-t border-slate-100 pt-5 text-center text-sm text-slate-500">
+          <p className="mt-6 border-t border-line pt-5 text-center text-sm text-ink-soft">
             {isSignUp ? "Already have an account?" : "New to ReplyPilot?"}{" "}
             <Link
               href={isSignUp ? "/sign-in" : "/sign-up"}
-              className="font-semibold text-blue-700 hover:text-blue-800"
+              className="font-semibold text-accent-ink hover:underline"
             >
               {isSignUp ? "Sign in" : "Create an account"}
             </Link>
           </p>
         </section>
 
-        <p className="mt-5 text-center text-xs leading-5 text-slate-400">
+        <p className="mt-5 text-center text-xs leading-5 text-ink-faint">
           Sessions are stored in HTTP-only cookies. Reply generation remains a
           mock demonstration and never sends customer messages.
         </p>
