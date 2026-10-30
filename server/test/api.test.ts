@@ -40,6 +40,7 @@ import type {
   WhatsAppMessage,
 } from "../src/whatsapp/types.js";
 import { loadWhatsAppConfig } from "../src/whatsapp/config.js";
+import { normalizeWhatsAppPhoneE164 } from "../src/whatsapp/phone.js";
 import { persistInboundMessages } from "../src/whatsapp/repository.js";
 import {
   getTestDatabaseUrl,
@@ -4095,6 +4096,188 @@ test("customer migration backfills existing WhatsApp conversations and messages"
     );
     assert.equal(messages.rows[0]?.id, messageId);
     assert.equal(messages.rows[0]?.customer_id, customer.id);
+  } finally {
+    try {
+      await client.query("ROLLBACK");
+    } catch {
+      // The transaction may already be aborted by a failing migration.
+    }
+    client.release();
+  }
+});
+
+test("customer first_seen_at migration uses the earliest inbound message", async () => {
+  const schema = `customer_first_seen_${randomUUID().replaceAll("-", "")}`;
+  const migrations = (await readdir(MIGRATIONS_DIR))
+    .filter((file) => /^\d+_.+\.sql$/.test(file))
+    .sort();
+  const beforeCustomerMigration = migrations.filter(
+    (file) => Number.parseInt(file.slice(0, 3), 10) < 9,
+  );
+  const customerMigration = migrations.filter(
+    (file) => Number.parseInt(file.slice(0, 3), 10) === 9,
+  );
+  const firstSeenMigration = migrations.filter(
+    (file) => Number.parseInt(file.slice(0, 3), 10) === 10,
+  );
+  const client = await pool.connect();
+  const conversationId = "41000000-0000-4000-8000-000000000001";
+  const firstMessageId = "41000000-0000-4000-8000-000000000002";
+  const secondMessageId = "41000000-0000-4000-8000-000000000003";
+  const emptyConversationId = "41000000-0000-4000-8000-000000000004";
+
+  try {
+    await client.query("BEGIN");
+    await client.query(`CREATE SCHEMA "${schema}"`);
+    await client.query(`SET LOCAL search_path TO "${schema}"`);
+
+    for (const file of beforeCustomerMigration) {
+      await client.query(await readFile(join(MIGRATIONS_DIR, file), "utf8"));
+    }
+
+    // A customer with two inbound messages: 09:00 is the true first-seen time.
+    await client.query(
+      `
+        INSERT INTO whatsapp_conversations (
+          id, workspace_id, phone_number_id, customer_wa_id, contact_name,
+          last_message_at
+        )
+        VALUES ($1, $2, '123456789012345', '2348012345678',
+                'Multi Message Customer', '2026-05-01T10:00:00Z')
+      `,
+      [conversationId, LEGACY_WORKSPACE_ID],
+    );
+    await client.query(
+      `
+        INSERT INTO whatsapp_messages (
+          id, workspace_id, conversation_id, provider_message_id,
+          direction, message_type, text_content, provider_timestamp
+        )
+        VALUES ($1, $2, $3, 'wamid.first-seen.one', 'inbound', 'text',
+                'First', '2026-05-01T09:00:00Z')
+      `,
+      [firstMessageId, LEGACY_WORKSPACE_ID, conversationId],
+    );
+    await client.query(
+      `
+        INSERT INTO whatsapp_messages (
+          id, workspace_id, conversation_id, provider_message_id,
+          direction, message_type, text_content, provider_timestamp
+        )
+        VALUES ($1, $2, $3, 'wamid.first-seen.two', 'inbound', 'text',
+                'Second', '2026-05-01T10:00:00Z')
+      `,
+      [secondMessageId, LEGACY_WORKSPACE_ID, conversationId],
+    );
+
+    // A second customer with no messages, to exercise the created_at fallback.
+    await client.query(
+      `
+        INSERT INTO whatsapp_conversations (
+          id, workspace_id, phone_number_id, customer_wa_id, contact_name,
+          last_message_at, created_at
+        )
+        VALUES ($1, $2, '123456789012345', '16505551234',
+                'No Message Customer', NULL, '2026-04-01T08:00:00Z')
+      `,
+      [emptyConversationId, LEGACY_WORKSPACE_ID],
+    );
+
+    for (const file of customerMigration) {
+      await client.query(await readFile(join(MIGRATIONS_DIR, file), "utf8"));
+    }
+
+    // Reproduce the historical bug: 009 used the last activity for both
+    // customers, so the first-seen value is the most recent message time.
+    await client.query(
+      `
+        UPDATE customers
+        SET first_seen_at = '2026-05-01T10:00:00Z'
+        WHERE phone_e164 = '+2348012345678'
+      `,
+    );
+    await client.query(
+      `
+        UPDATE customers
+        SET first_seen_at = '2026-05-01T00:00:00Z'
+        WHERE phone_e164 = '+16505551234'
+      `,
+    );
+
+    for (const file of firstSeenMigration) {
+      await client.query(await readFile(join(MIGRATIONS_DIR, file), "utf8"));
+    }
+
+    const customers = await client.query<{
+      id: string;
+      phone_e164: string;
+      first_seen_at: Date;
+      last_seen_at: Date;
+      created_at: Date;
+    }>(
+      `
+        SELECT id, phone_e164, first_seen_at, last_seen_at, created_at
+        FROM customers
+        ORDER BY phone_e164
+      `,
+    );
+    const multi = customers.rows.find(
+      (row) => row.phone_e164 === "+2348012345678",
+    );
+    const empty = customers.rows.find(
+      (row) => row.phone_e164 === "+16505551234",
+    );
+    assert.ok(multi);
+    assert.ok(empty);
+    assert.equal(
+      multi.first_seen_at.toISOString(),
+      "2026-05-01T09:00:00.000Z",
+    );
+    assert.equal(
+      multi.last_seen_at.toISOString(),
+      "2026-05-01T10:00:00.000Z",
+    );
+    assert.equal(
+      empty.first_seen_at.toISOString(),
+      empty.created_at.toISOString(),
+    );
+
+    // Relationships and message identity are unchanged.
+    const messages = await client.query<{
+      id: string;
+      conversation_id: string;
+      customer_id: string;
+    }>(
+      `
+        SELECT id, conversation_id, customer_id
+        FROM whatsapp_messages
+        ORDER BY provider_timestamp ASC, id ASC
+      `,
+    );
+    assert.equal(messages.rows.length, 2);
+    assert.equal(messages.rows[0]?.id, firstMessageId);
+    assert.equal(messages.rows[1]?.id, secondMessageId);
+    assert.equal(messages.rows[0]?.conversation_id, conversationId);
+    assert.equal(messages.rows[0]?.customer_id, multi.id);
+    assert.equal(messages.rows[1]?.customer_id, multi.id);
+
+    const conversations = await client.query<{ count: number }>(
+      "SELECT count(*)::int AS count FROM whatsapp_conversations",
+    );
+    assert.equal(conversations.rows[0]?.count, 2);
+
+    // Re-running the correction is a no-op.
+    for (const file of firstSeenMigration) {
+      await client.query(await readFile(join(MIGRATIONS_DIR, file), "utf8"));
+    }
+    const afterRerun = await client.query<{ first_seen_at: Date }>(
+      "SELECT first_seen_at FROM customers WHERE id = $1",
+      [multi.id],
+    );
+    assert.equal(
+      afterRerun.rows[0]?.first_seen_at.toISOString(),
+      "2026-05-01T09:00:00.000Z",
+    );
   } finally {
     try {
       await client.query("ROLLBACK");
