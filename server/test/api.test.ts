@@ -5737,6 +5737,13 @@ test("customer identity comes from normalized phone numbers, not provider identi
       text: "Second BSUID message",
       providerTimestamp: new Date("2026-10-01T09:03:00.000Z"),
     }),
+    inboundMessage({
+      senderWaId: "ABC12345678",
+      senderPhoneNumber: null,
+      contactName: "Alphanumeric Customer",
+      text: "Alphanumeric provider message",
+      providerTimestamp: new Date("2026-10-01T09:04:00.000Z"),
+    }),
   ]);
 
   const customers = await pool.query<{
@@ -5752,7 +5759,7 @@ test("customer identity comes from normalized phone numbers, not provider identi
     `,
     [workspaceId],
   );
-  assert.equal(customers.rows.length, 2);
+  assert.equal(customers.rows.length, 3);
   assert.deepEqual(
     customers.rows.map((row) => ({
       phone_e164: row.phone_e164,
@@ -5761,10 +5768,13 @@ test("customer identity comes from normalized phone numbers, not provider identi
     [
       { phone_e164: "+2348031234567", provider_contact_id: null },
       { phone_e164: null, provider_contact_id: "US.12345" },
+      { phone_e164: null, provider_contact_id: "ABC12345678" },
     ],
   );
   assert.equal(
-    customers.rows.some((row) => row.phone_e164 === "+12345"),
+    customers.rows.some(
+      (row) => row.phone_e164 === "+12345" || row.phone_e164 === "+12345678",
+    ),
     false,
   );
 
@@ -5774,8 +5784,12 @@ test("customer identity comes from normalized phone numbers, not provider identi
   const bsui = customers.rows.find(
     (row) => row.provider_contact_id === "US.12345",
   );
+  const alphanumeric = customers.rows.find(
+    (row) => row.provider_contact_id === "ABC12345678",
+  );
   assert.ok(nigerian);
   assert.ok(bsui);
+  assert.ok(alphanumeric);
 
   const messages = await pool.query<{ customer_id: string }>(
     `
@@ -5788,7 +5802,7 @@ test("customer identity comes from normalized phone numbers, not provider identi
   );
   assert.deepEqual(
     messages.rows.map((row) => row.customer_id),
-    [nigerian.id, nigerian.id, bsui.id, bsui.id],
+    [nigerian.id, nigerian.id, bsui.id, bsui.id, alphanumeric.id],
   );
 });
 
