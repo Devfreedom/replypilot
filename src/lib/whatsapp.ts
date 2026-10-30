@@ -183,10 +183,10 @@ export function conversationInitials(
   conversation: WhatsAppConversation,
 ): string {
   const name = conversationDisplayName(conversation);
-  const letters = name.replace(/[^A-Za-z]/g, "");
+  const letters = name.match(/\p{L}/gu);
 
-  if (letters) {
-    return letters.slice(0, 2).toUpperCase();
+  if (letters && letters.length > 0) {
+    return letters.slice(0, 2).join("").toUpperCase();
   }
 
   const digits = name.replace(/\D/g, "");

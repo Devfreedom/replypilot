@@ -4,6 +4,7 @@ import {
   CONVERSATION_FILTERS,
   conversationDisplayName,
   conversationIdentity,
+  conversationInitials,
   conversationPreview,
   mergeConversations,
   mergeMessages,
@@ -116,6 +117,23 @@ test("conversation identity falls back from name to phone to provider ID", () =>
     label: "Customer",
     value: BASE_CONVERSATION.customer.id,
   });
+
+  assert.equal(conversationInitials(conversation()), "SN");
+  assert.equal(conversationInitials(phoneOnly), "67");
+  assert.equal(conversationInitials(providerOnly), "US");
+  assert.equal(
+    conversationInitials(
+      conversation({
+        customer: {
+          id: BASE_CONVERSATION.customer.id,
+          displayName: "张伟",
+          phoneE164: null,
+          providerContactId: null,
+        },
+      }),
+    ),
+    "张伟",
+  );
 });
 
 test("conversation preview handles text, empty, and unsupported messages", () => {

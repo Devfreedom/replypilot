@@ -1,23 +1,21 @@
-# Milestone 11B — Message History Cursor Pagination Design
+# Milestone 11B — Message History Cursor Pagination
 
-Status: design note only. The corrective patch for 11A deliberately keeps the
-existing offset pagination; this document defines the cursor contract that 11B
-should implement.
+Status: implemented in Milestone 11B.
 
 ## Why a cursor is needed
 
-Message history is currently read with `LIMIT`/`OFFSET` and the stable ordering
-tuple:
+Message history was previously read with `LIMIT`/`OFFSET` and the stable
+ordering tuple:
 
 ```sql
 ORDER BY provider_timestamp ASC, created_at ASC, id ASC
 ```
 
-Offset pagination is deterministic for equal timestamps (the `id` tiebreaker is
-unique), but it is not stable while messages are being written. If a new message
-arrives between page 1 and page 2, the offset shifts and a client can see a
-duplicate message or skip one. A chat thread that loads while messages arrive
-needs a cursor that is anchored to the last row the client actually received.
+Offset pagination is deterministic for equal timestamps because `id` is unique,
+but it is not stable while messages are being written. If a new message arrives
+between page 1 and page 2, the offset shifts and a client can see a duplicate
+message or skip one. A chat thread that loads while messages arrive needs a
+cursor anchored to a row the client actually received.
 
 ## Ordering tuple
 
@@ -37,100 +35,141 @@ whatsapp_messages_conversation_timestamp_idx
 
 supports both the forward scan and the tuple filter.
 
-Important detail: messages inserted in one webhook transaction share the same
-`created_at` because PostgreSQL `now()` is the transaction start time. For those
-batches the `id` column is the real tiebreaker. The cursor must therefore carry
-all three values; a timestamp-only cursor would skip or repeat equal-timestamp
-messages.
+Messages inserted in one webhook transaction share the same `created_at`
+because PostgreSQL `now()` is the transaction start time. For those batches the
+`id` column is the real tiebreaker. The cursor therefore carries all three
+values; a timestamp-only cursor would skip or repeat equal-timestamp messages.
 
 ## Cursor encoding
 
-Encode the tuple as an opaque, URL-safe token:
+The cursor is an opaque, URL-safe token:
 
 ```text
 base64url(JSON.stringify({
-  providerTimestamp: "<ISO-8601 UTC string>",
-  createdAt: "<ISO-8601 UTC string>",
+  providerTimestampUs: "<epoch microseconds as a decimal string>",
+  createdAtUs: "<epoch microseconds as a decimal string>",
   id: "<UUID>"
 }))
 ```
 
+PostgreSQL timestamps keep microsecond precision, while a JavaScript `Date` and
+`toISOString()` keep only milliseconds. Encoding epoch microseconds as decimal
+strings preserves the exact database value. The API still returns human-readable
+ISO timestamps with millisecond precision for display; the cursor is built from
+separate `extract(epoch ...) * 1000000` values in the SQL query.
+
 Rules:
 
-- Treat the cursor as opaque on the client. Do not document the JSON shape as a
-  stable public contract; it may change as long as old cursors remain readable
-  for a reasonable window.
-- Validate the decoded value with Zod: ISO timestamps that parse to a valid
-  date, and a UUID for `id`. Reject malformed cursors with `400`.
-- The cursor is scoped by the route's authenticated workspace and the
-  conversation ID in the path. A cursor from another conversation or workspace
-  is not a security boundary by itself, but the query must still include
-  `workspace_id` and `conversation_id` in the `WHERE` clause.
-- Never interpolate the decoded values into SQL. Use parameter placeholders in a
-  row-value comparison:
+- Treat the cursor as opaque on the client.
+- Validate the decoded value with Zod: decimal epoch-microsecond strings and a
+  UUID. Reject malformed cursors with `400`.
+- A cursor is accepted only when it points at a real message in the requested
+  conversation. This rejects cursors from another conversation or a deleted
+  anchor row without revealing whether the message exists elsewhere.
+- Every query includes `workspace_id` and `conversation_id` in the `WHERE`
+  clause. The route first resolves the conversation summary for the
+  authenticated workspace and returns `404` when it is not found.
+- Never interpolate decoded values into SQL. Use parameter placeholders and
+  exact epoch-microsecond timestamps:
 
 ```sql
 WHERE workspace_id = $1
   AND conversation_id = $2
-  AND (provider_timestamp, created_at, id) > ($3, $4, $5)
-ORDER BY provider_timestamp ASC, created_at ASC, id ASC
+  AND (provider_timestamp, created_at, id) < (
+    TIMESTAMPTZ 'epoch' + $3::bigint * INTERVAL '1 microsecond',
+    TIMESTAMPTZ 'epoch' + $4::bigint * INTERVAL '1 microsecond',
+    $5::uuid
+  )
+ORDER BY provider_timestamp DESC, created_at DESC, id DESC
 LIMIT $6
 ```
 
-## Endpoint shape
+## Endpoint contract
 
-Keep the existing `GET /api/conversations/:id/messages` route and add cursor
-parameters rather than introducing a second route:
+The existing route is extended rather than duplicated:
 
-- `limit` — unchanged, 1..100, default 25.
-- `cursor` — optional opaque token. Omitted means "start at the beginning" for
-  the initial load.
-- `direction` — optional, `after` (default) or `before`.
-  - `after` uses `>` and ascending order: load newer messages, typically for a
-    live tail.
-  - `before` uses `<` and descending order: load older history for an
-    infinite-scroll-up chat view. Reverse the returned page before rendering so
-    the client still displays ascending order.
+```text
+GET /api/conversations/:conversationId/messages
+```
 
-Response:
+Query parameters:
+
+- `limit` — 1..100, default 25.
+- `offset` — optional legacy offset. When neither `cursor` nor `direction` is
+  supplied, the route keeps the original oldest-first offset contract.
+- `cursor` — optional opaque token.
+- `direction` — optional, `before` or `after`. Supplying `direction` (with or
+  without a cursor) enables cursor mode.
+
+Cursor mode behavior:
+
+| Request | Result |
+| --- | --- |
+| `direction=before` (no cursor) | Newest page, ascending display order |
+| `direction=after` (no cursor) | Oldest page, ascending display order |
+| `direction=before&cursor=...` | Older page, ascending display order |
+| `direction=after&cursor=...` | Newer page, ascending display order |
+
+The frontend initial load uses `direction=before` with no cursor, so the first
+paint shows the newest messages. "Load older messages" then uses
+`direction=before&cursor=<prevCursor>`.
+
+Cursor-mode response:
 
 ```json
 {
+  "conversation": {},
   "messages": [],
   "pagination": {
     "limit": 25,
     "hasMore": true,
     "nextCursor": "<opaque or null>",
-    "prevCursor": "<opaque or null>"
+    "prevCursor": "<opaque or null>",
+    "direction": "before"
   }
 }
 ```
 
-`hasMore` is derived the same way as today: fetch `limit + 1` rows, return
-`limit`, and set `hasMore` when the extra row exists. `nextCursor` is the tuple
-of the last returned row; `prevCursor` is the tuple of the first returned row.
-Return `null` when the corresponding direction has no more rows.
+`hasMore` is derived by fetching `limit + 1` rows, returning `limit`, and setting
+`hasMore` when the extra row exists. `hasMore` always refers to the requested
+direction.
 
-## Compatibility and migration
+- `prevCursor` loads older messages. It is `null` when the page has reached the
+  beginning of the conversation.
+- `nextCursor` loads newer messages. It is `null` when the page has reached the
+  newest message available at request time.
+- Pages are always returned in ascending chronological order for display,
+  including `before` pages that were fetched with a descending scan.
 
-- The 11A offset parameters (`offset`) can remain temporarily for existing
-  clients. If both `cursor` and `offset` are supplied, reject the request with
-  `400` rather than guessing.
-- Once the frontend chat view uses cursors, remove the offset path in a later
-  change. Do not silently change the meaning of `offset`.
-- The conversation list (`GET /api/conversations`) has the same offset
-  instability. It can be migrated to a cursor on
-  `(last_activity, id)` in a follow-up; that is a separate ordering key from
-  message history and should not reuse the message cursor token.
+## Compatibility
 
-## Test plan for 11B
+- The original offset contract is preserved exactly when neither `cursor` nor
+  `direction` is supplied. Existing tests and clients continue to receive
+  `{ limit, offset, hasMore, nextOffset }` and oldest-first rows.
+- Supplying both `cursor` and `offset` is rejected with `400`. Supplying
+  `direction` and `offset` is also rejected rather than guessing which mode the
+  client intended.
+- The legacy `/api/whatsapp/conversations` routes are unchanged.
+- The conversation list (`GET /api/conversations`) still uses offset pagination.
+  It has the same theoretical instability, but it is a separate ordering key
+  (`last activity`, `id`) and is not part of this milestone's message cursor.
 
-- Equal-timestamp messages: page through with cursors and assert every message
-  appears exactly once, in the same order as the database tuple.
-- Insert a new message between pages and assert the second page does not repeat
-  or skip rows.
-- Reject malformed, truncated, and wrong-conversation cursors with `400`/`404`.
-- Verify `before` returns older rows in descending order and the client-side
-  reversal produces ascending display order.
-- Verify the query plan uses
-  `whatsapp_messages_conversation_timestamp_idx` for a large conversation.
+## Database changes
+
+No migration was required. The existing `whatsapp_messages` table already has
+`provider_timestamp`, `created_at`, and `id`; the existing
+`whatsapp_messages_conversation_timestamp_idx` supports the keyset query and
+the tuple membership check.
+
+## Test coverage
+
+The API suite covers:
+
+- Newest-first initial page and older pages via `prevCursor`.
+- Forward pagination via `nextCursor` / `direction=after`.
+- Equal-timestamp messages with no duplicates and database-consistent order.
+- A new message arriving between pages without shifting or skipping older rows.
+- Malformed, empty, conflicting, and wrong-conversation cursors returning `400`.
+- Unauthenticated requests returning `401`.
+- Cross-workspace conversation access returning `404`.
+- Summary identity fields for phone and provider-ID customers, plus lead links.
