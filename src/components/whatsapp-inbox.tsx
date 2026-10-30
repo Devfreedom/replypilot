@@ -326,7 +326,7 @@ function ConversationThread({
   useIsomorphicLayoutEffect(() => {
     const container = scrollRef.current;
 
-    if (!container) {
+    if (!container || messages.length === 0) {
       return;
     }
 
@@ -857,6 +857,7 @@ export function WhatsAppInbox() {
                 {conversations.map((conversation) => {
                   const selected =
                     conversation.id === selectedConversationId;
+                  const displayName = conversationDisplayName(conversation);
                   const identity = conversationIdentity(conversation);
 
                   return (
@@ -879,7 +880,7 @@ export function WhatsAppInbox() {
                                 selected ? "text-accent-ink" : "text-ink"
                               }`}
                             >
-                              {conversationDisplayName(conversation)}
+                              {displayName}
                             </span>
                             {conversation.lastMessageAt ? (
                               <time
@@ -902,9 +903,11 @@ export function WhatsAppInbox() {
                                 Linked lead
                               </span>
                             ) : null}
-                            <span className="max-w-full truncate text-[11px] text-ink-faint">
-                              {identity.value}
-                            </span>
+                            {identity.value !== displayName ? (
+                              <span className="max-w-full truncate text-[11px] text-ink-faint">
+                                {identity.value}
+                              </span>
+                            ) : null}
                           </span>
                         </span>
                       </button>
