@@ -556,9 +556,11 @@ export async function persistInboundMessages(
         message.phoneNumberId,
       );
 
-      const phoneE164 = normalizeWhatsAppPhoneE164(
-        message.senderPhoneNumber ?? message.senderWaId,
-      );
+      // Only an actual sender phone number may become a customer's E.164
+      // identity. `senderWaId` can be a business-scoped user ID (BSUID) or
+      // another provider identifier; feeding it to the phone normalizer would
+      // risk fabricating a phone number from an identifier.
+      const phoneE164 = normalizeWhatsAppPhoneE164(message.senderPhoneNumber);
       // Keep the original provider identifier when it is not just the phone
       // number (for example a business-scoped WhatsApp user ID).
       const providerContactId =
