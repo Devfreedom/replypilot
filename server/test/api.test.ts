@@ -6195,3 +6195,541 @@ test("GET /api/conversations/:id/messages paginates stably and stays workspace-s
     error: "Conversation not found",
   });
 });
+
+test("GET /api/conversations/:id/messages cursor-paginates the newest messages and older pages", async () => {
+  const workspaceId = requireSession().workspace.id;
+
+  await persistInboundMessages(pool, workspaceId, [
+    inboundMessage({
+      text: "First",
+      providerTimestamp: new Date("2026-10-01T09:00:00.000Z"),
+    }),
+    inboundMessage({
+      text: "Second",
+      providerTimestamp: new Date("2026-10-01T10:00:00.000Z"),
+    }),
+    inboundMessage({
+      text: "Third",
+      providerTimestamp: new Date("2026-10-01T11:00:00.000Z"),
+    }),
+    inboundMessage({
+      text: "Fourth",
+      providerTimestamp: new Date("2026-10-01T12:00:00.000Z"),
+    }),
+    inboundMessage({
+      text: "Fifth",
+      providerTimestamp: new Date("2026-10-01T13:00:00.000Z"),
+    }),
+  ]);
+
+  const stored = await pool.query<{ id: string }>(
+    "SELECT id FROM whatsapp_conversations WHERE workspace_id = $1",
+    [workspaceId],
+  );
+  const conversationId = stored.rows[0]?.id;
+  assert.ok(conversationId);
+
+  const newest = await readJson<ConversationCursorMessagesPayload>(
+    await fetch(
+      `${baseUrl}/api/conversations/${conversationId}/messages?limit=2&direction=before`,
+    ),
+  );
+  assert.deepEqual(
+    newest.messages.map((message) => message.text),
+    ["Fourth", "Fifth"],
+  );
+  assert.deepEqual(
+    {
+      limit: newest.pagination.limit,
+      hasMore: newest.pagination.hasMore,
+      direction: newest.pagination.direction,
+      nextCursor: newest.pagination.nextCursor,
+    },
+    { limit: 2, hasMore: true, direction: "before", nextCursor: null },
+  );
+  const newestOlderCursor = newest.pagination.prevCursor;
+  assert.ok(newestOlderCursor);
+
+  const middle = await readJson<ConversationCursorMessagesPayload>(
+    await fetch(
+      `${baseUrl}/api/conversations/${conversationId}/messages?limit=2&direction=before&cursor=${encodeURIComponent(newestOlderCursor)}`,
+    ),
+  );
+  assert.deepEqual(
+    middle.messages.map((message) => message.text),
+    ["Second", "Third"],
+  );
+  assert.equal(middle.pagination.hasMore, true);
+  assert.equal(middle.pagination.direction, "before");
+  const middleOlderCursor = middle.pagination.prevCursor;
+  assert.ok(middleOlderCursor);
+  assert.ok(middle.pagination.nextCursor);
+
+  const oldest = await readJson<ConversationCursorMessagesPayload>(
+    await fetch(
+      `${baseUrl}/api/conversations/${conversationId}/messages?limit=2&direction=before&cursor=${encodeURIComponent(middleOlderCursor)}`,
+    ),
+  );
+  assert.deepEqual(
+    oldest.messages.map((message) => message.text),
+    ["First"],
+  );
+  assert.equal(oldest.pagination.hasMore, false);
+  assert.equal(oldest.pagination.prevCursor, null);
+  assert.ok(oldest.pagination.nextCursor);
+
+  const combinedOlderPages = [
+    ...oldest.messages,
+    ...middle.messages,
+    ...newest.messages,
+  ];
+  assert.deepEqual(
+    combinedOlderPages.map((message) => message.text),
+    ["First", "Second", "Third", "Fourth", "Fifth"],
+  );
+  assert.equal(
+    new Set(combinedOlderPages.map((message) => message.id)).size,
+    5,
+  );
+
+  const oldestPage = await readJson<ConversationCursorMessagesPayload>(
+    await fetch(
+      `${baseUrl}/api/conversations/${conversationId}/messages?limit=2&direction=after`,
+    ),
+  );
+  assert.deepEqual(
+    oldestPage.messages.map((message) => message.text),
+    ["First", "Second"],
+  );
+  assert.equal(oldestPage.pagination.hasMore, true);
+  assert.equal(oldestPage.pagination.prevCursor, null);
+  const firstNewerCursor = oldestPage.pagination.nextCursor;
+  assert.ok(firstNewerCursor);
+
+  const newerPage = await readJson<ConversationCursorMessagesPayload>(
+    await fetch(
+      `${baseUrl}/api/conversations/${conversationId}/messages?limit=2&direction=after&cursor=${encodeURIComponent(firstNewerCursor)}`,
+    ),
+  );
+  assert.deepEqual(
+    newerPage.messages.map((message) => message.text),
+    ["Third", "Fourth"],
+  );
+  assert.equal(newerPage.pagination.hasMore, true);
+  assert.equal(newerPage.pagination.direction, "after");
+  const secondNewerCursor = newerPage.pagination.nextCursor;
+  assert.ok(secondNewerCursor);
+
+  const lastPage = await readJson<ConversationCursorMessagesPayload>(
+    await fetch(
+      `${baseUrl}/api/conversations/${conversationId}/messages?limit=2&direction=after&cursor=${encodeURIComponent(secondNewerCursor)}`,
+    ),
+  );
+  assert.deepEqual(
+    lastPage.messages.map((message) => message.text),
+    ["Fifth"],
+  );
+  assert.equal(lastPage.pagination.hasMore, false);
+  assert.equal(lastPage.pagination.nextCursor, null);
+});
+
+test("cursor pagination preserves equal-timestamp ordering without duplicates", async () => {
+  const workspaceId = requireSession().workspace.id;
+  const timestamp = new Date("2026-10-01T09:00:00.000Z");
+
+  await persistInboundMessages(
+    pool,
+    workspaceId,
+    Array.from({ length: 5 }, (_, index) =>
+      inboundMessage({
+        text: `Tie ${index}`,
+        providerTimestamp: timestamp,
+      }),
+    ),
+  );
+
+  const conversation = await pool.query<{ id: string }>(
+    "SELECT id FROM whatsapp_conversations WHERE workspace_id = $1",
+    [workspaceId],
+  );
+  const conversationId = conversation.rows[0]?.id;
+  assert.ok(conversationId);
+
+  const expected = await pool.query<{ id: string }>(
+    `
+      SELECT id
+      FROM whatsapp_messages
+      WHERE workspace_id = $1
+        AND conversation_id = $2
+      ORDER BY provider_timestamp ASC, created_at ASC, id ASC
+    `,
+    [workspaceId, conversationId],
+  );
+  assert.equal(expected.rows.length, 5);
+
+  const newest = await readJson<ConversationCursorMessagesPayload>(
+    await fetch(
+      `${baseUrl}/api/conversations/${conversationId}/messages?limit=2&direction=before`,
+    ),
+  );
+  assert.deepEqual(
+    newest.messages.map((message) => message.id),
+    expected.rows.slice(3).map((row) => row.id),
+  );
+  const newestOlderCursor = newest.pagination.prevCursor;
+  assert.ok(newestOlderCursor);
+
+  const middle = await readJson<ConversationCursorMessagesPayload>(
+    await fetch(
+      `${baseUrl}/api/conversations/${conversationId}/messages?limit=2&direction=before&cursor=${encodeURIComponent(newestOlderCursor)}`,
+    ),
+  );
+  assert.deepEqual(
+    middle.messages.map((message) => message.id),
+    expected.rows.slice(1, 3).map((row) => row.id),
+  );
+  const middleOlderCursor = middle.pagination.prevCursor;
+  assert.ok(middleOlderCursor);
+
+  const oldest = await readJson<ConversationCursorMessagesPayload>(
+    await fetch(
+      `${baseUrl}/api/conversations/${conversationId}/messages?limit=2&direction=before&cursor=${encodeURIComponent(middleOlderCursor)}`,
+    ),
+  );
+  assert.deepEqual(
+    oldest.messages.map((message) => message.id),
+    expected.rows.slice(0, 1).map((row) => row.id),
+  );
+  assert.equal(oldest.pagination.hasMore, false);
+
+  const combined = [
+    ...oldest.messages,
+    ...middle.messages,
+    ...newest.messages,
+  ];
+  assert.deepEqual(
+    combined.map((message) => message.id),
+    expected.rows.map((row) => row.id),
+  );
+  assert.equal(new Set(combined.map((message) => message.id)).size, 5);
+});
+
+test("cursor pagination stays stable when a new message arrives between pages", async () => {
+  const workspaceId = requireSession().workspace.id;
+
+  await persistInboundMessages(pool, workspaceId, [
+    inboundMessage({
+      text: "First",
+      providerTimestamp: new Date("2026-10-01T09:00:00.000Z"),
+    }),
+    inboundMessage({
+      text: "Second",
+      providerTimestamp: new Date("2026-10-01T10:00:00.000Z"),
+    }),
+    inboundMessage({
+      text: "Third",
+      providerTimestamp: new Date("2026-10-01T11:00:00.000Z"),
+    }),
+    inboundMessage({
+      text: "Fourth",
+      providerTimestamp: new Date("2026-10-01T12:00:00.000Z"),
+    }),
+  ]);
+
+  const conversation = await pool.query<{ id: string }>(
+    "SELECT id FROM whatsapp_conversations WHERE workspace_id = $1",
+    [workspaceId],
+  );
+  const conversationId = conversation.rows[0]?.id;
+  assert.ok(conversationId);
+
+  const newest = await readJson<ConversationCursorMessagesPayload>(
+    await fetch(
+      `${baseUrl}/api/conversations/${conversationId}/messages?limit=2&direction=before`,
+    ),
+  );
+  assert.deepEqual(
+    newest.messages.map((message) => message.text),
+    ["Third", "Fourth"],
+  );
+  const olderCursor = newest.pagination.prevCursor;
+  assert.ok(olderCursor);
+
+  await persistInboundMessages(pool, workspaceId, [
+    inboundMessage({
+      text: "Arrived later",
+      providerTimestamp: new Date("2026-10-01T13:00:00.000Z"),
+    }),
+  ]);
+
+  const older = await readJson<ConversationCursorMessagesPayload>(
+    await fetch(
+      `${baseUrl}/api/conversations/${conversationId}/messages?limit=2&direction=before&cursor=${encodeURIComponent(olderCursor)}`,
+    ),
+  );
+  assert.deepEqual(
+    older.messages.map((message) => message.text),
+    ["First", "Second"],
+  );
+  assert.equal(older.pagination.hasMore, false);
+
+  const firstFour = [...older.messages, ...newest.messages];
+  assert.deepEqual(
+    firstFour.map((message) => message.text),
+    ["First", "Second", "Third", "Fourth"],
+  );
+  assert.equal(new Set(firstFour.map((message) => message.id)).size, 4);
+
+  const newerCursor = older.pagination.nextCursor;
+  assert.ok(newerCursor);
+  const newer = await readJson<ConversationCursorMessagesPayload>(
+    await fetch(
+      `${baseUrl}/api/conversations/${conversationId}/messages?limit=2&direction=after&cursor=${encodeURIComponent(newerCursor)}`,
+    ),
+  );
+  assert.deepEqual(
+    newer.messages.map((message) => message.text),
+    ["Third", "Fourth"],
+  );
+  assert.equal(newer.pagination.hasMore, true);
+  const latestCursor = newer.pagination.nextCursor;
+  assert.ok(latestCursor);
+
+  const latest = await readJson<ConversationCursorMessagesPayload>(
+    await fetch(
+      `${baseUrl}/api/conversations/${conversationId}/messages?limit=2&direction=after&cursor=${encodeURIComponent(latestCursor)}`,
+    ),
+  );
+  assert.deepEqual(
+    latest.messages.map((message) => message.text),
+    ["Arrived later"],
+  );
+  assert.equal(latest.pagination.hasMore, false);
+
+  const allMessages = [
+    ...older.messages,
+    ...newest.messages,
+    ...newer.messages,
+    ...latest.messages,
+  ];
+  const uniqueMessages = new Map(
+    allMessages.map((message) => [message.id, message]),
+  );
+  assert.equal(uniqueMessages.size, 5);
+  assert.deepEqual(
+    [...uniqueMessages.values()].map((message) => message.text),
+    ["First", "Second", "Third", "Fourth", "Arrived later"],
+  );
+});
+
+test("cursor pagination rejects malformed, foreign, and conflicting cursors", async () => {
+  const workspaceId = requireSession().workspace.id;
+
+  await persistInboundMessages(pool, workspaceId, [
+    inboundMessage({
+      senderWaId: "16505551234",
+      senderPhoneNumber: "16505551234",
+      text: "Alpha one",
+      providerTimestamp: new Date("2026-10-01T09:00:00.000Z"),
+    }),
+    inboundMessage({
+      senderWaId: "16505551234",
+      senderPhoneNumber: "16505551234",
+      text: "Alpha two",
+      providerTimestamp: new Date("2026-10-01T09:05:00.000Z"),
+    }),
+    inboundMessage({
+      senderWaId: "2348031234567",
+      senderPhoneNumber: "2348031234567",
+      text: "Beta one",
+      providerTimestamp: new Date("2026-10-01T10:00:00.000Z"),
+    }),
+    inboundMessage({
+      senderWaId: "2348031234567",
+      senderPhoneNumber: "2348031234567",
+      text: "Beta two",
+      providerTimestamp: new Date("2026-10-01T10:05:00.000Z"),
+    }),
+  ]);
+
+  const conversations = await pool.query<{
+    id: string;
+    customer_wa_id: string;
+  }>(
+    `
+      SELECT id, customer_wa_id
+      FROM whatsapp_conversations
+      WHERE workspace_id = $1
+      ORDER BY customer_wa_id ASC
+    `,
+    [workspaceId],
+  );
+  const alpha = conversations.rows.find(
+    (row) => row.customer_wa_id === "16505551234",
+  );
+  const beta = conversations.rows.find(
+    (row) => row.customer_wa_id === "2348031234567",
+  );
+  assert.ok(alpha);
+  assert.ok(beta);
+
+  const alphaPage = await readJson<ConversationCursorMessagesPayload>(
+    await fetch(
+      `${baseUrl}/api/conversations/${alpha.id}/messages?limit=1&direction=before`,
+    ),
+  );
+  const alphaCursor = alphaPage.pagination.prevCursor;
+  assert.ok(alphaCursor);
+
+  const foreign = await fetch(
+    `${baseUrl}/api/conversations/${beta.id}/messages?limit=1&direction=before&cursor=${encodeURIComponent(alphaCursor)}`,
+  );
+  assert.equal(foreign.status, 400);
+  assert.deepEqual(await readJson(foreign), {
+    error: "Invalid request",
+    details: [
+      { field: "cursor", message: "Cursor is invalid or expired." },
+    ],
+  });
+
+  const malformed = await fetch(
+    `${baseUrl}/api/conversations/${alpha.id}/messages?direction=before&cursor=not-a-cursor`,
+  );
+  assert.equal(malformed.status, 400);
+  assert.deepEqual(await readJson(malformed), {
+    error: "Invalid request",
+    details: [
+      { field: "cursor", message: "Cursor is invalid or expired." },
+    ],
+  });
+
+  const conflicting = await fetch(
+    `${baseUrl}/api/conversations/${alpha.id}/messages?cursor=${encodeURIComponent(alphaCursor)}&offset=0`,
+  );
+  assert.equal(conflicting.status, 400);
+
+  const directionWithOffset = await fetch(
+    `${baseUrl}/api/conversations/${alpha.id}/messages?direction=before&offset=0`,
+  );
+  assert.equal(directionWithOffset.status, 400);
+
+  const emptyCursor = await fetch(
+    `${baseUrl}/api/conversations/${alpha.id}/messages?direction=before&cursor=`,
+  );
+  assert.equal(emptyCursor.status, 400);
+});
+
+test("GET /api/conversations exposes provider contact IDs and lead links", async () => {
+  const workspaceId = requireSession().workspace.id;
+  const lead = await createDraftLead({
+    name: "Linked Lead",
+    whatsappNumber: "+1 (650) 555-1234",
+  });
+
+  await persistInboundMessages(pool, workspaceId, [
+    inboundMessage({
+      senderWaId: TEST_WHATSAPP_CUSTOMER_WA_ID,
+      senderPhoneNumber: TEST_WHATSAPP_CUSTOMER_WA_ID,
+      contactName: "Phone Customer",
+      text: "Phone message",
+      providerTimestamp: new Date("2026-10-01T09:00:00.000Z"),
+    }),
+    inboundMessage({
+      senderWaId: TEST_WHATSAPP_BSUID,
+      senderPhoneNumber: null,
+      contactName: "BSUID Customer",
+      text: "BSUID message",
+      providerTimestamp: new Date("2026-10-01T10:00:00.000Z"),
+    }),
+  ]);
+
+  const payload = await readJson<ConversationsPayload>(
+    await fetch(`${baseUrl}/api/conversations?limit=10`),
+  );
+  assert.equal(payload.conversations.length, 2);
+
+  const phoneConversation = payload.conversations.find(
+    (conversation) => conversation.customer.phoneE164 === "+16505551234",
+  );
+  const bsuidConversation = payload.conversations.find(
+    (conversation) =>
+      conversation.customer.providerContactId === TEST_WHATSAPP_BSUID,
+  );
+  assert.ok(phoneConversation);
+  assert.ok(bsuidConversation);
+
+  assert.equal(phoneConversation.customer.providerContactId, null);
+  assert.equal(phoneConversation.leadId, lead.id);
+  assert.equal(bsuidConversation.customer.phoneE164, null);
+  assert.equal(
+    bsuidConversation.customer.providerContactId,
+    TEST_WHATSAPP_BSUID,
+  );
+  assert.equal(bsuidConversation.customer.displayName, "BSUID Customer");
+  assert.equal(bsuidConversation.leadId, null);
+});
+
+test("GET /api/conversations supports archived and all status filters", async () => {
+  const workspaceId = requireSession().workspace.id;
+
+  await persistInboundMessages(pool, workspaceId, [
+    inboundMessage({
+      senderWaId: "16505551234",
+      senderPhoneNumber: "16505551234",
+      contactName: "Open Customer",
+      providerTimestamp: new Date("2026-10-01T09:00:00.000Z"),
+    }),
+    inboundMessage({
+      senderWaId: "2348031234567",
+      senderPhoneNumber: "2348031234567",
+      contactName: "Closed Customer",
+      providerTimestamp: new Date("2026-10-01T10:00:00.000Z"),
+    }),
+    inboundMessage({
+      senderWaId: "447700900123",
+      senderPhoneNumber: "447700900123",
+      contactName: "Archived Customer",
+      providerTimestamp: new Date("2026-10-01T11:00:00.000Z"),
+    }),
+  ]);
+
+  await pool.query(
+    `
+      UPDATE whatsapp_conversations
+      SET status = CASE customer_id
+        WHEN (
+          SELECT id FROM customers
+          WHERE workspace_id = $1 AND phone_e164 = '+2348031234567'
+        ) THEN 'closed'
+        WHEN (
+          SELECT id FROM customers
+          WHERE workspace_id = $1 AND phone_e164 = '+447700900123'
+        ) THEN 'archived'
+        ELSE status
+      END
+      WHERE workspace_id = $1
+    `,
+    [workspaceId],
+  );
+
+  const archived = await readJson<ConversationsPayload>(
+    await fetch(`${baseUrl}/api/conversations?status=archived`),
+  );
+  assert.deepEqual(
+    archived.conversations.map(
+      (conversation) => conversation.customer.displayName,
+    ),
+    ["Archived Customer"],
+  );
+
+  const all = await readJson<ConversationsPayload>(
+    await fetch(`${baseUrl}/api/conversations`),
+  );
+  assert.equal(all.conversations.length, 3);
+  assert.deepEqual(
+    all.conversations
+      .map((conversation) => conversation.customer.displayName)
+      .sort(),
+    ["Archived Customer", "Closed Customer", "Open Customer"],
+  );
+});
