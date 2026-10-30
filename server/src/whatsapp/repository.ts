@@ -1,9 +1,11 @@
 import type { Pool, PoolClient } from "pg";
+import { encodeMessageCursor, type MessageCursor } from "./cursor.js";
 import { normalizeWhatsAppPhoneE164 } from "./phone.js";
 import type {
   ConversationStatus,
   ConversationSummary,
   InboundWhatsAppMessage,
+  MessagePageDirection,
   PersistInboundResult,
   WhatsAppConversation,
   WhatsAppMessage,
@@ -35,15 +37,23 @@ type MessageRow = Readonly<{
   created_at: Date;
 }>;
 
+type CursorMessageRow = MessageRow &
+  Readonly<{
+    provider_timestamp_us: string;
+    created_at_us: string;
+  }>;
+
 type ConversationSummaryRow = Readonly<{
   id: string;
   customer_id: string;
   customer_display_name: string | null;
   customer_phone_e164: string | null;
+  customer_provider_contact_id: string | null;
   whatsapp_connection_id: string;
   phone_number_id: string;
   channel: "whatsapp";
   status: ConversationStatus;
+  lead_id: string | null;
   last_message_at: Date | null;
   last_message_preview: string | null;
   last_message_type: string | null;
@@ -86,10 +96,12 @@ const CONVERSATION_SUMMARY_SELECT = `
     conversation.customer_id,
     COALESCE(customer.display_name, conversation.contact_name) AS customer_display_name,
     customer.phone_e164 AS customer_phone_e164,
+    customer.provider_contact_id AS customer_provider_contact_id,
     conversation.whatsapp_connection_id,
     conversation.phone_number_id,
     conversation.channel,
     conversation.status,
+    conversation.lead_id,
     latest.provider_timestamp AS last_message_at,
     left(latest.text_content, 160) AS last_message_preview,
     latest.message_type AS last_message_type,
@@ -154,11 +166,13 @@ function mapConversationSummaryRow(
       id: row.customer_id,
       displayName: row.customer_display_name,
       phoneE164: row.customer_phone_e164,
+      providerContactId: row.customer_provider_contact_id,
     },
     whatsappConnectionId: row.whatsapp_connection_id,
     phoneNumberId: row.phone_number_id,
     channel: row.channel,
     status: row.status,
+    leadId: row.lead_id,
     lastMessageAt: row.last_message_at
       ? row.last_message_at.toISOString()
       : null,
@@ -794,5 +808,170 @@ export async function listMessagesForConversationPage(
   return {
     messages: result.rows.slice(0, options.limit).map(mapMessageRow),
     hasMore: result.rows.length > options.limit,
+  };
+}
+
+export type MessageCursorPage = Readonly<{
+  messages: WhatsAppMessage[];
+  hasMore: boolean;
+  nextCursor: string | null;
+  prevCursor: string | null;
+  direction: MessagePageDirection;
+}>;
+
+export type MessageCursorPageResult =
+  | Readonly<{ kind: "ok"; page: MessageCursorPage }>
+  | Readonly<{ kind: "invalid-cursor" }>;
+
+function encodeCursorFromRow(row: CursorMessageRow): string {
+  return encodeMessageCursor({
+    providerTimestampUs: row.provider_timestamp_us,
+    createdAtUs: row.created_at_us,
+    id: row.id,
+  });
+}
+
+/**
+ * A cursor is only accepted when it points at a real message in the requested
+ * conversation. This rejects malformed tuples, cursors from another thread,
+ * and stale cursors without leaking whether the message exists elsewhere.
+ */
+async function cursorBelongsToConversation(
+  pool: Pool,
+  workspaceId: string,
+  conversationId: string,
+  cursor: MessageCursor,
+): Promise<boolean> {
+  const result = await pool.query(
+    `
+      SELECT 1
+      FROM whatsapp_messages
+      WHERE workspace_id = $1
+        AND conversation_id = $2
+        AND provider_timestamp = (
+          TIMESTAMPTZ 'epoch' + $3::bigint * INTERVAL '1 microsecond'
+        )
+        AND created_at = (
+          TIMESTAMPTZ 'epoch' + $4::bigint * INTERVAL '1 microsecond'
+        )
+        AND id = $5::uuid
+      LIMIT 1
+    `,
+    [
+      workspaceId,
+      conversationId,
+      cursor.providerTimestampUs,
+      cursor.createdAtUs,
+      cursor.id,
+    ],
+  );
+
+  return result.rows.length > 0;
+}
+
+/**
+ * Keyset pagination over (provider_timestamp, created_at, id).
+ *
+ * `before` returns messages older than the cursor (or the newest page when no
+ * cursor is supplied), and `after` returns messages newer than the cursor (or
+ * the oldest page when no cursor is supplied). Results are always returned in
+ * ascending chronological order for display.
+ */
+export async function listMessagesForConversationCursor(
+  pool: Pool,
+  workspaceId: string,
+  conversationId: string,
+  options: Readonly<{
+    limit: number;
+    cursor: MessageCursor | null;
+    direction: MessagePageDirection;
+  }>,
+): Promise<MessageCursorPageResult> {
+  if (
+    options.cursor &&
+    !(await cursorBelongsToConversation(
+      pool,
+      workspaceId,
+      conversationId,
+      options.cursor,
+    ))
+  ) {
+    return { kind: "invalid-cursor" };
+  }
+
+  const older = options.direction === "before";
+  const parameters: unknown[] = [workspaceId, conversationId];
+  let cursorFilter = "";
+
+  if (options.cursor) {
+    parameters.push(
+      options.cursor.providerTimestampUs,
+      options.cursor.createdAtUs,
+      options.cursor.id,
+    );
+    cursorFilter = `
+      AND (provider_timestamp, created_at, id) ${older ? "<" : ">"} (
+        TIMESTAMPTZ 'epoch' + $3::bigint * INTERVAL '1 microsecond',
+        TIMESTAMPTZ 'epoch' + $4::bigint * INTERVAL '1 microsecond',
+        $5::uuid
+      )
+    `;
+  }
+
+  parameters.push(options.limit + 1);
+  const limitParameter = `$${parameters.length}`;
+  const order = older ? "DESC" : "ASC";
+
+  const result = await pool.query<CursorMessageRow>(
+    `
+      SELECT
+        id,
+        conversation_id,
+        direction,
+        message_type,
+        text_content,
+        provider_timestamp,
+        processing_status,
+        created_at,
+        (extract(epoch FROM provider_timestamp) * 1000000)::bigint::text
+          AS provider_timestamp_us,
+        (extract(epoch FROM created_at) * 1000000)::bigint::text
+          AS created_at_us
+      FROM whatsapp_messages
+      WHERE workspace_id = $1
+        AND conversation_id = $2
+        ${cursorFilter}
+      ORDER BY provider_timestamp ${order}, created_at ${order}, id ${order}
+      LIMIT ${limitParameter}
+    `,
+    parameters,
+  );
+
+  const hasMore = result.rows.length > options.limit;
+  const rows = result.rows.slice(0, options.limit);
+  const orderedRows = older ? [...rows].reverse() : rows;
+  const first = orderedRows[0];
+  const last = orderedRows[orderedRows.length - 1];
+
+  // `prevCursor` loads older messages and `nextCursor` loads newer messages.
+  // Return null when the requested page has exhausted that direction.
+  const prevCursor =
+    first && (older ? hasMore : options.cursor !== null)
+      ? encodeCursorFromRow(first)
+      : null;
+  const nextCursor =
+    last && (older ? options.cursor !== null : hasMore)
+      ? encodeCursorFromRow(last)
+      : null;
+
+  return {
+    kind: "ok",
+    page: {
+      messages: orderedRows.map(mapMessageRow),
+      hasMore,
+      nextCursor,
+      prevCursor,
+      direction: options.direction,
+    },
   };
 }

@@ -310,6 +310,20 @@ type ConversationMessagesPayload = {
   pagination: ConversationPaginationPayload;
 };
 
+type CursorPaginationPayload = {
+  limit: number;
+  hasMore: boolean;
+  nextCursor: string | null;
+  prevCursor: string | null;
+  direction: "before" | "after";
+};
+
+type ConversationCursorMessagesPayload = {
+  conversation: ConversationSummary;
+  messages: WhatsAppMessage[];
+  pagination: CursorPaginationPayload;
+};
+
 function signWhatsAppBody(
   body: string,
   secret = TEST_WHATSAPP_APP_SECRET,
@@ -3060,6 +3074,9 @@ test("unauthenticated requests cannot access private business routes", async () 
     "/api/business/knowledge",
     "/api/whatsapp/conversations",
     `/api/whatsapp/conversations/${randomUUID()}/messages`,
+    "/api/conversations",
+    `/api/conversations/${randomUUID()}/messages`,
+    `/api/conversations/${randomUUID()}/messages?direction=before`,
   ]) {
     const response = await nativeFetch(`${baseUrl}${path}`, {
       headers: { "x-forwarded-for": TEST_CLIENT_IP },

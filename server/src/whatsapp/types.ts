@@ -14,6 +14,12 @@ export type ConversationCustomer = Readonly<{
   id: string;
   displayName: string | null;
   phoneE164: string | null;
+  /**
+   * Provider identifier for customers that are not identified by a phone
+   * number, for example a WhatsApp business-scoped user ID (BSUID). This is
+   * never a phone number and must not be formatted as one.
+   */
+  providerContactId: string | null;
 }>;
 
 export type ConversationSummary = Readonly<{
@@ -23,6 +29,7 @@ export type ConversationSummary = Readonly<{
   phoneNumberId: string;
   channel: "whatsapp";
   status: ConversationStatus;
+  leadId: string | null;
   lastMessageAt: string | null;
   lastMessagePreview: string | null;
   lastMessageType: string | null;
@@ -36,6 +43,17 @@ export type ConversationPagination = Readonly<{
   offset: number;
   hasMore: boolean;
   nextOffset: number | null;
+}>;
+
+export const MESSAGE_PAGE_DIRECTIONS = ["before", "after"] as const;
+export type MessagePageDirection = (typeof MESSAGE_PAGE_DIRECTIONS)[number];
+
+export type MessageCursorPagination = Readonly<{
+  limit: number;
+  hasMore: boolean;
+  nextCursor: string | null;
+  prevCursor: string | null;
+  direction: MessagePageDirection;
 }>;
 
 export type InboundWhatsAppMessage = Readonly<{
