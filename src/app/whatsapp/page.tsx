@@ -7,7 +7,7 @@ export default function WhatsAppPage() {
     <ProtectedApp>
       <AppShell
         active="whatsapp"
-        title="WhatsApp test inbox"
+        title="Unified WhatsApp inbox"
         canManage={false}
       >
         <WhatsAppInbox />
