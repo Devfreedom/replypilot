@@ -33,11 +33,14 @@ import {
   setDayOpen,
 } from "../../src/lib/opening-hours.js";
 import type {
+  ConversationSummary,
+  InboundWhatsAppMessage,
   WhatsAppConversation,
   WhatsAppIntegrationConfig,
   WhatsAppMessage,
 } from "../src/whatsapp/types.js";
 import { loadWhatsAppConfig } from "../src/whatsapp/config.js";
+import { persistInboundMessages } from "../src/whatsapp/repository.js";
 import {
   getTestDatabaseUrl,
   prepareTestDatabase,
@@ -284,6 +287,28 @@ type WhatsAppConversationMessagesPayload = {
   messages: WhatsAppMessage[];
 };
 
+type ConversationPaginationPayload = {
+  limit: number;
+  offset: number;
+  hasMore: boolean;
+  nextOffset: number | null;
+};
+
+type ConversationsPayload = {
+  conversations: ConversationSummary[];
+  pagination: ConversationPaginationPayload;
+};
+
+type ConversationPayload = {
+  conversation: ConversationSummary;
+};
+
+type ConversationMessagesPayload = {
+  conversation: ConversationSummary;
+  messages: WhatsAppMessage[];
+  pagination: ConversationPaginationPayload;
+};
+
 function signWhatsAppBody(
   body: string,
   secret = TEST_WHATSAPP_APP_SECRET,
@@ -354,6 +379,22 @@ function testWhatsAppConfig(
     appSecret: TEST_WHATSAPP_APP_SECRET,
     phoneNumberId: TEST_WHATSAPP_PHONE_NUMBER_ID,
     workspaceId: requireSession().workspace.id,
+    ...overrides,
+  };
+}
+
+function inboundMessage(
+  overrides: Partial<InboundWhatsAppMessage> = {},
+): InboundWhatsAppMessage {
+  return {
+    providerMessageId: `wamid.${randomUUID()}`,
+    phoneNumberId: TEST_WHATSAPP_PHONE_NUMBER_ID,
+    senderWaId: TEST_WHATSAPP_CUSTOMER_WA_ID,
+    senderPhoneNumber: TEST_WHATSAPP_CUSTOMER_WA_ID,
+    contactName: "Sheena Nelson",
+    messageType: "text",
+    text: "Hello from a test customer",
+    providerTimestamp: new Date("2026-10-01T10:00:00.000Z"),
     ...overrides,
   };
 }
@@ -4763,12 +4804,17 @@ test("WhatsApp inbox is workspace-scoped and rejects cross-workspace IDs", async
   try {
     assert.equal((await postWhatsApp(app, body)).status, 200);
 
-    const ownerConversations = await pool.query<{ id: string }>(
-      "SELECT id FROM whatsapp_conversations WHERE workspace_id = $1",
+    const ownerConversations = await pool.query<{
+      id: string;
+      customer_id: string;
+    }>(
+      "SELECT id, customer_id FROM whatsapp_conversations WHERE workspace_id = $1",
       [owner.workspace.id],
     );
     const conversationId = ownerConversations.rows[0]?.id;
+    const conversationCustomerId = ownerConversations.rows[0]?.customer_id;
     assert.ok(conversationId);
+    assert.ok(conversationCustomerId);
 
     const ownerList = await requestAs(
       owner,
@@ -4814,6 +4860,7 @@ test("WhatsApp inbox is workspace-scoped and rejects cross-workspace IDs", async
           INSERT INTO whatsapp_messages (
             workspace_id,
             conversation_id,
+            customer_id,
             provider_message_id,
             direction,
             message_type,
@@ -4821,9 +4868,14 @@ test("WhatsApp inbox is workspace-scoped and rejects cross-workspace IDs", async
             provider_timestamp,
             processing_status
           )
-          VALUES ($1, $2, $3, 'inbound', 'text', 'Cross workspace', now(), 'stored')
+          VALUES ($1, $2, $3, $4, 'inbound', 'text', 'Cross workspace', now(), 'stored')
         `,
-        [other.workspace.id, conversationId, `wamid.${randomUUID()}`],
+        [
+          other.workspace.id,
+          conversationId,
+          conversationCustomerId,
+          `wamid.${randomUUID()}`,
+        ],
       );
     } catch (error) {
       foreignKeyCode =
@@ -4835,4 +4887,710 @@ test("WhatsApp inbox is workspace-scoped and rejects cross-workspace IDs", async
   } finally {
     await stopServer(app.server);
   }
+});
+
+test("first inbound WhatsApp message creates a customer, connection, and conversation", async () => {
+  const app = await startWhatsAppServer();
+  const timestamp = "1760001000";
+  const body = whatsappEnvelope([
+    whatsappChange({
+      messages: [textWhatsAppMessage({ text: "First contact", timestamp })],
+      contacts: [
+        {
+          wa_id: TEST_WHATSAPP_CUSTOMER_WA_ID,
+          profile: { name: "Sheena Nelson" },
+        },
+      ],
+    }),
+  ]);
+
+  try {
+    assert.equal((await postWhatsApp(app, body)).status, 200);
+
+    const customers = await pool.query<{
+      id: string;
+      workspace_id: string;
+      phone_e164: string | null;
+      provider_contact_id: string | null;
+      display_name: string | null;
+      first_seen_at: Date;
+      last_seen_at: Date;
+    }>(
+      `
+        SELECT id, workspace_id, phone_e164, provider_contact_id,
+               display_name, first_seen_at, last_seen_at
+        FROM customers
+        WHERE workspace_id = $1
+      `,
+      [requireSession().workspace.id],
+    );
+    assert.equal(customers.rows.length, 1);
+    const customer = customers.rows[0];
+    assert.ok(customer);
+    assert.equal(customer.phone_e164, "+16505551234");
+    assert.equal(customer.provider_contact_id, null);
+    assert.equal(customer.display_name, "Sheena Nelson");
+    const seenAt = new Date(Number(timestamp) * 1_000).toISOString();
+    assert.equal(customer.first_seen_at.toISOString(), seenAt);
+    assert.equal(customer.last_seen_at.toISOString(), seenAt);
+
+    const connections = await pool.query<{
+      id: string;
+      phone_number_id: string;
+    }>(
+      `
+        SELECT id, phone_number_id
+        FROM whatsapp_connections
+        WHERE workspace_id = $1
+      `,
+      [requireSession().workspace.id],
+    );
+    assert.equal(connections.rows.length, 1);
+    assert.equal(
+      connections.rows[0]?.phone_number_id,
+      TEST_WHATSAPP_PHONE_NUMBER_ID,
+    );
+
+    const conversations = await pool.query<{
+      id: string;
+      customer_id: string;
+      whatsapp_connection_id: string;
+      channel: string;
+      status: string;
+    }>(
+      `
+        SELECT id, customer_id, whatsapp_connection_id, channel, status
+        FROM whatsapp_conversations
+        WHERE workspace_id = $1
+      `,
+      [requireSession().workspace.id],
+    );
+    assert.equal(conversations.rows.length, 1);
+    const conversation = conversations.rows[0];
+    assert.ok(conversation);
+    assert.equal(conversation.customer_id, customer.id);
+    assert.equal(conversation.whatsapp_connection_id, connections.rows[0]?.id);
+    assert.equal(conversation.channel, "whatsapp");
+    assert.equal(conversation.status, "open");
+
+    const messages = await pool.query<{ customer_id: string }>(
+      `
+        SELECT customer_id
+        FROM whatsapp_messages
+        WHERE workspace_id = $1
+      `,
+      [requireSession().workspace.id],
+    );
+    assert.equal(messages.rows.length, 1);
+    assert.equal(messages.rows[0]?.customer_id, customer.id);
+  } finally {
+    await stopServer(app.server);
+  }
+});
+
+test("subsequent inbound messages reuse the customer and active conversation", async () => {
+  const app = await startWhatsAppServer();
+  const firstTimestamp = "1760002000";
+  const secondTimestamp = "1760002600";
+  const firstBody = whatsappEnvelope([
+    whatsappChange({
+      messages: [
+        textWhatsAppMessage({ text: "First", timestamp: firstTimestamp }),
+      ],
+    }),
+  ]);
+  const secondBody = whatsappEnvelope([
+    whatsappChange({
+      messages: [
+        textWhatsAppMessage({ text: "Second", timestamp: secondTimestamp }),
+      ],
+    }),
+  ]);
+
+  try {
+    assert.equal((await postWhatsApp(app, firstBody)).status, 200);
+    assert.equal((await postWhatsApp(app, secondBody)).status, 200);
+
+    const counts = await pool.query<{
+      customers: number;
+      conversations: number;
+      messages: number;
+    }>(`
+      SELECT
+        (SELECT count(*) FROM customers)::int AS customers,
+        (SELECT count(*) FROM whatsapp_conversations)::int AS conversations,
+        (SELECT count(*) FROM whatsapp_messages)::int AS messages
+    `);
+    assert.deepEqual(counts.rows[0], {
+      customers: 1,
+      conversations: 1,
+      messages: 2,
+    });
+
+    const customer = await pool.query<{ last_seen_at: Date }>(
+      "SELECT last_seen_at FROM customers WHERE workspace_id = $1",
+      [requireSession().workspace.id],
+    );
+    assert.equal(
+      customer.rows[0]?.last_seen_at.toISOString(),
+      new Date(Number(secondTimestamp) * 1_000).toISOString(),
+    );
+  } finally {
+    await stopServer(app.server);
+  }
+});
+
+test("different workspaces keep separate customers for the same phone number", async () => {
+  const owner = requireSession();
+  const other = await registerUser();
+  const timestamp = new Date("2026-09-01T09:00:00.000Z");
+
+  await persistInboundMessages(pool, owner.workspace.id, [
+    inboundMessage({ providerTimestamp: timestamp }),
+  ]);
+  await persistInboundMessages(pool, other.workspace.id, [
+    inboundMessage({ providerTimestamp: timestamp }),
+  ]);
+
+  const customers = await pool.query<{
+    id: string;
+    workspace_id: string;
+    phone_e164: string;
+  }>(
+    `
+      SELECT id, workspace_id, phone_e164
+      FROM customers
+      WHERE phone_e164 = '+16505551234'
+      ORDER BY workspace_id
+    `,
+  );
+  assert.equal(customers.rows.length, 2);
+  assert.notEqual(customers.rows[0]?.id, customers.rows[1]?.id);
+  assert.deepEqual(
+    new Set(customers.rows.map((row) => row.workspace_id)),
+    new Set([owner.workspace.id, other.workspace.id]),
+  );
+});
+
+test("an inbound message reopens a closed conversation", async () => {
+  const app = await startWhatsAppServer();
+  const firstBody = whatsappEnvelope([
+    whatsappChange({
+      messages: [textWhatsAppMessage({ text: "First", timestamp: "1760003000" })],
+    }),
+  ]);
+  const secondBody = whatsappEnvelope([
+    whatsappChange({
+      messages: [
+        textWhatsAppMessage({ text: "Second", timestamp: "1760003600" }),
+      ],
+    }),
+  ]);
+
+  try {
+    assert.equal((await postWhatsApp(app, firstBody)).status, 200);
+    const conversation = await pool.query<{ id: string }>(
+      "SELECT id FROM whatsapp_conversations WHERE workspace_id = $1",
+      [requireSession().workspace.id],
+    );
+    const conversationId = conversation.rows[0]?.id;
+    assert.ok(conversationId);
+    await pool.query(
+      "UPDATE whatsapp_conversations SET status = 'closed' WHERE id = $1",
+      [conversationId],
+    );
+
+    assert.equal((await postWhatsApp(app, secondBody)).status, 200);
+
+    const after = await pool.query<{ id: string; status: string }>(
+      "SELECT id, status FROM whatsapp_conversations WHERE workspace_id = $1",
+      [requireSession().workspace.id],
+    );
+    assert.equal(after.rows.length, 1);
+    assert.equal(after.rows[0]?.id, conversationId);
+    assert.equal(after.rows[0]?.status, "open");
+  } finally {
+    await stopServer(app.server);
+  }
+});
+
+test("an archived conversation is not reopened by a new inbound message", async () => {
+  const workspaceId = requireSession().workspace.id;
+
+  await persistInboundMessages(pool, workspaceId, [
+    inboundMessage({
+      text: "Before archive",
+      providerTimestamp: new Date("2026-10-01T09:00:00.000Z"),
+    }),
+  ]);
+  const first = await pool.query<{ id: string }>(
+    "SELECT id FROM whatsapp_conversations WHERE workspace_id = $1",
+    [workspaceId],
+  );
+  const archivedId = first.rows[0]?.id;
+  assert.ok(archivedId);
+  await pool.query(
+    "UPDATE whatsapp_conversations SET status = 'archived' WHERE id = $1",
+    [archivedId],
+  );
+
+  await persistInboundMessages(pool, workspaceId, [
+    inboundMessage({
+      text: "After archive",
+      providerTimestamp: new Date("2026-10-01T10:00:00.000Z"),
+    }),
+  ]);
+
+  const conversations = await pool.query<{ id: string; status: string }>(
+    `
+      SELECT id, status
+      FROM whatsapp_conversations
+      WHERE workspace_id = $1
+      ORDER BY created_at ASC, id ASC
+    `,
+    [workspaceId],
+  );
+  assert.equal(conversations.rows.length, 2);
+  assert.equal(conversations.rows[0]?.id, archivedId);
+  assert.equal(conversations.rows[0]?.status, "archived");
+  assert.equal(conversations.rows[1]?.status, "open");
+});
+
+test("different WhatsApp connections keep separate conversations", async () => {
+  const workspaceId = requireSession().workspace.id;
+  const firstConnection = "106540352242922";
+  const secondConnection = "109999999999999";
+
+  await persistInboundMessages(pool, workspaceId, [
+    inboundMessage({
+      phoneNumberId: firstConnection,
+      text: "First number",
+    }),
+  ]);
+  await persistInboundMessages(pool, workspaceId, [
+    inboundMessage({
+      phoneNumberId: secondConnection,
+      text: "Second number",
+    }),
+  ]);
+
+  const conversations = await pool.query<{
+    id: string;
+    whatsapp_connection_id: string;
+    phone_number_id: string;
+  }>(
+    `
+      SELECT conversation.id, conversation.whatsapp_connection_id,
+             conversation.phone_number_id
+      FROM whatsapp_conversations AS conversation
+      WHERE conversation.workspace_id = $1
+      ORDER BY conversation.phone_number_id ASC
+    `,
+    [workspaceId],
+  );
+  assert.equal(conversations.rows.length, 2);
+  assert.deepEqual(
+    conversations.rows.map((row) => row.phone_number_id),
+    [firstConnection, secondConnection],
+  );
+  assert.notEqual(
+    conversations.rows[0]?.whatsapp_connection_id,
+    conversations.rows[1]?.whatsapp_connection_id,
+  );
+
+  const customers = await pool.query<{ count: number }>(
+    "SELECT count(*)::int AS count FROM customers WHERE workspace_id = $1",
+    [workspaceId],
+  );
+  assert.equal(customers.rows[0]?.count, 1);
+});
+
+test("concurrent webhook deliveries create one active conversation", async () => {
+  const app = await startWhatsAppServer();
+  const bodies = Array.from({ length: 5 }, (_, index) =>
+    whatsappEnvelope([
+      whatsappChange({
+        messages: [
+          textWhatsAppMessage({
+            id: `wamid.${randomUUID()}`,
+            text: `Concurrent ${index}`,
+            timestamp: String(1_760_004_000 + index),
+          }),
+        ],
+      }),
+    ]),
+  );
+
+  try {
+    const responses = await Promise.all(
+      bodies.map((body) => postWhatsApp(app, body)),
+    );
+
+    for (const response of responses) {
+      assert.equal(response.status, 200);
+      const payload = await readJson<WhatsAppWebhookPayload>(response);
+      assert.equal(payload.stored, 1);
+      assert.equal(payload.duplicates, 0);
+    }
+
+    const counts = await pool.query<{
+      customers: number;
+      conversations: number;
+      messages: number;
+      connections: number;
+    }>(`
+      SELECT
+        (SELECT count(*) FROM customers)::int AS customers,
+        (SELECT count(*) FROM whatsapp_conversations)::int AS conversations,
+        (SELECT count(*) FROM whatsapp_messages)::int AS messages,
+        (SELECT count(*) FROM whatsapp_connections)::int AS connections
+    `);
+    assert.deepEqual(counts.rows[0], {
+      customers: 1,
+      conversations: 1,
+      messages: 5,
+      connections: 1,
+    });
+
+    const active = await pool.query<{ count: number }>(
+      `
+        SELECT count(*)::int AS count
+        FROM whatsapp_conversations
+        WHERE workspace_id = $1
+          AND status IN ('open', 'closed')
+      `,
+      [requireSession().workspace.id],
+    );
+    assert.equal(active.rows[0]?.count, 1);
+  } finally {
+    await stopServer(app.server);
+  }
+});
+
+test("a duplicate provider message does not create customers or conversations", async () => {
+  const app = await startWhatsAppServer();
+  const body = whatsappEnvelope([
+    whatsappChange({
+      messages: [
+        textWhatsAppMessage({
+          id: "wamid.duplicate-foundation",
+          text: "Only once",
+          timestamp: "1760005000",
+        }),
+      ],
+    }),
+  ]);
+
+  try {
+    assert.equal((await postWhatsApp(app, body)).status, 200);
+    const before = await pool.query<{ last_seen_at: Date }>(
+      "SELECT last_seen_at FROM customers WHERE workspace_id = $1",
+      [requireSession().workspace.id],
+    );
+
+    assert.equal((await postWhatsApp(app, body)).status, 200);
+
+    const counts = await pool.query<{
+      customers: number;
+      conversations: number;
+      messages: number;
+    }>(`
+      SELECT
+        (SELECT count(*) FROM customers)::int AS customers,
+        (SELECT count(*) FROM whatsapp_conversations)::int AS conversations,
+        (SELECT count(*) FROM whatsapp_messages)::int AS messages
+    `);
+    assert.deepEqual(counts.rows[0], {
+      customers: 1,
+      conversations: 1,
+      messages: 1,
+    });
+
+    const after = await pool.query<{ last_seen_at: Date }>(
+      "SELECT last_seen_at FROM customers WHERE workspace_id = $1",
+      [requireSession().workspace.id],
+    );
+    assert.equal(
+      after.rows[0]?.last_seen_at.toISOString(),
+      before.rows[0]?.last_seen_at.toISOString(),
+    );
+  } finally {
+    await stopServer(app.server);
+  }
+});
+
+test("a failed webhook batch rolls back customer and conversation creation", async () => {
+  const workspaceId = requireSession().workspace.id;
+
+  await assert.rejects(
+    persistInboundMessages(pool, workspaceId, [
+      inboundMessage({ text: "First stored message" }),
+      inboundMessage({ providerMessageId: "w".repeat(600) }),
+    ]),
+  );
+
+  const counts = await pool.query<{
+    customers: number;
+    conversations: number;
+    messages: number;
+    connections: number;
+  }>(`
+    SELECT
+      (SELECT count(*) FROM customers)::int AS customers,
+      (SELECT count(*) FROM whatsapp_conversations)::int AS conversations,
+      (SELECT count(*) FROM whatsapp_messages)::int AS messages,
+      (SELECT count(*) FROM whatsapp_connections)::int AS connections
+  `);
+  assert.deepEqual(counts.rows[0], {
+    customers: 0,
+    conversations: 0,
+    messages: 0,
+    connections: 0,
+  });
+});
+
+test("a provider-only WhatsApp identity is preserved on the customer", async () => {
+  const workspaceId = requireSession().workspace.id;
+
+  await persistInboundMessages(pool, workspaceId, [
+    inboundMessage({
+      senderWaId: TEST_WHATSAPP_BSUID,
+      senderPhoneNumber: null,
+      contactName: "Username Customer",
+    }),
+  ]);
+
+  const customers = await pool.query<{
+    phone_e164: string | null;
+    provider_contact_id: string | null;
+  }>(
+    `
+      SELECT phone_e164, provider_contact_id
+      FROM customers
+      WHERE workspace_id = $1
+    `,
+    [workspaceId],
+  );
+  assert.deepEqual(customers.rows[0], {
+    phone_e164: null,
+    provider_contact_id: TEST_WHATSAPP_BSUID,
+  });
+});
+
+test("GET /api/conversations lists customer details, latest message, and paginates", async () => {
+  const workspaceId = requireSession().workspace.id;
+
+  await persistInboundMessages(pool, workspaceId, [
+    inboundMessage({
+      senderWaId: "16505551234",
+      senderPhoneNumber: "16505551234",
+      contactName: "Alpha Customer",
+      text: "Older message",
+      providerTimestamp: new Date("2026-10-01T09:00:00.000Z"),
+    }),
+    inboundMessage({
+      senderWaId: "2348031234567",
+      senderPhoneNumber: "2348031234567",
+      contactName: "Beta Customer",
+      text: "Newer message",
+      providerTimestamp: new Date("2026-10-01T10:00:00.000Z"),
+    }),
+  ]);
+
+  const firstPage = await fetch(`${baseUrl}/api/conversations?limit=1`);
+  assert.equal(firstPage.status, 200);
+  const firstPayload = await readJson<ConversationsPayload>(firstPage);
+  assert.equal(firstPayload.conversations.length, 1);
+  assert.deepEqual(firstPayload.pagination, {
+    limit: 1,
+    offset: 0,
+    hasMore: true,
+    nextOffset: 1,
+  });
+
+  const newest = firstPayload.conversations[0];
+  assert.ok(newest);
+  assert.equal(newest.customer.displayName, "Beta Customer");
+  assert.equal(newest.customer.phoneE164, "+2348031234567");
+  assert.equal(newest.status, "open");
+  assert.equal(newest.channel, "whatsapp");
+  assert.equal(newest.lastMessagePreview, "Newer message");
+  assert.equal(newest.lastMessageAt, "2026-10-01T10:00:00.000Z");
+
+  const secondPage = await readJson<ConversationsPayload>(
+    await fetch(`${baseUrl}/api/conversations?limit=1&offset=1`),
+  );
+  assert.equal(secondPage.conversations.length, 1);
+  assert.equal(
+    secondPage.conversations[0]?.customer.displayName,
+    "Alpha Customer",
+  );
+  assert.deepEqual(secondPage.pagination, {
+    limit: 1,
+    offset: 1,
+    hasMore: false,
+    nextOffset: null,
+  });
+
+  const invalidStatus = await fetch(
+    `${baseUrl}/api/conversations?status=unread`,
+  );
+  assert.equal(invalidStatus.status, 400);
+});
+
+test("GET /api/conversations filters by conversation status", async () => {
+  const workspaceId = requireSession().workspace.id;
+
+  await persistInboundMessages(pool, workspaceId, [
+    inboundMessage({
+      senderWaId: "16505551234",
+      senderPhoneNumber: "16505551234",
+      contactName: "Open Customer",
+    }),
+    inboundMessage({
+      senderWaId: "2348031234567",
+      senderPhoneNumber: "2348031234567",
+      contactName: "Closed Customer",
+      providerTimestamp: new Date("2026-10-01T11:00:00.000Z"),
+    }),
+  ]);
+
+  await pool.query(
+    `
+      UPDATE whatsapp_conversations
+      SET status = 'closed'
+      WHERE workspace_id = $1
+        AND customer_id = (
+          SELECT id
+          FROM customers
+          WHERE workspace_id = $1
+            AND phone_e164 = '+2348031234567'
+        )
+    `,
+    [workspaceId],
+  );
+
+  const closed = await readJson<ConversationsPayload>(
+    await fetch(`${baseUrl}/api/conversations?status=closed`),
+  );
+  assert.deepEqual(
+    closed.conversations.map((conversation) => conversation.customer.displayName),
+    ["Closed Customer"],
+  );
+
+  const open = await readJson<ConversationsPayload>(
+    await fetch(`${baseUrl}/api/conversations?status=open`),
+  );
+  assert.deepEqual(
+    open.conversations.map((conversation) => conversation.customer.displayName),
+    ["Open Customer"],
+  );
+});
+
+test("GET /api/conversations/:id is workspace-scoped and returns a consistent 404", async () => {
+  const owner = requireSession();
+
+  await persistInboundMessages(pool, owner.workspace.id, [inboundMessage()]);
+  const stored = await pool.query<{ id: string }>(
+    "SELECT id FROM whatsapp_conversations WHERE workspace_id = $1",
+    [owner.workspace.id],
+  );
+  const conversationId = stored.rows[0]?.id;
+  assert.ok(conversationId);
+
+  const ownerResponse = await fetch(
+    `${baseUrl}/api/conversations/${conversationId}`,
+  );
+  assert.equal(ownerResponse.status, 200);
+  const ownerPayload = await readJson<ConversationPayload>(ownerResponse);
+  assert.equal(ownerPayload.conversation.id, conversationId);
+  assert.equal(ownerPayload.conversation.customer.phoneE164, "+16505551234");
+  assert.equal(ownerPayload.conversation.customer.displayName, "Sheena Nelson");
+
+  const other = await registerUser();
+  const foreign = await requestAs(
+    other,
+    `/api/conversations/${conversationId}`,
+  );
+  assert.equal(foreign.status, 404);
+  assert.deepEqual(await readJson(foreign), {
+    error: "Conversation not found",
+  });
+
+  const unknown = await fetch(`${baseUrl}/api/conversations/${randomUUID()}`);
+  assert.equal(unknown.status, 404);
+  assert.deepEqual(await readJson(unknown), {
+    error: "Conversation not found",
+  });
+
+  const malformed = await fetch(`${baseUrl}/api/conversations/not-a-uuid`);
+  assert.equal(malformed.status, 400);
+});
+
+test("GET /api/conversations/:id/messages paginates stably and stays workspace-scoped", async () => {
+  const owner = requireSession();
+
+  await persistInboundMessages(pool, owner.workspace.id, [
+    inboundMessage({
+      text: "First",
+      providerTimestamp: new Date("2026-10-01T09:00:00.000Z"),
+    }),
+    inboundMessage({
+      text: "Second",
+      providerTimestamp: new Date("2026-10-01T10:00:00.000Z"),
+    }),
+    inboundMessage({
+      text: "Third",
+      providerTimestamp: new Date("2026-10-01T11:00:00.000Z"),
+    }),
+  ]);
+
+  const stored = await pool.query<{ id: string }>(
+    "SELECT id FROM whatsapp_conversations WHERE workspace_id = $1",
+    [owner.workspace.id],
+  );
+  const conversationId = stored.rows[0]?.id;
+  assert.ok(conversationId);
+
+  const firstPage = await readJson<ConversationMessagesPayload>(
+    await fetch(
+      `${baseUrl}/api/conversations/${conversationId}/messages?limit=2`,
+    ),
+  );
+  assert.deepEqual(
+    firstPage.messages.map((message) => message.text),
+    ["First", "Second"],
+  );
+  assert.deepEqual(firstPage.pagination, {
+    limit: 2,
+    offset: 0,
+    hasMore: true,
+    nextOffset: 2,
+  });
+
+  const secondPage = await readJson<ConversationMessagesPayload>(
+    await fetch(
+      `${baseUrl}/api/conversations/${conversationId}/messages?limit=2&offset=2`,
+    ),
+  );
+  assert.deepEqual(
+    secondPage.messages.map((message) => message.text),
+    ["Third"],
+  );
+  assert.deepEqual(secondPage.pagination, {
+    limit: 2,
+    offset: 2,
+    hasMore: false,
+    nextOffset: null,
+  });
+
+  const other = await registerUser();
+  const foreign = await requestAs(
+    other,
+    `/api/conversations/${conversationId}/messages`,
+  );
+  assert.equal(foreign.status, 404);
+  assert.deepEqual(await readJson(foreign), {
+    error: "Conversation not found",
+  });
 });
