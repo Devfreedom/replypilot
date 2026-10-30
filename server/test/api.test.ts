@@ -3985,6 +3985,126 @@ test("migration backfills existing data without changing IDs or values", async (
   }
 });
 
+test("customer migration backfills existing WhatsApp conversations and messages", async () => {
+  const schema = `customer_migration_${randomUUID().replaceAll("-", "")}`;
+  const migrations = (await readdir(MIGRATIONS_DIR))
+    .filter((file) => /^\d+_.+\.sql$/.test(file))
+    .sort();
+  const beforeCustomerMigration = migrations.filter(
+    (file) => Number.parseInt(file.slice(0, 3), 10) < 9,
+  );
+  const customerMigration = migrations.filter(
+    (file) => Number.parseInt(file.slice(0, 3), 10) === 9,
+  );
+  const client = await pool.connect();
+  const conversationId = "40000000-0000-4000-8000-000000000001";
+  const messageId = "40000000-0000-4000-8000-000000000002";
+
+  try {
+    await client.query("BEGIN");
+    await client.query(`CREATE SCHEMA "${schema}"`);
+    await client.query(`SET LOCAL search_path TO "${schema}"`);
+
+    for (const file of beforeCustomerMigration) {
+      await client.query(await readFile(join(MIGRATIONS_DIR, file), "utf8"));
+    }
+
+    await client.query(
+      `
+        INSERT INTO whatsapp_conversations (
+          id, workspace_id, phone_number_id, customer_wa_id, contact_name,
+          last_message_at
+        )
+        VALUES (
+          $1, $2, '123456789012345', '2348012345678',
+          'Legacy WhatsApp Customer', '2026-05-01T09:00:00Z'
+        )
+      `,
+      [conversationId, LEGACY_WORKSPACE_ID],
+    );
+    await client.query(
+      `
+        INSERT INTO whatsapp_messages (
+          id, workspace_id, conversation_id, provider_message_id,
+          direction, message_type, text_content, provider_timestamp
+        )
+        VALUES (
+          $1, $2, $3, 'wamid.legacy', 'inbound', 'text',
+          'Legacy inbound message', '2026-05-01T09:00:00Z'
+        )
+      `,
+      [messageId, LEGACY_WORKSPACE_ID, conversationId],
+    );
+
+    for (const file of customerMigration) {
+      await client.query(await readFile(join(MIGRATIONS_DIR, file), "utf8"));
+    }
+
+    const customers = await client.query<{
+      id: string;
+      workspace_id: string;
+      phone_e164: string;
+      provider_contact_id: string | null;
+      display_name: string;
+    }>(
+      `
+        SELECT id, workspace_id, phone_e164, provider_contact_id, display_name
+        FROM customers
+      `,
+    );
+    assert.equal(customers.rows.length, 1);
+    const customer = customers.rows[0];
+    assert.ok(customer);
+    assert.equal(customer.workspace_id, LEGACY_WORKSPACE_ID);
+    assert.equal(customer.phone_e164, "+2348012345678");
+    assert.equal(customer.provider_contact_id, null);
+    assert.equal(customer.display_name, "Legacy WhatsApp Customer");
+
+    const conversations = await client.query<{
+      id: string;
+      customer_id: string;
+      whatsapp_connection_id: string;
+      channel: string;
+      status: string;
+    }>(
+      `
+        SELECT id, customer_id, whatsapp_connection_id, channel, status
+        FROM whatsapp_conversations
+      `,
+    );
+    assert.equal(conversations.rows.length, 1);
+    assert.equal(conversations.rows[0]?.id, conversationId);
+    assert.equal(conversations.rows[0]?.customer_id, customer.id);
+    assert.ok(conversations.rows[0]?.whatsapp_connection_id);
+    assert.equal(conversations.rows[0]?.channel, "whatsapp");
+    assert.equal(conversations.rows[0]?.status, "open");
+
+    const connections = await client.query<{
+      workspace_id: string;
+      phone_number_id: string;
+    }>(
+      "SELECT workspace_id, phone_number_id FROM whatsapp_connections",
+    );
+    assert.deepEqual(connections.rows[0], {
+      workspace_id: LEGACY_WORKSPACE_ID,
+      phone_number_id: "123456789012345",
+    });
+
+    const messages = await client.query<{ id: string; customer_id: string }>(
+      "SELECT id, customer_id FROM whatsapp_messages",
+    );
+    assert.equal(messages.rows[0]?.id, messageId);
+    assert.equal(messages.rows[0]?.customer_id, customer.id);
+  } finally {
+    try {
+      await client.query("ROLLBACK");
+    } catch {
+      // The transaction may already be aborted by a failing migration.
+    }
+    client.release();
+  }
+});
+
 test("WhatsApp configuration is optional but all-or-none", () => {
   assert.equal(loadWhatsAppConfig({}), null);
   assert.equal(
