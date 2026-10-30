@@ -12,7 +12,9 @@ import { z } from "zod";
  *   (provider_timestamp, created_at, id)
  */
 const MAX_CURSOR_LENGTH = 512;
-const EPOCH_MICROSECONDS = /^\d{1,18}$/;
+// PostgreSQL timestamps can precede the Unix epoch. Keep the magnitude within
+// 18 digits so every accepted value remains inside PostgreSQL's bigint range.
+const EPOCH_MICROSECONDS = /^-?\d{1,18}$/;
 
 const messageCursorSchema = z
   .object({

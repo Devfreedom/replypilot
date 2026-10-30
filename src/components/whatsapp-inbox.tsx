@@ -245,11 +245,11 @@ function emptyListCopy(filter: ConversationFilter): {
 function ConversationThread({
   conversation,
   onBack,
-  onRefresh,
+  onRetry,
 }: {
   conversation: WhatsAppConversation;
   onBack: () => void;
-  onRefresh: () => void;
+  onRetry: () => void;
 }) {
   const { signOut } = useAuth();
   const [messages, setMessages] = useState<WhatsAppMessage[]>([]);
@@ -485,7 +485,7 @@ function ConversationThread({
             action={
               <button
                 type="button"
-                onClick={onRefresh}
+                onClick={onRetry}
                 className="btn btn-secondary"
               >
                 Try again
@@ -576,11 +576,14 @@ export function WhatsAppInbox() {
   const [filter, setFilter] = useState<ConversationFilter>("open");
   const [listOffset, setListOffset] = useState(0);
   const [refreshToken, setRefreshToken] = useState(0);
+  const [threadRefreshToken, setThreadRefreshToken] = useState(0);
+  const [appendRetryToken, setAppendRetryToken] = useState(0);
   const [conversationsLoading, setConversationsLoading] = useState(true);
   const [loadingMoreConversations, setLoadingMoreConversations] =
     useState(false);
   const [conversationsError, setConversationsError] =
     useState<ApiError | null>(null);
+  const [loadMoreError, setLoadMoreError] = useState<ApiError | null>(null);
   const [listHasMore, setListHasMore] = useState(false);
   const [listNextOffset, setListNextOffset] = useState<number | null>(null);
   const [mobilePane, setMobilePane] = useState<"list" | "thread">("list");
@@ -592,11 +595,12 @@ export function WhatsAppInbox() {
     async function load() {
       if (replacing) {
         setConversationsLoading(true);
+        setConversationsError(null);
       } else {
         setLoadingMoreConversations(true);
       }
 
-      setConversationsError(null);
+      setLoadMoreError(null);
 
       try {
         const params = new URLSearchParams({
@@ -659,9 +663,16 @@ export function WhatsAppInbox() {
           return;
         }
 
-        setConversationsError(
-          messageForError(error, "Could not load conversations."),
+        const apiError = messageForError(
+          error,
+          "Could not load conversations.",
         );
+
+        if (replacing) {
+          setConversationsError(apiError);
+        } else {
+          setLoadMoreError(apiError);
+        }
       } finally {
         if (!controller.signal.aborted) {
           setConversationsLoading(false);
@@ -673,7 +684,7 @@ export function WhatsAppInbox() {
     void load();
 
     return () => controller.abort();
-  }, [filter, listOffset, refreshToken]);
+  }, [appendRetryToken, filter, listOffset, refreshToken]);
 
   const selectedConversation = useMemo(
     () =>
@@ -692,6 +703,7 @@ export function WhatsAppInbox() {
     setListOffset(0);
     setConversations([]);
     setConversationsError(null);
+    setLoadMoreError(null);
     setListHasMore(false);
     setListNextOffset(null);
     setSelectedConversationId(null);
@@ -710,7 +722,13 @@ export function WhatsAppInbox() {
 
   function refresh() {
     setRefreshToken((token) => token + 1);
+    setThreadRefreshToken((token) => token + 1);
     setListOffset(0);
+    setLoadMoreError(null);
+  }
+
+  function retryMessages() {
+    setThreadRefreshToken((token) => token + 1);
   }
 
   function loadMoreConversations() {
@@ -721,8 +739,19 @@ export function WhatsAppInbox() {
     setListOffset(listNextOffset);
   }
 
+  function retryLoadMore() {
+    if (listNextOffset === null || loadingMoreConversations) {
+      return;
+    }
+
+    setLoadMoreError(null);
+    setAppendRetryToken((token) => token + 1);
+  }
+
   const listCopy = emptyListCopy(filter);
-  const sessionExpired = conversationsError?.unauthorized === true;
+  const sessionExpired =
+    conversationsError?.unauthorized === true ||
+    loadMoreError?.unauthorized === true;
 
   return (
     <div className="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
@@ -917,7 +946,27 @@ export function WhatsAppInbox() {
               </ul>
             )}
 
-            {listHasMore && !conversationsLoading ? (
+            {loadMoreError ? (
+              <div
+                role="alert"
+                className="border-t border-line p-3 text-sm text-danger-ink"
+              >
+                <p className="font-semibold">
+                  Could not load more conversations.
+                </p>
+                <p className="mt-1">{loadMoreError.message}</p>
+                <button
+                  type="button"
+                  onClick={retryLoadMore}
+                  disabled={loadingMoreConversations}
+                  className="btn btn-secondary mt-2 w-full"
+                >
+                  Try again
+                </button>
+              </div>
+            ) : null}
+
+            {listHasMore && !conversationsLoading && !loadMoreError ? (
               <div className="border-t border-line p-3">
                 <button
                   type="button"
@@ -947,10 +996,10 @@ export function WhatsAppInbox() {
         >
           {selectedConversation ? (
             <ConversationThread
-              key={`${selectedConversation.id}:${refreshToken}`}
+              key={`${selectedConversation.id}:${threadRefreshToken}`}
               conversation={selectedConversation}
               onBack={() => setMobilePane("list")}
-              onRefresh={refresh}
+              onRetry={retryMessages}
             />
           ) : (
             <SectionState

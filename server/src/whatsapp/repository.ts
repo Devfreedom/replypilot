@@ -954,14 +954,25 @@ export async function listMessagesForConversationCursor(
   const last = orderedRows[orderedRows.length - 1];
 
   // `prevCursor` loads older messages and `nextCursor` loads newer messages.
-  // Return null when the requested page has exhausted that direction.
-  const prevCursor =
-    first && (older ? hasMore : options.cursor !== null)
+  // Return null when the requested page has exhausted that direction. An empty
+  // page has no row to anchor the opposite direction, so retain the request
+  // cursor instead of dropping the only path back to the existing messages.
+  const requestCursor = options.cursor
+    ? encodeMessageCursor(options.cursor)
+    : null;
+  const prevCursor = first
+    ? (older ? hasMore : options.cursor !== null)
       ? encodeCursorFromRow(first)
-      : null;
-  const nextCursor =
-    last && (older ? options.cursor !== null : hasMore)
+      : null
+    : older
+      ? null
+      : requestCursor;
+  const nextCursor = last
+    ? (older ? options.cursor !== null : hasMore)
       ? encodeCursorFromRow(last)
+      : null
+    : older
+      ? requestCursor
       : null;
 
   return {
