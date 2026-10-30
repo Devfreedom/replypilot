@@ -183,10 +183,21 @@ export function conversationInitials(
   conversation: WhatsAppConversation,
 ): string {
   const name = conversationDisplayName(conversation);
-  const letters = name.match(/\p{L}/gu);
+  const letterParts = name
+    .split(/[\s._-]+/)
+    .map((part) => part.match(/\p{L}/gu))
+    .filter((letters): letters is RegExpMatchArray => Boolean(letters));
 
-  if (letters && letters.length > 0) {
-    return letters.slice(0, 2).join("").toUpperCase();
+  if (letterParts.length >= 2) {
+    return letterParts
+      .slice(0, 2)
+      .map((letters) => letters[0])
+      .join("")
+      .toUpperCase();
+  }
+
+  if (letterParts.length === 1) {
+    return letterParts[0].slice(0, 2).join("").toUpperCase();
   }
 
   const digits = name.replace(/\D/g, "");
