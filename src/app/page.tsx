@@ -224,6 +224,11 @@ function Dashboard() {
   const [draftLead, setDraftLead] = useState<Lead | null>(null);
 
   useEffect(() => {
+    setFilter("All");
+    setSearch("");
+  }, [view]);
+
+  useEffect(() => {
     const controller = new AbortController();
 
     async function loadLeads() {
