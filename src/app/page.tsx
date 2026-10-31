@@ -224,11 +224,6 @@ function Dashboard() {
   const [draftLead, setDraftLead] = useState<Lead | null>(null);
 
   useEffect(() => {
-    setFilter("All");
-    setSearch("");
-  }, [view]);
-
-  useEffect(() => {
     const controller = new AbortController();
 
     async function loadLeads() {
@@ -388,8 +383,7 @@ function Dashboard() {
   }
 
   function selectView(nextView: View) {
-    setFilter("All");
-    setSearch("");
+    clearFilters();
     router.push(dashboardViewHref(nextView), { scroll: false });
   }
 
@@ -415,6 +409,7 @@ function Dashboard() {
     <AppShell
       active="dashboard"
       dashboardView={view}
+      onDashboardNavigate={clearFilters}
       leadCount={leads.length}
       followUpCount={followUpCount}
       canManage={canManage}

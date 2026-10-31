@@ -225,6 +225,7 @@ function AssistantNote({ canManage }: { canManage: boolean }) {
 export function AppShell({
   active,
   dashboardView,
+  onDashboardNavigate,
   leadCount = 0,
   followUpCount = 0,
   canManage = false,
@@ -236,6 +237,8 @@ export function AppShell({
   active: ShellActiveKey;
   /** Current dashboard sub-view, used to mark the active navigation item. */
   dashboardView?: View;
+  /** Called when a dashboard navigation link is selected, before navigation. */
+  onDashboardNavigate?: () => void;
   leadCount?: number;
   followUpCount?: number;
   canManage?: boolean;
@@ -265,6 +268,11 @@ export function AppShell({
 
   function closeDrawer() {
     setDrawerOpen(false);
+  }
+
+  function handleDashboardNavigate() {
+    onDashboardNavigate?.();
+    closeDrawer();
   }
 
   function handleDrawerBackdropClick(event: React.MouseEvent<HTMLDialogElement>) {
