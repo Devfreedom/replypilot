@@ -6522,6 +6522,175 @@ test("cursor pagination stays stable when a new message arrives between pages", 
   );
 });
 
+test("cursor pagination retains the request cursor on empty pages", async () => {
+  const workspaceId = requireSession().workspace.id;
+
+  await persistInboundMessages(pool, workspaceId, [
+    inboundMessage({
+      text: "First",
+      providerTimestamp: new Date("2026-10-01T09:00:00.000Z"),
+    }),
+    inboundMessage({
+      text: "Second",
+      providerTimestamp: new Date("2026-10-01T10:00:00.000Z"),
+    }),
+  ]);
+
+  const stored = await pool.query<{ id: string }>(
+    "SELECT id FROM whatsapp_conversations WHERE workspace_id = $1",
+    [workspaceId],
+  );
+  const conversationId = stored.rows[0]?.id;
+  assert.ok(conversationId);
+
+  // An empty older page must keep the request cursor so the client can return
+  // to the messages it already loaded.
+  const newest = await readJson<ConversationCursorMessagesPayload>(
+    await fetch(
+      `${baseUrl}/api/conversations/${conversationId}/messages?limit=1&direction=before`,
+    ),
+  );
+  assert.deepEqual(
+    newest.messages.map((message) => message.text),
+    ["Second"],
+  );
+  const newestCursor = newest.pagination.prevCursor;
+  assert.ok(newestCursor);
+
+  const oldest = await readJson<ConversationCursorMessagesPayload>(
+    await fetch(
+      `${baseUrl}/api/conversations/${conversationId}/messages?limit=1&direction=before&cursor=${encodeURIComponent(newestCursor)}`,
+    ),
+  );
+  assert.deepEqual(
+    oldest.messages.map((message) => message.text),
+    ["First"],
+  );
+  assert.equal(oldest.pagination.hasMore, false);
+  assert.equal(oldest.pagination.prevCursor, null);
+  const oldestCursor = oldest.pagination.nextCursor;
+  assert.ok(oldestCursor);
+
+  const emptyBefore = await readJson<ConversationCursorMessagesPayload>(
+    await fetch(
+      `${baseUrl}/api/conversations/${conversationId}/messages?limit=1&direction=before&cursor=${encodeURIComponent(oldestCursor)}`,
+    ),
+  );
+  assert.deepEqual(emptyBefore.messages, []);
+  assert.equal(emptyBefore.pagination.hasMore, false);
+  assert.equal(emptyBefore.pagination.prevCursor, null);
+  assert.equal(emptyBefore.pagination.nextCursor, oldestCursor);
+
+  const backToNewer = await readJson<ConversationCursorMessagesPayload>(
+    await fetch(
+      `${baseUrl}/api/conversations/${conversationId}/messages?limit=1&direction=after&cursor=${encodeURIComponent(oldestCursor)}`,
+    ),
+  );
+  assert.deepEqual(
+    backToNewer.messages.map((message) => message.text),
+    ["Second"],
+  );
+  assert.equal(backToNewer.pagination.hasMore, false);
+
+  // An empty newer page must keep the request cursor so the client can return
+  // to the messages it already loaded in the other direction.
+  const oldestPage = await readJson<ConversationCursorMessagesPayload>(
+    await fetch(
+      `${baseUrl}/api/conversations/${conversationId}/messages?limit=1&direction=after`,
+    ),
+  );
+  assert.deepEqual(
+    oldestPage.messages.map((message) => message.text),
+    ["First"],
+  );
+  assert.equal(oldestPage.pagination.prevCursor, null);
+  const firstNewerCursor = oldestPage.pagination.nextCursor;
+  assert.ok(firstNewerCursor);
+
+  const secondPage = await readJson<ConversationCursorMessagesPayload>(
+    await fetch(
+      `${baseUrl}/api/conversations/${conversationId}/messages?limit=1&direction=after&cursor=${encodeURIComponent(firstNewerCursor)}`,
+    ),
+  );
+  assert.deepEqual(
+    secondPage.messages.map((message) => message.text),
+    ["Second"],
+  );
+  assert.equal(secondPage.pagination.hasMore, false);
+  assert.equal(secondPage.pagination.nextCursor, null);
+  const secondCursor = secondPage.pagination.prevCursor;
+  assert.ok(secondCursor);
+  assert.equal(secondCursor, newestCursor);
+
+  const emptyAfter = await readJson<ConversationCursorMessagesPayload>(
+    await fetch(
+      `${baseUrl}/api/conversations/${conversationId}/messages?limit=1&direction=after&cursor=${encodeURIComponent(secondCursor)}`,
+    ),
+  );
+  assert.deepEqual(emptyAfter.messages, []);
+  assert.equal(emptyAfter.pagination.hasMore, false);
+  assert.equal(emptyAfter.pagination.nextCursor, null);
+  assert.equal(emptyAfter.pagination.prevCursor, secondCursor);
+
+  const backToOlder = await readJson<ConversationCursorMessagesPayload>(
+    await fetch(
+      `${baseUrl}/api/conversations/${conversationId}/messages?limit=1&direction=before&cursor=${encodeURIComponent(secondCursor)}`,
+    ),
+  );
+  assert.deepEqual(
+    backToOlder.messages.map((message) => message.text),
+    ["First"],
+  );
+  assert.equal(backToOlder.pagination.hasMore, false);
+});
+
+test("cursor pagination supports timestamps before the Unix epoch", async () => {
+  const workspaceId = requireSession().workspace.id;
+
+  await persistInboundMessages(pool, workspaceId, [
+    inboundMessage({
+      text: "Pre-epoch older",
+      providerTimestamp: new Date("1969-12-31T23:59:58.000Z"),
+    }),
+    inboundMessage({
+      text: "Pre-epoch newer",
+      providerTimestamp: new Date("1969-12-31T23:59:59.000Z"),
+    }),
+  ]);
+
+  const stored = await pool.query<{ id: string }>(
+    "SELECT id FROM whatsapp_conversations WHERE workspace_id = $1",
+    [workspaceId],
+  );
+  const conversationId = stored.rows[0]?.id;
+  assert.ok(conversationId);
+
+  const newest = await readJson<ConversationCursorMessagesPayload>(
+    await fetch(
+      `${baseUrl}/api/conversations/${conversationId}/messages?limit=1&direction=before`,
+    ),
+  );
+  assert.deepEqual(
+    newest.messages.map((message) => message.text),
+    ["Pre-epoch newer"],
+  );
+  const olderCursor = newest.pagination.prevCursor;
+  assert.ok(olderCursor);
+
+  const older = await readJson<ConversationCursorMessagesPayload>(
+    await fetch(
+      `${baseUrl}/api/conversations/${conversationId}/messages?limit=1&direction=before&cursor=${encodeURIComponent(olderCursor)}`,
+    ),
+  );
+  assert.deepEqual(
+    older.messages.map((message) => message.text),
+    ["Pre-epoch older"],
+  );
+  assert.equal(older.pagination.hasMore, false);
+  assert.equal(older.pagination.prevCursor, null);
+  assert.ok(older.pagination.nextCursor);
+});
+
 test("cursor pagination rejects malformed, foreign, and conflicting cursors", async () => {
   const workspaceId = requireSession().workspace.id;
 

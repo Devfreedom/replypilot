@@ -46,23 +46,25 @@ The cursor is an opaque, URL-safe token:
 
 ```text
 base64url(JSON.stringify({
-  providerTimestampUs: "<epoch microseconds as a decimal string>",
-  createdAtUs: "<epoch microseconds as a decimal string>",
+  providerTimestampUs: "<signed epoch microseconds as a decimal string>",
+  createdAtUs: "<signed epoch microseconds as a decimal string>",
   id: "<UUID>"
 }))
 ```
 
 PostgreSQL timestamps keep microsecond precision, while a JavaScript `Date` and
 `toISOString()` keep only milliseconds. Encoding epoch microseconds as decimal
-strings preserves the exact database value. The API still returns human-readable
-ISO timestamps with millisecond precision for display; the cursor is built from
-separate `extract(epoch ...) * 1000000` values in the SQL query.
+strings preserves the exact database value. The values are signed so timestamps
+before the Unix epoch are represented correctly. The API still returns
+human-readable ISO timestamps with millisecond precision for display; the cursor
+is built from separate `extract(epoch ...) * 1000000` values in the SQL query.
 
 Rules:
 
 - Treat the cursor as opaque on the client.
-- Validate the decoded value with Zod: decimal epoch-microsecond strings and a
-  UUID. Reject malformed cursors with `400`.
+- Validate the decoded value with Zod: signed decimal epoch-microsecond strings
+  (at most 18 digits, keeping every value inside PostgreSQL's `bigint` range) and
+  a UUID. Reject malformed cursors with `400`.
 - A cursor is accepted only when it points at a real message in the requested
   conversation. This rejects cursors from another conversation or a deleted
   anchor row without revealing whether the message exists elsewhere.
@@ -138,6 +140,10 @@ direction.
   beginning of the conversation.
 - `nextCursor` loads newer messages. It is `null` when the page has reached the
   newest message available at request time.
+- An empty `before` page has `prevCursor: null` and repeats the request cursor as
+  `nextCursor`. An empty `after` page has `nextCursor: null` and repeats the
+  request cursor as `prevCursor`. This lets a client return to the page it
+  already loaded instead of losing the only cursor that pointed back to it.
 - Pages are always returned in ascending chronological order for display,
   including `before` pages that were fetched with a descending scan.
 
@@ -169,6 +175,9 @@ The API suite covers:
 - Forward pagination via `nextCursor` / `direction=after`.
 - Equal-timestamp messages with no duplicates and database-consistent order.
 - A new message arriving between pages without shifting or skipping older rows.
+- Empty `before` and `after` pages retaining the request cursor in the opposite
+  direction.
+- Timestamps before the Unix epoch using signed epoch-microsecond cursors.
 - Malformed, empty, conflicting, and wrong-conversation cursors returning `400`.
 - Unauthenticated requests returning `401`.
 - Cross-workspace conversation access returning `404`.
