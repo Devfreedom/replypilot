@@ -1,16 +1,52 @@
 "use client";
 
-import { useEffect, useState } from "react";
 import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import { useAuth } from "./auth-provider";
+import { Alert, PageHeading, SectionState, Spinner } from "./ui";
+import {
+  CONVERSATION_FILTERS,
+  CONVERSATION_STATUS_LABELS,
   conversationDisplayName,
+  conversationIdentity,
+  conversationInitials,
   conversationPreview,
-  formatWhatsAppTimestamp,
+  formatConversationTimestamp,
+  formatMessageDay,
+  formatMessageTime,
+  formatMessageTitle,
+  mergeConversations,
+  mergeMessages,
+  messageDayKey,
   parseConversationMessagesResponse,
   parseConversationsResponse,
+  type ConversationFilter,
+  type ConversationStatus,
   type WhatsAppConversation,
   type WhatsAppMessage,
 } from "@/lib/whatsapp";
-import { Alert, SectionState } from "@/components/ui";
+
+const CONVERSATION_PAGE_SIZE = 30;
+const MESSAGE_PAGE_SIZE = 30;
+
+const useIsomorphicLayoutEffect =
+  typeof window === "undefined" ? useEffect : useLayoutEffect;
+
+class ApiError extends Error {
+  readonly unauthorized: boolean;
+
+  constructor(message: string, unauthorized = false) {
+    super(message);
+    this.name = "ApiError";
+    this.unauthorized = unauthorized;
+  }
+}
 
 async function readJson(response: Response): Promise<unknown> {
   try {
@@ -33,130 +69,244 @@ function errorMessage(data: unknown, fallback: string): string {
   return fallback;
 }
 
-export function WhatsAppInbox() {
-  const [conversations, setConversations] = useState<WhatsAppConversation[]>([]);
-  const [selectedConversationId, setSelectedConversationId] = useState<
-    string | null
-  >(null);
-  const [messages, setMessages] = useState<WhatsAppMessage[]>([]);
-  const [conversationsLoading, setConversationsLoading] = useState(true);
-  const [messagesLoading, setMessagesLoading] = useState(false);
-  const [conversationsError, setConversationsError] = useState<string | null>(
-    null,
+function toApiError(
+  data: unknown,
+  response: Response,
+  fallback: string,
+): ApiError {
+  if (response.status === 401) {
+    return new ApiError(
+      "Your session has expired. Sign in again to continue.",
+      true,
+    );
+  }
+
+  return new ApiError(errorMessage(data, fallback));
+}
+
+function messageForError(error: unknown, fallback: string): ApiError {
+  return error instanceof ApiError ? error : new ApiError(fallback);
+}
+
+const STATUS_BADGE_CLASSES: Record<ConversationStatus, string> = {
+  open: "badge-booked",
+  closed: "badge-neutral",
+  archived: "badge-quoted",
+};
+
+const STATUS_DOT_CLASSES: Record<ConversationStatus, string> = {
+  open: "bg-success",
+  closed: "bg-ink-faint",
+  archived: "bg-warning",
+};
+
+function StatusBadge({ status }: { status: ConversationStatus }) {
+  return (
+    <span className={`badge ${STATUS_BADGE_CLASSES[status]}`}>
+      <span
+        aria-hidden="true"
+        className={`h-1.5 w-1.5 rounded-full ${STATUS_DOT_CLASSES[status]}`}
+      />
+      {CONVERSATION_STATUS_LABELS[status]}
+    </span>
   );
-  const [messagesError, setMessagesError] = useState<string | null>(null);
-  const [refreshToken, setRefreshToken] = useState(0);
+}
+
+function ConversationAvatar({
+  conversation,
+  className = "h-10 w-10 text-xs",
+}: {
+  conversation: WhatsAppConversation;
+  className?: string;
+}) {
+  return (
+    <span
+      aria-hidden="true"
+      className={`flex shrink-0 items-center justify-center rounded-full bg-accent-soft font-bold text-accent-ink ${className}`}
+    >
+      {conversationInitials(conversation)}
+    </span>
+  );
+}
+
+function DayDivider({ value }: { value: string }) {
+  return (
+    <div className="my-3 flex items-center gap-3">
+      <span aria-hidden="true" className="h-px flex-1 bg-line" />
+      <span className="text-[11px] font-medium text-ink-faint">
+        {formatMessageDay(value)}
+      </span>
+      <span aria-hidden="true" className="h-px flex-1 bg-line" />
+    </div>
+  );
+}
+
+function MessageBubble({ message }: { message: WhatsAppMessage }) {
+  const outbound = message.direction === "outbound";
+  const unsupported = message.processingStatus === "unsupported";
+
+  return (
+    <div className={`flex ${outbound ? "justify-end" : "justify-start"}`}>
+      <article
+        className={`max-w-[85%] rounded-2xl px-4 py-2.5 shadow-sm ring-1 sm:max-w-[75%] ${
+          unsupported
+            ? "bg-warning-soft text-warning-ink ring-[color-mix(in_oklab,var(--rp-warning)_25%,transparent)]"
+            : outbound
+              ? "bg-accent text-on-accent ring-transparent"
+              : "bg-raised text-ink ring-line"
+        }`}
+      >
+        <span className="sr-only">
+          {outbound ? "Outbound" : "Inbound"} message:{" "}
+        </span>
+        {unsupported ? (
+          <div>
+            <p className="text-sm font-semibold">
+              Unsupported {message.messageType} message
+            </p>
+            <p className="mt-1 text-xs leading-5 opacity-90">
+              This message type is stored but cannot be displayed yet.
+            </p>
+          </div>
+        ) : (
+          <p className="whitespace-pre-wrap break-words text-sm leading-6">
+            {message.text ?? "Message content unavailable"}
+          </p>
+        )}
+        <time
+          dateTime={message.providerTimestamp}
+          title={formatMessageTitle(message.providerTimestamp)}
+          className={`mt-1 block text-right text-[11px] ${
+            outbound ? "opacity-80" : "text-ink-faint"
+          }`}
+        >
+          {formatMessageTime(message.providerTimestamp)}
+        </time>
+      </article>
+    </div>
+  );
+}
+
+function ConversationListSkeleton() {
+  return (
+    <div role="status" aria-live="polite">
+      <span className="sr-only">Loading conversations…</span>
+      <ul aria-hidden="true" className="divide-y divide-line">
+        {Array.from({ length: 5 }, (_, index) => (
+          <li key={index} className="flex gap-3 px-4 py-3">
+            <span className="h-10 w-10 shrink-0 animate-pulse rounded-full bg-hushed" />
+            <span className="min-w-0 flex-1 space-y-2">
+              <span className="block h-3 w-1/2 animate-pulse rounded bg-hushed" />
+              <span className="block h-3 w-3/4 animate-pulse rounded bg-hushed" />
+              <span className="block h-2.5 w-1/3 animate-pulse rounded bg-hushed" />
+            </span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function MessagesLoading() {
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      className="flex h-full min-h-[16rem] flex-col items-center justify-center gap-3 text-sm text-ink-soft"
+    >
+      <Spinner className="h-6 w-6" />
+      Loading messages…
+    </div>
+  );
+}
+
+function emptyListCopy(filter: ConversationFilter): {
+  title: string;
+  body: string;
+} {
+  if (filter === "all") {
+    return {
+      title: "No WhatsApp conversations yet",
+      body: "Inbound messages appear here after they are delivered to the connected WhatsApp number.",
+    };
+  }
+
+  return {
+    title: `No ${CONVERSATION_STATUS_LABELS[filter].toLowerCase()} conversations`,
+    body: "Try another status filter or refresh the inbox.",
+  };
+}
+
+/**
+ * The thread is keyed by conversation and refresh token. Remounting gives each
+ * conversation a clean message/cursor state and guarantees that a response for
+ * a previously selected conversation cannot overwrite the current thread.
+ */
+function ConversationThread({
+  conversation,
+  onBack,
+  onRetry,
+}: {
+  conversation: WhatsAppConversation;
+  onBack: () => void;
+  onRetry: () => void;
+}) {
+  const { signOut } = useAuth();
+  const [messages, setMessages] = useState<WhatsAppMessage[]>([]);
+  const [messagesLoading, setMessagesLoading] = useState(true);
+  const [messagesError, setMessagesError] = useState<ApiError | null>(null);
+  const [olderError, setOlderError] = useState<ApiError | null>(null);
+  const [olderCursor, setOlderCursor] = useState<string | null>(null);
+  const [hasOlder, setHasOlder] = useState(false);
+  const [loadingOlder, setLoadingOlder] = useState(false);
+
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const prependAnchorRef = useRef<{
+    scrollHeight: number;
+    scrollTop: number;
+  } | null>(null);
+  const scrollToBottomRef = useRef(true);
+  const olderAbortRef = useRef<AbortController | null>(null);
+  const loadingOlderRef = useRef(false);
 
   useEffect(() => {
     const controller = new AbortController();
 
-    async function loadConversations() {
-      setConversationsLoading(true);
-      setConversationsError(null);
-
+    async function load() {
       try {
-        const response = await fetch("/api/whatsapp/conversations", {
-          cache: "no-store",
-          signal: controller.signal,
+        const params = new URLSearchParams({
+          limit: String(MESSAGE_PAGE_SIZE),
+          direction: "before",
         });
-        const data = await readJson(response);
-
-        if (!response.ok) {
-          throw new Error(
-            errorMessage(data, "Unable to load WhatsApp conversations."),
-          );
-        }
-
-        const parsed = parseConversationsResponse(data);
-
-        if (!parsed) {
-          throw new Error(
-            "The WhatsApp inbox returned an unexpected response.",
-          );
-        }
-
-        if (controller.signal.aborted) return;
-
-        setConversations(parsed);
-        if (parsed.length === 0) {
-          setSelectedConversationId(null);
-          setMessages([]);
-          setMessagesError(null);
-          setMessagesLoading(false);
-        } else {
-          setSelectedConversationId((current) => {
-            if (current && parsed.some((item) => item.id === current)) {
-              return current;
-            }
-
-            return parsed[0]?.id ?? null;
-          });
-        }
-      } catch (error) {
-        if (controller.signal.aborted) return;
-
-        setConversationsError(
-          error instanceof Error
-            ? error.message
-            : "Unable to load WhatsApp conversations.",
-        );
-      } finally {
-        if (!controller.signal.aborted) {
-          setConversationsLoading(false);
-        }
-      }
-    }
-
-    void loadConversations();
-    return () => controller.abort();
-  }, [refreshToken]);
-
-  useEffect(() => {
-    if (!selectedConversationId) {
-      return;
-    }
-
-    const controller = new AbortController();
-
-    async function loadMessages() {
-      setMessagesLoading(true);
-      setMessagesError(null);
-
-      try {
         const response = await fetch(
-          `/api/whatsapp/conversations/${selectedConversationId}/messages`,
-          {
-            cache: "no-store",
-            signal: controller.signal,
-          },
+          `/api/conversations/${conversation.id}/messages?${params.toString()}`,
+          { cache: "no-store", signal: controller.signal },
         );
         const data = await readJson(response);
 
         if (!response.ok) {
-          throw new Error(
-            errorMessage(data, "Unable to load this WhatsApp conversation."),
-          );
+          throw toApiError(data, response, "Could not load messages.");
         }
 
         const parsed = parseConversationMessagesResponse(data);
 
         if (!parsed) {
-          throw new Error(
-            "The WhatsApp inbox returned an unexpected conversation.",
-          );
+          throw new ApiError("The inbox returned an unexpected response.");
         }
 
-        if (controller.signal.aborted) return;
+        if (controller.signal.aborted) {
+          return;
+        }
 
         setMessages(parsed.messages);
+        setOlderCursor(parsed.pagination?.prevCursor ?? null);
+        setHasOlder(parsed.pagination?.hasMore ?? false);
       } catch (error) {
-        if (controller.signal.aborted) return;
+        if (controller.signal.aborted) {
+          return;
+        }
 
-        setMessagesError(
-          error instanceof Error
-            ? error.message
-            : "Unable to load this WhatsApp conversation.",
-        );
+        setMessagesError(messageForError(error, "Could not load messages."));
       } finally {
         if (!controller.signal.aborted) {
           setMessagesLoading(false);
@@ -164,254 +314,711 @@ export function WhatsAppInbox() {
       }
     }
 
-    void loadMessages();
-    return () => controller.abort();
-  }, [selectedConversationId, refreshToken]);
+    void load();
 
-  const selectedConversation =
-    conversations.find((item) => item.id === selectedConversationId) ?? null;
+    return () => {
+      controller.abort();
+      olderAbortRef.current?.abort();
+      olderAbortRef.current = null;
+    };
+  }, [conversation.id]);
 
-  function selectConversation(conversationId: string) {
-    setSelectedConversationId(conversationId);
-    setMessages([]);
-    setMessagesError(null);
-  }
+  useIsomorphicLayoutEffect(() => {
+    const container = scrollRef.current;
+
+    if (!container || messages.length === 0) {
+      return;
+    }
+
+    const anchor = prependAnchorRef.current;
+
+    if (anchor) {
+      container.scrollTop =
+        container.scrollHeight - anchor.scrollHeight + anchor.scrollTop;
+      prependAnchorRef.current = null;
+      return;
+    }
+
+    if (scrollToBottomRef.current) {
+      container.scrollTop = container.scrollHeight;
+      scrollToBottomRef.current = false;
+    }
+  }, [messages]);
+
+  const loadOlder = useCallback(async () => {
+    if (!olderCursor || loadingOlderRef.current) {
+      return;
+    }
+
+    const container = scrollRef.current;
+
+    if (container) {
+      prependAnchorRef.current = {
+        scrollHeight: container.scrollHeight,
+        scrollTop: container.scrollTop,
+      };
+    }
+
+    const controller = new AbortController();
+    olderAbortRef.current?.abort();
+    olderAbortRef.current = controller;
+    loadingOlderRef.current = true;
+    setLoadingOlder(true);
+    setOlderError(null);
+
+    try {
+      const params = new URLSearchParams({
+        limit: String(MESSAGE_PAGE_SIZE),
+        direction: "before",
+        cursor: olderCursor,
+      });
+      const response = await fetch(
+        `/api/conversations/${conversation.id}/messages?${params.toString()}`,
+        { cache: "no-store", signal: controller.signal },
+      );
+      const data = await readJson(response);
+
+      if (!response.ok) {
+        throw toApiError(data, response, "Could not load older messages.");
+      }
+
+      const parsed = parseConversationMessagesResponse(data);
+
+      if (!parsed) {
+        throw new ApiError("The inbox returned an unexpected response.");
+      }
+
+      if (controller.signal.aborted) {
+        return;
+      }
+
+      setMessages((current) =>
+        mergeMessages(current, parsed.messages, "older"),
+      );
+      setOlderCursor(parsed.pagination?.prevCursor ?? null);
+      setHasOlder(parsed.pagination?.hasMore ?? false);
+
+      if (parsed.messages.length === 0) {
+        prependAnchorRef.current = null;
+      }
+    } catch (error) {
+      if (controller.signal.aborted) {
+        return;
+      }
+
+      prependAnchorRef.current = null;
+      setOlderError(
+        messageForError(error, "Could not load older messages."),
+      );
+    } finally {
+      loadingOlderRef.current = false;
+
+      if (!controller.signal.aborted) {
+        setLoadingOlder(false);
+      }
+    }
+  }, [conversation.id, olderCursor]);
+
+  const identity = conversationIdentity(conversation);
+  const sessionExpired =
+    messagesError?.unauthorized === true || olderError?.unauthorized === true;
 
   return (
-    <div className="mx-auto max-w-7xl px-4 py-8 sm:px-6 lg:px-8">
-      <div className="mb-6 flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight text-ink sm:text-3xl">
-            WhatsApp test inbox
-          </h1>
-          <p className="mt-2 max-w-2xl text-sm leading-6 text-ink-soft">
-            Inbound messages from the one configured Meta test number and
-            workspace. This inbox has no reply controls and does not send
-            WhatsApp messages.
-          </p>
-        </div>
+    <>
+      <div className="flex items-start gap-3 border-b border-line px-4 py-3 sm:px-5">
         <button
           type="button"
-          onClick={() => setRefreshToken((token) => token + 1)}
-          className="btn btn-secondary shrink-0"
+          onClick={onBack}
+          aria-label="Back to conversations"
+          className="mt-0.5 rounded-lg px-2 py-1 text-lg leading-none text-ink-soft hover:bg-hushed hover:text-ink lg:hidden"
+        >
+          ←
+        </button>
+        <ConversationAvatar
+          conversation={conversation}
+          className="hidden h-11 w-11 text-sm sm:flex"
+        />
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <h2 className="truncate text-base font-bold text-ink">
+              {conversationDisplayName(conversation)}
+            </h2>
+            <StatusBadge status={conversation.status} />
+            {conversation.leadId ? (
+              <span className="badge badge-neutral">Linked lead</span>
+            ) : null}
+          </div>
+          <p className="mt-0.5 truncate text-xs text-ink-soft">
+            <span className="font-medium">{identity.label}:</span>{" "}
+            {identity.value}
+          </p>
+        </div>
+      </div>
+
+      {sessionExpired ? (
+        <div
+          role="alert"
+          className="border-b border-[color-mix(in_oklab,var(--rp-danger)_25%,transparent)] bg-danger-soft px-4 py-3 text-sm leading-6 text-danger-ink sm:px-5"
+        >
+          <p className="font-semibold">Your session has expired.</p>
+          <p>Sign in again to continue reading messages.</p>
+          <button
+            type="button"
+            onClick={() => void signOut()}
+            className="btn btn-secondary mt-3"
+          >
+            Sign in again
+          </button>
+        </div>
+      ) : null}
+
+      <div
+        ref={scrollRef}
+        className="min-h-0 flex-1 overflow-y-auto bg-hushed/40 px-4 py-4 sm:px-6"
+      >
+        {messagesLoading ? (
+          <MessagesLoading />
+        ) : messagesError ? (
+          <SectionState
+            icon="!"
+            title="Could not load messages"
+            action={
+              <button
+                type="button"
+                onClick={onRetry}
+                className="btn btn-secondary"
+              >
+                Try again
+              </button>
+            }
+          >
+            <p>{messagesError.message}</p>
+          </SectionState>
+        ) : messages.length === 0 ? (
+          <SectionState icon="◌" title="No messages in this conversation">
+            <p>
+              Messages appear here after they are delivered to the connected
+              WhatsApp number.
+            </p>
+          </SectionState>
+        ) : (
+          <>
+            {hasOlder ? (
+              <div className="mb-4 text-center">
+                <button
+                  type="button"
+                  onClick={() => void loadOlder()}
+                  disabled={loadingOlder}
+                  className="btn btn-secondary text-xs"
+                >
+                  {loadingOlder ? (
+                    <>
+                      <Spinner className="h-3.5 w-3.5" />
+                      Loading older messages…
+                    </>
+                  ) : (
+                    "Load older messages"
+                  )}
+                </button>
+                {olderError ? (
+                  <p role="alert" className="mt-2 text-xs text-danger-ink">
+                    {olderError.message}
+                  </p>
+                ) : null}
+              </div>
+            ) : (
+              <p className="mb-4 text-center text-[11px] text-ink-faint">
+                Beginning of this conversation
+              </p>
+            )}
+
+            <ol
+              aria-label="Message history"
+              aria-busy={loadingOlder}
+              className="space-y-2"
+            >
+              {messages.map((message, index) => {
+                const previous = messages[index - 1];
+                const showDay =
+                  !previous ||
+                  messageDayKey(previous.providerTimestamp) !==
+                    messageDayKey(message.providerTimestamp);
+
+                return (
+                  <li key={message.id}>
+                    {showDay ? (
+                      <DayDivider value={message.providerTimestamp} />
+                    ) : null}
+                    <MessageBubble message={message} />
+                  </li>
+                );
+              })}
+            </ol>
+          </>
+        )}
+      </div>
+
+      <p className="border-t border-line px-4 py-2.5 text-[11px] text-ink-faint sm:px-5">
+        Inbound-only view. Reply drafting and WhatsApp sending are not connected
+        to this inbox.
+      </p>
+    </>
+  );
+}
+
+export function WhatsAppInbox() {
+  const { signOut } = useAuth();
+
+  const [conversations, setConversations] = useState<WhatsAppConversation[]>([]);
+  const [selectedConversationId, setSelectedConversationId] = useState<
+    string | null
+  >(null);
+  const [filter, setFilter] = useState<ConversationFilter>("open");
+  const [listOffset, setListOffset] = useState(0);
+  const [refreshToken, setRefreshToken] = useState(0);
+  const [threadRefreshToken, setThreadRefreshToken] = useState(0);
+  const [appendRetryToken, setAppendRetryToken] = useState(0);
+  const [conversationsLoading, setConversationsLoading] = useState(true);
+  const [loadingMoreConversations, setLoadingMoreConversations] =
+    useState(false);
+  const [conversationsError, setConversationsError] =
+    useState<ApiError | null>(null);
+  const [loadMoreError, setLoadMoreError] = useState<ApiError | null>(null);
+  const [listHasMore, setListHasMore] = useState(false);
+  const [listNextOffset, setListNextOffset] = useState<number | null>(null);
+  const [mobilePane, setMobilePane] = useState<"list" | "thread">("list");
+
+  useEffect(() => {
+    const controller = new AbortController();
+    const replacing = listOffset === 0;
+
+    async function load() {
+      if (replacing) {
+        setConversationsLoading(true);
+        setConversationsError(null);
+      } else {
+        setLoadingMoreConversations(true);
+      }
+
+      setLoadMoreError(null);
+
+      try {
+        const params = new URLSearchParams({
+          limit: String(CONVERSATION_PAGE_SIZE),
+          offset: String(listOffset),
+        });
+
+        if (filter !== "all") {
+          params.set("status", filter);
+        }
+
+        const response = await fetch(
+          `/api/conversations?${params.toString()}`,
+          { cache: "no-store", signal: controller.signal },
+        );
+        const data = await readJson(response);
+
+        if (!response.ok) {
+          throw toApiError(data, response, "Could not load conversations.");
+        }
+
+        const parsed = parseConversationsResponse(data);
+
+        if (!parsed) {
+          throw new ApiError("The inbox returned an unexpected response.");
+        }
+
+        if (controller.signal.aborted) {
+          return;
+        }
+
+        setConversations((current) =>
+          replacing
+            ? parsed.conversations
+            : mergeConversations(current, parsed.conversations),
+        );
+        setListHasMore(parsed.pagination?.hasMore ?? false);
+        setListNextOffset(parsed.pagination?.nextOffset ?? null);
+
+        if (replacing) {
+          setSelectedConversationId((current) => {
+            if (
+              current &&
+              parsed.conversations.some(
+                (conversation) => conversation.id === current,
+              )
+            ) {
+              return current;
+            }
+
+            return parsed.conversations[0]?.id ?? null;
+          });
+
+          if (parsed.conversations.length === 0) {
+            setMobilePane("list");
+          }
+        }
+      } catch (error) {
+        if (controller.signal.aborted) {
+          return;
+        }
+
+        const apiError = messageForError(
+          error,
+          "Could not load conversations.",
+        );
+
+        if (replacing) {
+          setConversationsError(apiError);
+        } else {
+          setLoadMoreError(apiError);
+        }
+      } finally {
+        if (!controller.signal.aborted) {
+          setConversationsLoading(false);
+          setLoadingMoreConversations(false);
+        }
+      }
+    }
+
+    void load();
+
+    return () => controller.abort();
+  }, [appendRetryToken, filter, listOffset, refreshToken]);
+
+  const selectedConversation = useMemo(
+    () =>
+      conversations.find(
+        (conversation) => conversation.id === selectedConversationId,
+      ) ?? null,
+    [conversations, selectedConversationId],
+  );
+
+  function changeFilter(next: ConversationFilter) {
+    if (next === filter) {
+      return;
+    }
+
+    setFilter(next);
+    setListOffset(0);
+    setConversations([]);
+    setConversationsError(null);
+    setLoadMoreError(null);
+    setListHasMore(false);
+    setListNextOffset(null);
+    setSelectedConversationId(null);
+    setMobilePane("list");
+  }
+
+  function selectConversation(conversationId: string) {
+    if (conversationId === selectedConversationId) {
+      setMobilePane("thread");
+      return;
+    }
+
+    setSelectedConversationId(conversationId);
+    setMobilePane("thread");
+  }
+
+  function refresh() {
+    setRefreshToken((token) => token + 1);
+    setThreadRefreshToken((token) => token + 1);
+    setListOffset(0);
+    setLoadMoreError(null);
+  }
+
+  function retryMessages() {
+    setThreadRefreshToken((token) => token + 1);
+  }
+
+  function loadMoreConversations() {
+    if (listNextOffset === null || loadingMoreConversations) {
+      return;
+    }
+
+    setListOffset(listNextOffset);
+  }
+
+  function retryLoadMore() {
+    if (listNextOffset === null || loadingMoreConversations) {
+      return;
+    }
+
+    setLoadMoreError(null);
+    setAppendRetryToken((token) => token + 1);
+  }
+
+  const listCopy = emptyListCopy(filter);
+  const sessionExpired =
+    conversationsError?.unauthorized === true ||
+    loadMoreError?.unauthorized === true;
+
+  return (
+    <div className="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
+      <PageHeading
+        title="Unified WhatsApp inbox"
+        description="Read and triage inbound WhatsApp conversations. Every conversation is scoped to your workspace."
+      >
+        <button
+          type="button"
+          onClick={refresh}
+          className="btn btn-secondary"
+          disabled={conversationsLoading}
         >
           Refresh
         </button>
-      </div>
+      </PageHeading>
 
-      <div className="mb-6">
+      <div className="mt-4 space-y-3">
         <Alert tone="info">
-          Single-business test integration. Messages appear only after Meta
-          delivers a signed webhook to this workspace. Automatic replies,
-          templates, and outbound sending are not implemented.
+          <span className="font-semibold">Inbound-only inbox.</span> Messages
+          delivered to your connected WhatsApp number appear here. Outbound
+          replies, templates, and AI drafting are not connected yet.
         </Alert>
+
+        {sessionExpired ? (
+          <div
+            role="alert"
+            className="rounded-xl border border-[color-mix(in_oklab,var(--rp-danger)_25%,transparent)] bg-danger-soft px-4 py-3 text-sm leading-6 text-danger-ink"
+          >
+            <p className="font-semibold">Your session has expired.</p>
+            <p>Sign in again to continue reading conversations.</p>
+            <button
+              type="button"
+              onClick={() => void signOut()}
+              className="btn btn-secondary mt-3"
+            >
+              Sign in again
+            </button>
+          </div>
+        ) : null}
       </div>
 
-      <div className="grid gap-5 lg:grid-cols-[minmax(280px,360px)_minmax(0,1fr)]">
+      <div className="mt-5 grid gap-4 lg:grid-cols-[minmax(280px,360px)_minmax(0,1fr)] lg:items-stretch">
         <section
-          aria-labelledby="conversation-list-title"
-          className="card overflow-hidden"
+          aria-label="Conversations"
+          className={`card h-[calc(100dvh-11rem)] min-h-[30rem] flex-col overflow-hidden lg:flex lg:h-[calc(100dvh-13rem)] ${
+            mobilePane === "thread" ? "hidden" : "flex"
+          }`}
         >
-          <div className="flex items-center justify-between border-b border-line px-5 py-4">
-            <div>
-              <h2
-                id="conversation-list-title"
-                className="font-bold text-ink"
-              >
-                Conversations
-              </h2>
-              <p className="mt-0.5 text-xs text-ink-soft">
-                {conversations.length} in this workspace
-              </p>
+          <div className="border-b border-line px-4 py-3">
+            <div className="flex items-center justify-between gap-3">
+              <div className="min-w-0">
+                <h2 className="text-sm font-bold text-ink">Conversations</h2>
+                <p className="text-xs text-ink-soft">
+                  {listHasMore
+                    ? `${conversations.length}+ shown`
+                    : `${conversations.length} shown`}
+                </p>
+              </div>
+              {conversationsLoading ? (
+                <span role="status" aria-live="polite">
+                  <Spinner className="h-4 w-4" />
+                  <span className="sr-only">Loading conversations…</span>
+                </span>
+              ) : null}
+            </div>
+
+            <div
+              role="group"
+              aria-label="Filter conversations by status"
+              className="mt-3 flex flex-wrap gap-1.5"
+            >
+              {CONVERSATION_FILTERS.map((option) => {
+                const selected = filter === option.value;
+
+                return (
+                  <button
+                    key={option.value}
+                    type="button"
+                    aria-pressed={selected}
+                    onClick={() => changeFilter(option.value)}
+                    className={`rounded-full px-3 py-1.5 text-xs font-semibold transition-colors ${
+                      selected
+                        ? "bg-accent text-on-accent"
+                        : "bg-hushed text-ink-soft hover:bg-line hover:text-ink"
+                    }`}
+                  >
+                    {option.label}
+                  </button>
+                );
+              })}
             </div>
           </div>
 
-          {conversationsLoading ? (
-            <p
-              role="status"
-              className="px-5 py-14 text-center text-sm text-ink-soft"
-            >
-              Loading conversations…
-            </p>
-          ) : conversationsError ? (
-            <div role="alert">
+          <div className="min-h-0 flex-1 overflow-y-auto">
+            {conversationsLoading ? (
+              <ConversationListSkeleton />
+            ) : conversationsError ? (
               <SectionState
-                title="Unable to load conversations"
+                icon="!"
+                title="Could not load conversations"
                 action={
                   <button
                     type="button"
-                    onClick={() => setRefreshToken((token) => token + 1)}
-                    className="btn btn-quiet"
+                    onClick={refresh}
+                    className="btn btn-secondary"
                   >
                     Try again
                   </button>
                 }
               >
-                <p>{conversationsError}</p>
+                <p>{conversationsError.message}</p>
               </SectionState>
-            </div>
-          ) : conversations.length === 0 ? (
-            <SectionState icon="◌" title="No WhatsApp conversations yet">
-              <p>
-                Send a message to the configured Meta test number, then
-                refresh. Unsupported message types will also appear here.
-              </p>
-            </SectionState>
-          ) : (
-            <ul
-              className="max-h-[34rem] divide-y divide-line overflow-y-auto"
-              aria-label="Conversation list"
-            >
-              {conversations.map((conversation) => {
-                const selected = conversation.id === selectedConversationId;
+            ) : conversations.length === 0 ? (
+              <SectionState
+                icon="◌"
+                title={listCopy.title}
+                action={
+                  <button
+                    type="button"
+                    onClick={refresh}
+                    className="btn btn-secondary"
+                  >
+                    Refresh
+                  </button>
+                }
+              >
+                <p>{listCopy.body}</p>
+              </SectionState>
+            ) : (
+              <ul aria-label="Conversation list" className="divide-y divide-line">
+                {conversations.map((conversation) => {
+                  const selected =
+                    conversation.id === selectedConversationId;
+                  const displayName = conversationDisplayName(conversation);
+                  const identity = conversationIdentity(conversation);
 
-                return (
-                  <li key={conversation.id}>
-                    <button
-                      type="button"
-                      onClick={() => selectConversation(conversation.id)}
-                      aria-current={selected ? "true" : undefined}
-                      className={`w-full px-5 py-4 text-left transition-colors ${
-                        selected
-                          ? "bg-accent-soft"
-                          : "hover:bg-hushed"
-                      }`}
-                    >
-                      <div className="flex items-start justify-between gap-3">
-                        <p
-                          className={`min-w-0 truncate text-sm font-semibold ${
-                            selected ? "text-accent-ink" : "text-ink"
-                          }`}
-                        >
-                          {conversationDisplayName(conversation)}
-                        </p>
-                        <time
-                          dateTime={conversation.lastMessageAt ?? undefined}
-                          className="shrink-0 text-[11px] text-ink-faint"
-                        >
-                          {formatWhatsAppTimestamp(
-                            conversation.lastMessageAt,
-                          )}
-                        </time>
-                      </div>
-                      <p className="mt-1 line-clamp-2 text-xs leading-5 text-ink-soft">
-                        {conversationPreview(conversation)}
-                      </p>
-                      {conversation.leadId ? (
-                        <span className="badge badge-booked mt-2 rounded-full">
-                          Linked to lead
+                  return (
+                    <li key={conversation.id}>
+                      <button
+                        type="button"
+                        onClick={() => selectConversation(conversation.id)}
+                        aria-current={selected ? "true" : undefined}
+                        className={`flex w-full gap-3 border-l-2 px-4 py-3 text-left transition-colors ${
+                          selected
+                            ? "border-accent bg-accent-soft"
+                            : "border-transparent hover:bg-hushed"
+                        }`}
+                      >
+                        <ConversationAvatar conversation={conversation} />
+                        <span className="min-w-0 flex-1">
+                          <span className="flex items-baseline justify-between gap-2">
+                            <span
+                              className={`truncate text-sm font-semibold ${
+                                selected ? "text-accent-ink" : "text-ink"
+                              }`}
+                            >
+                              {displayName}
+                            </span>
+                            {conversation.lastMessageAt ? (
+                              <time
+                                dateTime={conversation.lastMessageAt}
+                                className="shrink-0 text-[11px] text-ink-faint"
+                              >
+                                {formatConversationTimestamp(
+                                  conversation.lastMessageAt,
+                                )}
+                              </time>
+                            ) : null}
+                          </span>
+                          <span className="mt-0.5 block truncate text-xs text-ink-soft">
+                            {conversationPreview(conversation)}
+                          </span>
+                          <span className="mt-2 flex flex-wrap items-center gap-1.5">
+                            <StatusBadge status={conversation.status} />
+                            {conversation.leadId ? (
+                              <span className="badge badge-neutral">
+                                Linked lead
+                              </span>
+                            ) : null}
+                            {identity.value !== displayName ? (
+                              <span className="max-w-full truncate text-[11px] text-ink-faint">
+                                {identity.value}
+                              </span>
+                            ) : null}
+                          </span>
                         </span>
-                      ) : null}
-                    </button>
-                  </li>
-                );
-              })}
-            </ul>
-          )}
+                      </button>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+
+            {loadMoreError ? (
+              <div
+                role="alert"
+                className="border-t border-line p-3 text-sm text-danger-ink"
+              >
+                <p className="font-semibold">
+                  Could not load more conversations.
+                </p>
+                <p className="mt-1">{loadMoreError.message}</p>
+                <button
+                  type="button"
+                  onClick={retryLoadMore}
+                  disabled={loadingMoreConversations}
+                  className="btn btn-secondary mt-2 w-full"
+                >
+                  Try again
+                </button>
+              </div>
+            ) : null}
+
+            {listHasMore && !conversationsLoading && !loadMoreError ? (
+              <div className="border-t border-line p-3">
+                <button
+                  type="button"
+                  onClick={loadMoreConversations}
+                  disabled={loadingMoreConversations}
+                  className="btn btn-secondary w-full"
+                >
+                  {loadingMoreConversations ? (
+                    <>
+                      <Spinner className="h-4 w-4" />
+                      Loading conversations…
+                    </>
+                  ) : (
+                    "Load more conversations"
+                  )}
+                </button>
+              </div>
+            ) : null}
+          </div>
         </section>
 
         <section
-          aria-labelledby="message-thread-title"
-          className="card flex min-h-[16rem] flex-col overflow-hidden lg:min-h-[30rem]"
+          aria-label="Conversation messages"
+          className={`card h-[calc(100dvh-11rem)] min-h-[30rem] flex-col overflow-hidden lg:flex lg:h-[calc(100dvh-13rem)] ${
+            mobilePane === "list" ? "hidden" : "flex"
+          }`}
         >
           {selectedConversation ? (
-            <>
-              <div className="border-b border-line px-5 py-4">
-                <h2
-                  id="message-thread-title"
-                  className="truncate font-bold text-ink"
-                >
-                  {conversationDisplayName(selectedConversation)}
-                </h2>
-                <p className="mt-0.5 text-xs text-ink-soft">
-                  WhatsApp ID: {selectedConversation.customerWaId}
-                  {selectedConversation.leadId ? " · Linked to a lead" : ""}
-                </p>
-              </div>
-
-              <div className="flex-1 bg-hushed/50 px-4 py-5 sm:px-6">
-                {messagesLoading ? (
-                  <p
-                    role="status"
-                    className="py-16 text-center text-sm text-ink-soft"
-                  >
-                    Loading messages…
-                  </p>
-                ) : messagesError ? (
-                  <div role="alert" className="py-16">
-                    <SectionState
-                      title="Unable to load this conversation"
-                      action={
-                        <button
-                          type="button"
-                          onClick={() => setRefreshToken((token) => token + 1)}
-                          className="btn btn-quiet"
-                        >
-                          Try again
-                        </button>
-                      }
-                    >
-                      <p>{messagesError}</p>
-                    </SectionState>
-                  </div>
-                ) : messages.length === 0 ? (
-                  <SectionState title="No messages in this conversation">
-                    <p>
-                      Messages appear here as Meta delivers them to the
-                      configured webhook. Use the Refresh button to check for
-                      new messages.
-                    </p>
-                  </SectionState>
-                ) : (
-                  <ol className="space-y-3" aria-label="Inbound WhatsApp messages">
-                    {messages.map((message) => (
-                      <li key={message.id} className="flex justify-start">
-                        <article
-                          className={`max-w-[85%] rounded-2xl px-4 py-3 shadow-sm ring-1 ${
-                            message.processingStatus === "unsupported"
-                              ? "border border-[color-mix(in_oklab,var(--rp-warning)_25%,transparent)] bg-warning-soft ring-0"
-                              : "border-0 bg-raised ring-line"
-                          }`}
-                        >
-                          <span className="sr-only">Inbound message: </span>
-                          {message.processingStatus === "unsupported" ? (
-                            <p className="text-sm font-medium text-warning-ink">
-                              Unsupported {message.messageType} message
-                            </p>
-                          ) : (
-                            <p className="whitespace-pre-wrap break-words text-sm leading-6 text-ink">
-                              {message.text}
-                            </p>
-                          )}
-                          <time
-                            dateTime={message.providerTimestamp}
-                            className="mt-2 block text-right text-[11px] text-ink-faint"
-                          >
-                            {formatWhatsAppTimestamp(
-                              message.providerTimestamp,
-                            )}
-                          </time>
-                        </article>
-                      </li>
-                    ))}
-                  </ol>
-                )}
-              </div>
-
-              <p className="border-t border-line px-5 py-3 text-xs text-ink-faint">
-                Inbound-only test view. Reply drafting and WhatsApp sending are
-                not connected to this inbox.
-              </p>
-            </>
+            <ConversationThread
+              key={`${selectedConversation.id}:${threadRefreshToken}`}
+              conversation={selectedConversation}
+              onBack={() => setMobilePane("list")}
+              onRetry={retryMessages}
+            />
           ) : (
-            <div className="flex flex-1 items-center justify-center px-6 py-16 text-center">
-              <SectionState icon="◌" title="Select a conversation">
-                <p className="mx-auto max-w-sm">
-                  Incoming text and unsupported message types from the
-                  configured test number will be shown here.
-                </p>
-              </SectionState>
-            </div>
+            <SectionState
+              icon="◌"
+              title="Select a conversation"
+              action={
+                <button
+                  type="button"
+                  onClick={() => setMobilePane("list")}
+                  className="btn btn-secondary lg:hidden"
+                >
+                  Back to conversations
+                </button>
+              }
+            >
+              <p>
+                Choose a conversation from the list to read its message history.
+              </p>
+            </SectionState>
           )}
         </section>
       </div>

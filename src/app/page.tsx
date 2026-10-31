@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { Suspense, useEffect, useMemo, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import { useAuth } from "@/components/auth-provider";
 import { AppShell } from "@/components/app-shell";
 import { LeadTable } from "@/components/lead-table";
@@ -14,9 +15,11 @@ import { StatCard } from "@/components/stat-card";
 import { Alert, PageHeading, SectionState } from "@/components/ui";
 import {
   LEAD_FILTERS,
+  dashboardViewHref,
   followUpOverdueDays,
   formatFollowUpDate,
   isFollowUpDue,
+  parseDashboardView,
   parseLeadResponse,
   parseLeadsResponse,
   type Lead,
@@ -204,8 +207,10 @@ function NextSteps({ leadCount }: { leadCount: number }) {
 function Dashboard() {
   const { role } = useAuth();
   const canManage = role === "owner";
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const view = parseDashboardView(searchParams.get("view"));
   const [leads, setLeads] = useState<Lead[]>([]);
-  const [view, setView] = useState<View>("overview");
   const [filter, setFilter] = useState<LeadFilter>("All");
   const [search, setSearch] = useState("");
   const [modalOpen, setModalOpen] = useState(false);
@@ -373,16 +378,13 @@ function Dashboard() {
     }
 
     setLeads((current) => [newLead, ...current]);
-    setView("leads");
-    setFilter("All");
-    setSearch("");
     setModalOpen(false);
+    selectView("leads");
   }
 
   function selectView(nextView: View) {
-    setView(nextView);
-    setFilter("All");
-    setSearch("");
+    clearFilters();
+    router.push(dashboardViewHref(nextView), { scroll: false });
   }
 
   function clearFilters() {
@@ -407,7 +409,7 @@ function Dashboard() {
     <AppShell
       active="dashboard"
       dashboardView={view}
-      onSelectDashboardView={selectView}
+      onDashboardNavigate={clearFilters}
       leadCount={leads.length}
       followUpCount={followUpCount}
       canManage={canManage}
@@ -710,7 +712,15 @@ function Dashboard() {
 export default function Home() {
   return (
     <ProtectedApp>
-      <Dashboard />
+      <Suspense
+        fallback={
+          <div role="status" className="p-8 text-sm text-ink-soft">
+            Loading dashboard…
+          </div>
+        }
+      >
+        <Dashboard />
+      </Suspense>
     </ProtectedApp>
   );
 }
