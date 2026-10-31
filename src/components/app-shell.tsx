@@ -309,7 +309,7 @@ export function AppShell({
             dashboardView={currentDashboardView}
             followUpCount={onDashboard ? followUpCount : undefined}
             leadCount={onDashboard ? leadCount : undefined}
-            onNavigate={closeDrawer}
+            onNavigate={handleDashboardNavigate}
           />
         </div>
 
@@ -365,7 +365,7 @@ export function AppShell({
               dashboardView={currentDashboardView}
               followUpCount={onDashboard ? followUpCount : undefined}
               leadCount={onDashboard ? leadCount : undefined}
-              onNavigate={closeDrawer}
+              onNavigate={handleDashboardNavigate}
             />
           </div>
 
