@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useAuth } from "./auth-provider";
 import { ThemeSelect } from "./theme";
-import type { View } from "@/lib/leads";
+import { dashboardViewHref, type View } from "@/lib/leads";
 
 export type ShellActiveKey = "dashboard" | "whatsapp" | "settings";
 
@@ -87,12 +87,12 @@ function DashboardNavList({
   dashboardView,
   followUpCount,
   leadCount,
-  onSelectDashboardView,
+  onNavigate,
 }: {
-  dashboardView: View;
-  followUpCount: number;
-  leadCount: number;
-  onSelectDashboardView: (view: View) => void;
+  dashboardView?: View;
+  followUpCount?: number;
+  leadCount?: number;
+  onNavigate?: () => void;
 }) {
   return (
     <nav className="space-y-1" aria-label="Dashboard views">
@@ -100,23 +100,25 @@ function DashboardNavList({
         const active = item.view === dashboardView;
 
         return (
-          <button
+          <Link
             key={item.view}
-            type="button"
-            onClick={() => onSelectDashboardView(item.view)}
+            href={dashboardViewHref(item.view)}
+            onClick={onNavigate}
             aria-current={active ? "page" : undefined}
             className="nav-item"
           >
             {item.icon}
             {item.label}
-            {item.view === "follow-ups" && followUpCount > 0 ? (
+            {item.view === "follow-ups" &&
+            followUpCount !== undefined &&
+            followUpCount > 0 ? (
               <span className="ml-auto badge bg-warning-soft text-warning-ink">
                 {followUpCount}
               </span>
-            ) : item.view === "leads" ? (
+            ) : item.view === "leads" && leadCount !== undefined ? (
               <span className="ml-auto text-xs text-ink-faint">{leadCount}</span>
             ) : null}
-          </button>
+          </Link>
         );
       })}
     </nav>
@@ -223,7 +225,6 @@ function AssistantNote({ canManage }: { canManage: boolean }) {
 export function AppShell({
   active,
   dashboardView,
-  onSelectDashboardView,
   leadCount = 0,
   followUpCount = 0,
   canManage = false,
@@ -233,9 +234,8 @@ export function AppShell({
   children,
 }: {
   active: ShellActiveKey;
-  /** Current dashboard sub-view; required when the shell is used by the dashboard. */
+  /** Current dashboard sub-view, used to mark the active navigation item. */
   dashboardView?: View;
-  onSelectDashboardView?: (view: View) => void;
   leadCount?: number;
   followUpCount?: number;
   canManage?: boolean;
@@ -274,9 +274,9 @@ export function AppShell({
   }
 
   const onDashboard = active === "dashboard";
-  const dashboardControls = onDashboard
-    ? { dashboardView: dashboardView ?? "overview", leadCount, followUpCount }
-    : null;
+  const currentDashboardView = onDashboard
+    ? (dashboardView ?? "overview")
+    : undefined;
 
   return (
     <div className="flex min-h-screen bg-canvas text-ink">

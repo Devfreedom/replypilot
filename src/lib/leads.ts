@@ -72,6 +72,14 @@ export type LeadStatus = (typeof LEAD_STATUSES)[number];
 export type LeadFilter = "All" | LeadStatus;
 export type View = "overview" | "leads" | "follow-ups";
 export type LeadChannel = (typeof LEAD_CHANNELS)[number];
+
+export function parseDashboardView(value: string | null): View {
+  return value === "leads" || value === "follow-ups" ? value : "overview";
+}
+
+export function dashboardViewHref(view: View): string {
+  return `/?view=${view}`;
+}
 export type Lead = z.infer<typeof leadSchema>;
 export type ReplyDraft = z.infer<typeof replyDraftSchema>;
 export type ReplyDraftSource = z.infer<typeof replyDraftSourceSchema>;
