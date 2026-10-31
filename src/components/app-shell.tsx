@@ -297,17 +297,12 @@ export function AppShell({
           <p className="mb-1 px-3 text-xs font-semibold uppercase tracking-widest text-ink-faint">
             Leads
           </p>
-          {dashboardControls ? (
-            <DashboardNavList
-              dashboardView={dashboardControls.dashboardView}
-              followUpCount={dashboardControls.followUpCount}
-              leadCount={dashboardControls.leadCount}
-              onSelectDashboardView={(view) => {
-                onSelectDashboardView?.(view);
-                closeDrawer();
-              }}
-            />
-          ) : null}
+          <DashboardNavList
+            dashboardView={currentDashboardView}
+            followUpCount={onDashboard ? followUpCount : undefined}
+            leadCount={onDashboard ? leadCount : undefined}
+            onNavigate={closeDrawer}
+          />
         </div>
 
         <div className="mt-6">
@@ -354,22 +349,17 @@ export function AppShell({
             </p>
           </div>
 
-          {dashboardControls ? (
-            <div className="mt-6">
-              <p className="mb-1 px-3 text-xs font-semibold uppercase tracking-widest text-ink-faint">
-                Leads
-              </p>
-              <DashboardNavList
-                dashboardView={dashboardControls.dashboardView}
-                followUpCount={dashboardControls.followUpCount}
-                leadCount={dashboardControls.leadCount}
-                onSelectDashboardView={(view) => {
-                  onSelectDashboardView?.(view);
-                  closeDrawer();
-                }}
-              />
-            </div>
-          ) : null}
+          <div className="mt-6">
+            <p className="mb-1 px-3 text-xs font-semibold uppercase tracking-widest text-ink-faint">
+              Leads
+            </p>
+            <DashboardNavList
+              dashboardView={currentDashboardView}
+              followUpCount={onDashboard ? followUpCount : undefined}
+              leadCount={onDashboard ? leadCount : undefined}
+              onNavigate={closeDrawer}
+            />
+          </div>
 
           <div className="mt-6">
             <p className="mb-1 px-3 text-xs font-semibold uppercase tracking-widest text-ink-faint">
