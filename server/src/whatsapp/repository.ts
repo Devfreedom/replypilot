@@ -1,4 +1,5 @@
 import type { Pool, PoolClient } from "pg";
+import type { OutboundMessageStatus } from "../messaging/types.js";
 import { encodeMessageCursor, type MessageCursor } from "./cursor.js";
 import { normalizeWhatsAppPhoneE164 } from "./phone.js";
 import type {
@@ -22,6 +23,8 @@ type ConversationRow = Readonly<{
   last_message_preview: string | null;
   last_message_type: string | null;
   last_message_status: WhatsAppMessageProcessingStatus | null;
+  last_message_direction: "inbound" | "outbound" | null;
+  last_message_outbound_status: OutboundMessageStatus | null;
   created_at: Date;
   updated_at: Date;
 }>;
@@ -33,7 +36,9 @@ type MessageRow = Readonly<{
   message_type: string;
   text_content: string | null;
   provider_timestamp: Date;
-  processing_status: WhatsAppMessageProcessingStatus;
+  processing_status: WhatsAppMessageProcessingStatus | null;
+  outbound_status: OutboundMessageStatus | null;
+  outbound_failure_reason: string | null;
   created_at: Date;
 }>;
 
@@ -58,6 +63,8 @@ type ConversationSummaryRow = Readonly<{
   last_message_preview: string | null;
   last_message_type: string | null;
   last_message_status: WhatsAppMessageProcessingStatus | null;
+  last_message_direction: "inbound" | "outbound" | null;
+  last_message_outbound_status: OutboundMessageStatus | null;
   created_at: Date;
   updated_at: Date;
 }>;

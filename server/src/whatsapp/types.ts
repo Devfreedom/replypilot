@@ -81,6 +81,8 @@ export type WhatsAppConversation = Readonly<{
   lastMessagePreview: string | null;
   lastMessageType: string | null;
   lastMessageStatus: WhatsAppMessageProcessingStatus | null;
+  lastMessageDirection: "inbound" | "outbound" | null;
+  lastMessageOutboundStatus: OutboundMessageStatus | null;
   createdAt: string;
   updatedAt: string;
 }>;
@@ -92,7 +94,11 @@ export type WhatsAppMessage = Readonly<{
   messageType: string;
   text: string | null;
   providerTimestamp: string;
-  processingStatus: WhatsAppMessageProcessingStatus;
+  /** Null for outbound messages, which use outboundStatus instead. */
+  processingStatus: WhatsAppMessageProcessingStatus | null;
+  /** Null for inbound messages. `sent` is provider acceptance, not delivery. */
+  outboundStatus: OutboundMessageStatus | null;
+  failureReason: string | null;
   createdAt: string;
 }>;
 
