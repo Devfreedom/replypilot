@@ -23,6 +23,7 @@ import { runMigrations } from "../src/db/migrate.js";
 import { seedLeads } from "../src/db/seed.js";
 import type { ApprovalSendPolicy } from "../src/messaging/types.js";
 import {
+  OutboundProviderAmbiguousError,
   MockOutboundMessageProvider,
   type OutboundMessageProvider,
 } from "../src/outbound/provider.js";
@@ -7945,7 +7946,232 @@ test("two workers cannot send the same queued outbound message twice", async () 
   assert.equal(history.messages[0]?.status, "sent");
 });
 
-test("worker recovers stale claims and fails exhausted stale claims", async () => {
+test("ambiguous provider timeouts without idempotency require manual review", async () => {
+  const { lead, conversationId } = await createLeadWithConversation();
+  const draft = await createSavedDraftPayload(lead.id);
+  const approved = await approveSavedDraft(lead.id, draft.id, {
+    status: "approved",
+    sendPolicy: "approve_and_send",
+    conversationId,
+  });
+  assert.equal(approved.status, 200);
+
+  let providerCalls = 0;
+  const provider: OutboundMessageProvider = {
+    name: "mock",
+    idempotency: "unsupported",
+    async send() {
+      providerCalls += 1;
+      throw new OutboundProviderAmbiguousError("Provider request timed out.");
+    },
+  };
+  const options = {
+    batchSize: 10,
+    baseRetryDelayMs: 0,
+    staleAfterMs: 60_000,
+  };
+
+  const first = await runOutboundWorkerOnce(pool, provider, options);
+  assert.equal(first.manualReview, 1);
+  assert.equal(first.retried, 0);
+  assert.equal(providerCalls, 1);
+
+  const history = await readJson<OutboundHistoryPayload>(
+    await listOutboundMessages(),
+  );
+  assert.equal(history.messages[0]?.status, "manual_review");
+  assert.match(history.messages[0]?.failureReason ?? "", /outcome is ambiguous/i);
+  assert.equal(history.messages[0]?.canRetry, false);
+
+  const manualRetry = await sendSavedDraft(draft.id);
+  assert.equal(manualRetry.status, 409);
+  assert.match(
+    (await readJson<ErrorPayload>(manualRetry)).error,
+    /reconcile with the provider/i,
+  );
+
+  const second = await runOutboundWorkerOnce(pool, provider, options);
+  assert.equal(second.claimed, 0);
+  assert.equal(providerCalls, 1);
+});
+
+test("stale claims without provider idempotency are not sent again", async () => {
+  const { lead, conversationId } = await createLeadWithConversation();
+  const draft = await createSavedDraftPayload(lead.id);
+  const approved = await approveSavedDraft(lead.id, draft.id, {
+    status: "approved",
+    sendPolicy: "approve_and_send",
+    conversationId,
+  });
+  assert.equal(approved.status, 200);
+  const outbound = (
+    await readJson<ReplyDraftApprovalPayload>(approved)
+  ).outboundMessage;
+  assert.ok(outbound);
+
+  await pool.query(
+    `
+      UPDATE outbound_messages
+      SET status = 'sending',
+          attempts = 1,
+          started_at = now() - interval '10 minutes',
+          updated_at = now()
+      WHERE id = $1
+    `,
+    [outbound.id],
+  );
+
+  let providerCalls = 0;
+  const provider: OutboundMessageProvider = {
+    name: "mock",
+    idempotency: "unsupported",
+    async send() {
+      providerCalls += 1;
+      throw new Error("A stale ambiguous send must not be repeated.");
+    },
+  };
+  const recovered = await runOutboundWorkerOnce(pool, provider, {
+    batchSize: 10,
+    baseRetryDelayMs: 0,
+    staleAfterMs: 60_000,
+  });
+  assert.equal(recovered.recovered, 1);
+  assert.equal(recovered.manualReview, 1);
+  assert.equal(recovered.claimed, 0);
+  assert.equal(providerCalls, 0);
+
+  const history = await readJson<OutboundHistoryPayload>(
+    await listOutboundMessages(),
+  );
+  assert.equal(history.messages[0]?.status, "manual_review");
+});
+
+test("draft edits and approval revocation are blocked during provider execution", async () => {
+  const { lead, conversationId } = await createLeadWithConversation();
+  const draft = await createSavedDraftPayload(lead.id);
+  const approved = await approveSavedDraft(lead.id, draft.id, {
+    status: "approved",
+    sendPolicy: "approve_and_send",
+    conversationId,
+  });
+  assert.equal(approved.status, 200);
+
+  let signalProviderStarted: () => void = () => {
+    throw new Error("Provider-start signal was not initialized.");
+  };
+  let releaseProvider: () => void = () => {
+    throw new Error("Provider gate was not initialized.");
+  };
+  const providerStarted = new Promise<void>((resolve) => {
+    signalProviderStarted = resolve;
+  });
+  const providerGate = new Promise<void>((resolve) => {
+    releaseProvider = resolve;
+  });
+  const provider: OutboundMessageProvider = {
+    name: "mock",
+    idempotency: "unsupported",
+    async send() {
+      signalProviderStarted();
+      await providerGate;
+      return {
+        providerMessageId: "mock-provider-result",
+        status: "sent",
+      };
+    },
+  };
+  const worker = runOutboundWorkerOnce(pool, provider, {
+    batchSize: 10,
+    baseRetryDelayMs: 0,
+    staleAfterMs: 60_000,
+  });
+
+  await providerStarted;
+  const edit = await patchSavedDraft(lead.id, draft.id, {
+    draftReply: "Content changed while the provider request was active.",
+  });
+  assert.equal(edit.status, 409);
+
+  const revoke = await patchSavedDraft(lead.id, draft.id, { status: "draft" });
+  assert.equal(revoke.status, 409);
+
+  releaseProvider();
+  const result = await worker;
+  assert.equal(result.sent, 1);
+
+  const history = await readJson<OutboundHistoryPayload>(
+    await listOutboundMessages(),
+  );
+  assert.equal(history.messages[0]?.status, "sent");
+  assert.equal(history.messages[0]?.content, draft.draftReply);
+});
+
+test("worker recovers stale claims with the original idempotency key", async () => {
+  const { lead, conversationId } = await createLeadWithConversation();
+  const draft = await createSavedDraftPayload(lead.id);
+  const approved = await approveSavedDraft(lead.id, draft.id, {
+    status: "approved",
+    sendPolicy: "approve_and_send",
+    conversationId,
+  });
+  assert.equal(approved.status, 200);
+  const outbound = (
+    await readJson<ReplyDraftApprovalPayload>(approved)
+  ).outboundMessage;
+  assert.ok(outbound);
+
+  const before = await pool.query<{ idempotency_key: string }>(
+    "SELECT idempotency_key FROM outbound_messages WHERE id = $1",
+    [outbound.id],
+  );
+  const idempotencyKey = before.rows[0]?.idempotency_key;
+  assert.ok(idempotencyKey);
+  const provider = new MockOutboundMessageProvider();
+  const providerAccepted = await provider.send({
+    conversationId,
+    content: outbound.content,
+    idempotencyKey,
+  });
+
+  await pool.query(
+    `
+      UPDATE outbound_messages
+      SET status = 'sending',
+          attempts = 1,
+          started_at = now() - interval '10 minutes',
+          updated_at = now()
+      WHERE id = $1
+    `,
+    [outbound.id],
+  );
+
+  const result = await runOutboundWorkerOnce(
+    pool,
+    provider,
+    { batchSize: 10, baseRetryDelayMs: 0, staleAfterMs: 60_000 },
+  );
+  assert.equal(result.recovered, 1);
+  assert.equal(result.sent, 1);
+
+  const after = await pool.query<{
+    idempotency_key: string;
+    provider_message_id: string | null;
+  }>(
+    `
+      SELECT idempotency_key, provider_message_id
+      FROM outbound_messages
+      WHERE id = $1
+    `,
+    [outbound.id],
+  );
+  assert.equal(after.rows[0]?.idempotency_key, idempotencyKey);
+  assert.equal(
+    after.rows[0]?.provider_message_id,
+    providerAccepted.providerMessageId,
+  );
+});
+
+test("worker recovers stale claims and reviews exhausted ambiguous claims", async () => {
   const first = await createLeadWithConversation();
   const firstDraft = await createSavedDraftPayload(first.lead.id);
   const firstApproved = await approveSavedDraft(
@@ -8039,9 +8265,9 @@ test("worker recovers stale claims and fails exhausted stale claims", async () =
     (message) => message.id === secondOutbound.id,
   );
   assert.ok(failed);
-  assert.equal(failed.status, "failed");
+  assert.equal(failed.status, "manual_review");
   assert.equal(failed.attempts, 3);
-  assert.equal(failed.canRetry, true);
+  assert.equal(failed.canRetry, false);
 });
 
 test("worker processes at most one bounded batch per tick", async () => {
