@@ -114,7 +114,9 @@ export async function runOutboundWorkerOnce(
       );
 
       const updated =
-        ambiguous && provider.idempotency !== "guaranteed"
+        ambiguous &&
+        (provider.idempotency !== "guaranteed" ||
+          row.attempts >= row.max_attempts)
           ? await markOutboundManualReview(
               pool,
               row,

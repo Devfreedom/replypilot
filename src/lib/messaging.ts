@@ -31,6 +31,7 @@ export const OUTBOUND_MESSAGE_STATUSES = [
   "delivered",
   "failed",
   "cancelled",
+  "manual_review",
 ] as const;
 export type OutboundMessageStatus =
   (typeof OUTBOUND_MESSAGE_STATUSES)[number];
@@ -42,6 +43,7 @@ export const OUTBOUND_STATUS_LABELS: Record<OutboundMessageStatus, string> = {
   delivered: "Delivered",
   failed: "Failed",
   cancelled: "Cancelled",
+  manual_review: "Needs review",
 };
 
 export const OUTBOUND_STATUS_DESCRIPTIONS: Record<
@@ -54,6 +56,8 @@ export const OUTBOUND_STATUS_DESCRIPTIONS: Record<
   delivered: "The provider reported delivery.",
   failed: "The provider rejected the message after the allowed attempts.",
   cancelled: "The approval or active conversation is no longer valid.",
+  manual_review:
+    "The provider outcome is unknown. Reconcile with the provider before any further send.",
 };
 
 const approvalSendPolicySchema = z.enum(APPROVAL_SEND_POLICIES);
@@ -122,6 +126,30 @@ export type MessagingSettings = z.infer<typeof messagingSettingsSchema>;
 export function parseOutboundMessage(data: unknown): OutboundMessage | null {
   const parsed = outboundMessageSchema.safeParse(data);
   return parsed.success ? parsed.data : null;
+}
+
+export function parseSendOutboundMessageResponse(
+  data: unknown,
+): OutboundMessage | null {
+  const parsed = z
+    .object({ outboundMessage: outboundMessageSchema })
+    .safeParse(data);
+  return parsed.success ? parsed.data.outboundMessage : null;
+}
+
+export function sendPolicyChoiceForDraftSelection(
+  previousDraftId: string | null,
+  nextDraftId: string,
+  currentChoice: ApprovalSendPolicy | "default",
+): ApprovalSendPolicy | "default" {
+  return previousDraftId === nextDraftId ? currentChoice : "default";
+}
+
+export function canRetryOutboundForRole(
+  role: "owner" | "member" | null,
+  canRetry: boolean,
+): boolean {
+  return role === "owner" && canRetry;
 }
 
 export function parseOutboundMessagesResponse(

@@ -12,6 +12,7 @@ export const OUTBOUND_MESSAGE_STATUSES = [
   "delivered",
   "failed",
   "cancelled",
+  "manual_review",
 ] as const;
 
 export type OutboundMessageStatus =
