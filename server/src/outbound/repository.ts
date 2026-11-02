@@ -328,7 +328,6 @@ export async function listOutboundMessages(
         customer.id AS customer_id,
         COALESCE(customer.display_name, conversation.contact_name)
           AS customer_display_name,
-        customer.phone_e164 AS customer_phone_e164,
         customer.provider_contact_id AS customer_provider_contact_id,
         draft.status AS reply_draft_status,
         draft.draft_reply AS reply_draft_content
@@ -673,4 +672,143 @@ export async function recoverStaleSending(
     manualReview: result.rows.filter((row) => row.status === "manual_review")
       .length,
   };
+}
+
+/**
+ * Looks up an outbound message by its provider message ID (wamid) within a
+ * specific workspace. Used by the delivery-status webhook to match Meta events
+ * back to the correct row.
+ */
+export async function getOutboundMessageByWamid(
+  pool: Pool,
+  workspaceId: string,
+  providerMessageId: string,
+): Promise<OutboundMessageRecord | null> {
+  const result = await pool.query<OutboundMessageRow>(
+    `
+      SELECT ${OUTBOUND_MESSAGE_COLUMNS}
+      FROM outbound_messages
+      WHERE workspace_id = $1
+        AND provider_message_id = $2
+      LIMIT 1
+    `,
+    [workspaceId, providerMessageId],
+  );
+
+  const row = result.rows[0];
+  return row ? mapOutboundMessageRow(row) : null;
+}
+
+/**
+ * Delivery-status event: "sent" acknowledgement from the Meta platform.
+ * Only advances the status when the current state allows it (sent → sent is
+ * idempotent, but cannot overwrite delivered or read).
+ */
+export async function markOutboundDeliveryEventSent(
+  pool: Pool,
+  workspaceId: string,
+  providerMessageId: string,
+  eventTimestamp: Date,
+): Promise<boolean> {
+  const result = await pool.query(
+    `
+      UPDATE outbound_messages
+      SET status = 'sent',
+          sent_at = COALESCE(sent_at, $3),
+          updated_at = now()
+      WHERE workspace_id = $1
+        AND provider_message_id = $2
+        AND status IN ('sent', 'sending', 'queued')
+        AND status NOT IN ('delivered', 'read')
+    `,
+    [workspaceId, providerMessageId, eventTimestamp],
+  );
+
+  return (result.rowCount ?? 0) > 0;
+}
+
+/**
+ * Delivery-status event: customer device acknowledged receipt.
+ * delivered cannot regress to sent. An already-read row is not downgraded.
+ */
+export async function markOutboundDeliveryEventDelivered(
+  pool: Pool,
+  workspaceId: string,
+  providerMessageId: string,
+  eventTimestamp: Date,
+): Promise<boolean> {
+  const result = await pool.query(
+    `
+      UPDATE outbound_messages
+      SET status = 'delivered',
+          delivered_at = COALESCE(delivered_at, $3),
+          updated_at = now()
+      WHERE workspace_id = $1
+        AND provider_message_id = $2
+        AND status NOT IN ('read', 'cancelled', 'failed', 'manual_review')
+    `,
+    [workspaceId, providerMessageId, eventTimestamp],
+  );
+
+  return (result.rowCount ?? 0) > 0;
+}
+
+/**
+ * Delivery-status event: customer read the message.
+ * read is the terminal positive state; it cannot be overwritten by delivered
+ * or sent events. Sets delivered_at if not already set to preserve the audit
+ * trail.
+ */
+export async function markOutboundDeliveryEventRead(
+  pool: Pool,
+  workspaceId: string,
+  providerMessageId: string,
+  eventTimestamp: Date,
+): Promise<boolean> {
+  const result = await pool.query(
+    `
+      UPDATE outbound_messages
+      SET status = 'read',
+          delivered_at = COALESCE(delivered_at, $3),
+          updated_at = now()
+      WHERE workspace_id = $1
+        AND provider_message_id = $2
+        AND status NOT IN ('read', 'cancelled', 'failed', 'manual_review')
+    `,
+    [workspaceId, providerMessageId, eventTimestamp],
+  );
+
+  return (result.rowCount ?? 0) > 0;
+}
+
+/**
+ * Delivery-status event: Meta reports a permanent failure to deliver.
+ * Only recorded when the message is in a state where failure is meaningful;
+ * does not overwrite a delivered or read status. The raw error object is
+ * passed as a bounded JSON string for audit purposes but must not include
+ * sensitive provider data.
+ */
+export async function markOutboundDeliveryEventFailed(
+  pool: Pool,
+  workspaceId: string,
+  providerMessageId: string,
+  eventTimestamp: Date,
+  failureReason: string,
+): Promise<boolean> {
+  const result = await pool.query(
+    `
+      UPDATE outbound_messages
+      SET status = 'failed',
+          failure_reason = $4,
+          updated_at = now()
+      WHERE workspace_id = $1
+        AND provider_message_id = $2
+        AND status NOT IN (
+          'delivered', 'read', 'cancelled', 'failed', 'manual_review'
+        )
+    `,
+    [workspaceId, providerMessageId, eventTimestamp, failureReason],
+  );
+
+  return (result.rowCount ?? 0) > 0;
 }

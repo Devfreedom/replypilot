@@ -7,6 +7,24 @@
 
 -- 1. Widen outbound content limit to match WhatsApp's 4096-character cap ------
 ALTER TABLE outbound_messages
+  DROP CONSTRAINT IF EXISTS outbound_messages_status_check;
+
+ALTER TABLE outbound_messages
+  ADD CONSTRAINT outbound_messages_status_check
+  CHECK (
+    status IN (
+      'queued',
+      'sending',
+      'sent',
+      'delivered',
+      'read',
+      'failed',
+      'cancelled',
+      'manual_review'
+    )
+  );
+
+ALTER TABLE outbound_messages
   DROP CONSTRAINT IF EXISTS outbound_messages_content_check;
 
 ALTER TABLE outbound_messages
