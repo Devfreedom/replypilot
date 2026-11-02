@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { randomUUID, createHmac } from "node:crypto";
+import { randomUUID, createHmac, createHash } from "node:crypto";
 import { after, before, beforeEach, test } from "node:test";
 import { Pool } from "pg";
 import {
@@ -24,6 +24,7 @@ import {
 } from "../src/outbound/repository.js";
 import { checkServiceWindow } from "../src/whatsapp/service-window.js";
 import {
+  getCustomerSuppression,
   isCustomerSuppressed,
   suppressCustomer,
   unsuppressCustomer,
@@ -31,6 +32,7 @@ import {
 import { processDeliveryStatusEvents } from "../src/whatsapp/delivery-webhook.js";
 import { isValidMetaSignature } from "../src/whatsapp/signature.js";
 import { persistInboundMessages } from "../src/whatsapp/repository.js";
+import { parseWhatsAppDeliveryStatuses } from "../src/whatsapp/parser.js";
 import type {
   InboundWhatsAppMessage,
 } from "../src/whatsapp/types.js";
@@ -1103,6 +1105,175 @@ test("20. Suppression is rechecked immediately before sending", async () => {
   assert.equal(fetchCalls, 0);
 });
 
+// ─── 4b. Opt-out phrase recognition ───────────────────────────────────────────
+
+function makeOptOutMessage(
+  text: string,
+  overrides: Partial<InboundWhatsAppMessage> = {},
+): InboundWhatsAppMessage {
+  const customerPhone = overrides.customerPhone ?? "+16505551234";
+  return {
+    providerMessageId: `wamid.optout-${randomUUID()}`,
+    phoneNumberId: TEST_PHONE_NUMBER_ID,
+    senderWaId: customerPhone.replace("+", ""),
+    senderPhoneNumber: customerPhone.replace("+", ""),
+    contactName: "Opt Out Customer",
+    messageType: "text",
+    text,
+    providerTimestamp: new Date(),
+    ...overrides,
+  };
+}
+
+test("23. Explicit STOP request creates suppression", async () => {
+  const { customerId } = await createTestCustomerAndConversation({
+    customerPhone: "+16505551111",
+  });
+
+  assert.equal(
+    await isCustomerSuppressed(pool, TEST_WORKSPACE_ID, customerId),
+    false,
+    "Customer must not be suppressed before opt-out",
+  );
+
+  const result = await persistInboundMessages(pool, TEST_WORKSPACE_ID, [
+    makeOptOutMessage("STOP", { customerPhone: "+16505551111" }),
+  ]);
+
+  assert.equal(result.stored, 1);
+  assert.equal(result.duplicates, 0);
+  assert.equal(
+    await isCustomerSuppressed(pool, TEST_WORKSPACE_ID, customerId),
+    true,
+    "STOP must create suppression",
+  );
+
+  const suppression = await getCustomerSuppression(
+    pool,
+    TEST_WORKSPACE_ID,
+    customerId,
+  );
+  assert.ok(suppression, "Suppression record must exist");
+  assert.equal(suppression.reason, "opt_out");
+  assert.ok(suppression.notes?.includes("no further messages"));
+});
+
+test("24. Supported explicit opt-out phrases are recognized", async () => {
+  const phrases = [
+    "STOP",
+    "stop",
+    "please stop",
+    "unsubscribe",
+    "cancel",
+    "end",
+    "quit",
+    "stop all",
+    "stop all messages",
+    "stop messaging me",
+    "do not message me",
+    "don't contact me",
+    "STOP!",
+    "stop.",
+  ];
+
+  for (const phrase of phrases) {
+    const customerPhone = `+1650555${String(phrases.indexOf(phrase) + 100).padStart(4, "0")}`;
+    const { customerId } = await createTestCustomerAndConversation({
+      customerPhone,
+    });
+
+    assert.equal(
+      await isCustomerSuppressed(pool, TEST_WORKSPACE_ID, customerId),
+      false,
+      `Customer must not be suppressed before "${phrase}"`,
+    );
+
+    const result = await persistInboundMessages(pool, TEST_WORKSPACE_ID, [
+      makeOptOutMessage(phrase, { customerPhone }),
+    ]);
+
+    assert.equal(result.stored, 1, `Phrase "${phrase}" must be stored`);
+    assert.equal(
+      await isCustomerSuppressed(pool, TEST_WORKSPACE_ID, customerId),
+      true,
+      `Phrase "${phrase}" must create suppression`,
+    );
+
+    // Clean up for the next phrase.
+    await unsuppressCustomer(pool, TEST_WORKSPACE_ID, customerId);
+  }
+});
+
+test("25. Unrelated messages containing stop do not create suppression", async () => {
+  const nonOptOutPhrases = [
+    "this is a stop sign",
+    "the bus stop is nearby",
+    "stopping the car",
+    "I want to stop",
+    "please stop the car",
+    "not a stop command",
+    "stopwatch",
+    "customer service stop list",
+  ];
+
+  for (const phrase of nonOptOutPhrases) {
+    const customerPhone = `+1650555${String(nonOptOutPhrases.indexOf(phrase) + 200).padStart(4, "0")}`;
+    const { customerId } = await createTestCustomerAndConversation({
+      customerPhone,
+    });
+
+    const result = await persistInboundMessages(pool, TEST_WORKSPACE_ID, [
+      makeOptOutMessage(phrase, { customerPhone }),
+    ]);
+
+    assert.equal(result.stored, 1, `Message "${phrase}" must be stored`);
+    assert.equal(
+      await isCustomerSuppressed(pool, TEST_WORKSPACE_ID, customerId),
+      false,
+      `Message "${phrase}" must NOT create suppression`,
+    );
+  }
+});
+
+test("26. Duplicate webhook deliveries do not create inconsistent suppression records", async () => {
+  const { customerId } = await createTestCustomerAndConversation({
+    customerPhone: "+16505553333",
+  });
+
+  const optOutMessage = makeOptOutMessage("STOP", {
+    customerPhone: "+16505553333",
+  });
+
+  // First delivery creates the suppression.
+  const first = await persistInboundMessages(pool, TEST_WORKSPACE_ID, [
+    optOutMessage,
+  ]);
+  assert.equal(first.stored, 1);
+  assert.equal(first.duplicates, 0);
+  assert.equal(
+    await isCustomerSuppressed(pool, TEST_WORKSPACE_ID, customerId),
+    true,
+  );
+
+  // Re-delivering the exact same provider message ID is a duplicate.
+  const second = await persistInboundMessages(pool, TEST_WORKSPACE_ID, [
+    optOutMessage,
+  ]);
+  assert.equal(second.stored, 0);
+  assert.equal(second.duplicates, 1);
+
+  // Still exactly one suppression record.
+  const count = await pool.query<{ cnt: number }>(
+    `
+      SELECT COUNT(*)::int AS cnt
+      FROM customer_suppressions
+      WHERE workspace_id = $1 AND customer_id = $2
+    `,
+    [TEST_WORKSPACE_ID, customerId],
+  );
+  assert.equal(count.rows[0]?.cnt, 1, "Duplicate delivery must not create a second suppression record");
+});
+
 // ─── 5. Delivery events ───────────────────────────────────────────────────────
 
 test("21. Duplicate delivery events are processed only once", async () => {
@@ -1346,6 +1517,38 @@ test("26. Event processing remains workspace-isolated", async () => {
   // The original workspace's row must remain unchanged.
   const row = await getOutboundMessageByWamid(pool, TEST_WORKSPACE_ID, wamid);
   assert.equal(row?.status, "sent", "Wrong-workspace event must not affect the correct workspace");
+});
+
+// ─── 5b. Signed webhook delivery-status ──────────────────────────────────
+
+test("31. `sent` delivery event updates the correct outbound message", async () => {
+  const { conversationId } = await createTestCustomerAndConversation();
+  const wamid = `wamid.sent-update-${randomUUID()}`;
+  await insertTestOutboundRow({ conversationId, providerMessageId: wamid, status: "queued" });
+
+  const eventTime = new Date("2026-10-11T10:00:00.000Z");
+  const updated = await markOutboundDeliveryEventSent(pool, TEST_WORKSPACE_ID, wamid, eventTime);
+  assert.equal(updated, true);
+
+  const row = await getOutboundMessageByWamid(pool, TEST_WORKSPACE_ID, wamid);
+  assert.ok(row);
+  assert.equal(row.status, "sent", "sent event must set status to sent");
+  assert.equal(row.sentAt, eventTime.toISOString(), "sent_at must persist the provider timestamp");
+});
+
+test("32. `read` delivery event updates the correct outbound message", async () => {
+  const { conversationId } = await createTestCustomerAndConversation();
+  const wamid = `wamid.read-update-${randomUUID()}`;
+  await insertTestOutboundRow({ conversationId, providerMessageId: wamid });
+
+  const eventTime = new Date("2026-10-11T11:00:00.000Z");
+  const updated = await markOutboundDeliveryEventRead(pool, TEST_WORKSPACE_ID, wamid, eventTime);
+  assert.equal(updated, true);
+
+  const row = await getOutboundMessageByWamid(pool, TEST_WORKSPACE_ID, wamid);
+  assert.ok(row);
+  assert.equal(row.status, "read", "read event must set status to read");
+  assert.equal(row.deliveredAt, eventTime.toISOString(), "delivered_at must persist for read");
 });
 
 // ─── 6. Regression ───────────────────────────────────────────────────────────
