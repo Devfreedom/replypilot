@@ -1,38 +1,16 @@
-/**
- * Milestone 13 — Meta WhatsApp Cloud API Outbound Integration Tests
- *
- * All 30 required test cases. Automated tests NEVER send real WhatsApp
- * messages. All HTTP calls to Meta are mocked using a fake server or by
- * substituting the provider class directly.
- *
- * Test groups:
- *  1. Provider and configuration (tests 1–6)
- *  2. Workspace, sender and recipient restrictions (tests 7–12)
- *  3. Customer service window (tests 13–17)
- *  4. Suppression (tests 18–20)
- *  5. Delivery events (tests 21–26)
- *  6. Regression (tests 27–30)
- */
-
 import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
+import { randomUUID, createHmac } from "node:crypto";
 import { after, before, beforeEach, test } from "node:test";
 import { Pool } from "pg";
 import {
   MockOutboundMessageProvider,
   OutboundProviderAmbiguousError,
   OutboundProviderError,
-  type OutboundMessageProvider,
-  type OutboundProviderSendInput,
-  type OutboundProviderSendResult,
 } from "../src/outbound/provider.js";
 import { loadMetaOutboundConfig, isWorkspaceAllowedForMetaSending, isRecipientAllowlisted } from "../src/outbound/meta-config.js";
 import { MetaWhatsAppCloudProvider } from "../src/outbound/meta-provider.js";
-import { runOutboundWorkerOnce } from "../src/outbound/worker.js";
-import { insertQueuedOutboundMessage } from "../src/outbound/repository.js";
 import {
   markOutboundDeliveryEventDelivered,
-  markOutboundDeliveryEventFailed,
   markOutboundDeliveryEventRead,
   markOutboundDeliveryEventSent,
   getOutboundMessageByWamid,
@@ -43,8 +21,8 @@ import {
   suppressCustomer,
   unsuppressCustomer,
 } from "../src/whatsapp/suppression.js";
-import { parseWhatsAppDeliveryStatuses } from "../src/whatsapp/parser.js";
 import { processDeliveryStatusEvents } from "../src/whatsapp/delivery-webhook.js";
+import { isValidMetaSignature } from "../src/whatsapp/signature.js";
 import { persistInboundMessages } from "../src/whatsapp/repository.js";
 import type { InboundWhatsAppMessage } from "../src/whatsapp/types.js";
 import { createPool } from "../src/db/pool.js";
@@ -80,7 +58,6 @@ beforeEach(async () => {
 const TEST_WORKSPACE_ID = LEGACY_WORKSPACE_ID;
 const TEST_PHONE_NUMBER_ID = "106540352242922";
 const TEST_CUSTOMER_PHONE = "+16505551234";
-const TEST_CUSTOMER_WA_ID = "16505551234";
 const OTHER_WORKSPACE_ID = randomUUID();
 
 /** Creates a minimal customer and conversation for testing. */
@@ -989,14 +966,9 @@ test("25. Invalid webhook signatures are rejected", () => {
     ],
   });
 
-  const { isValidMetaSignature } = require(
-    "../src/whatsapp/signature.js",
-  ) as typeof import("../src/whatsapp/signature.js");
-
   const rawBody = Buffer.from(payload, "utf8");
 
   // Valid signature.
-  const { createHmac } = require("node:crypto") as typeof import("node:crypto");
   const validSig = `sha256=${createHmac("sha256", SECRET).update(rawBody).digest("hex")}`;
   assert.equal(isValidMetaSignature(rawBody, validSig, SECRET), true);
 

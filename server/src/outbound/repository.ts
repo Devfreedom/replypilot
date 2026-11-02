@@ -32,28 +32,6 @@ const OUTBOUND_MESSAGE_COLUMNS = `
   NULL::text AS customer_phone_e164
 `;
 
-const OUTBOUND_MESSAGE_RETURNING_COLUMNS = `
-  message.id,
-  message.workspace_id,
-  message.conversation_id,
-  message.reply_draft_id,
-  message.provider,
-  message.provider_message_id,
-  message.content,
-  message.status,
-  message.idempotency_key,
-  message.failure_reason,
-  message.attempts,
-  message.max_attempts,
-  message.queued_at,
-  message.started_at,
-  message.sent_at,
-  message.delivered_at,
-  message.created_at,
-  message.updated_at,
-  NULL::text AS customer_phone_e164
-`; // Used by future queries that UPDATE...RETURNING with a message table alias.
-
 const OUTBOUND_MESSAGE_SELECT_COLUMNS = `
   message.id,
   message.workspace_id,

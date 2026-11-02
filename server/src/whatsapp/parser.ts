@@ -251,7 +251,6 @@ export function parseWhatsAppWebhook(
 
 import type { DeliveryStatusEvent } from "./types.js";
 
-const DELIVERY_STATUS_VALUES = ["sent", "delivered", "read", "failed"] as const;
 const WAMID_PATTERN = /^wamid\.[A-Za-z0-9+/=_-]{5,500}$/;
 const DELIVERY_STATUS_MAX_LENGTH = 64;
 

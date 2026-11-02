@@ -185,15 +185,18 @@ test("status labels keep provider acceptance distinct from delivery", () => {
     "sending",
     "sent",
     "delivered",
+    "read",
     "failed",
     "cancelled",
     "manual_review",
   ]);
   assert.equal(OUTBOUND_STATUS_LABELS.sent, "Sent");
   assert.equal(OUTBOUND_STATUS_LABELS.delivered, "Delivered");
+  assert.equal(OUTBOUND_STATUS_LABELS.read, "Read");
   assert.equal(OUTBOUND_STATUS_LABELS.manual_review, "Needs review");
   assert.match(OUTBOUND_STATUS_DESCRIPTIONS.sent, /not confirmed/i);
   assert.match(OUTBOUND_STATUS_DESCRIPTIONS.delivered, /reported delivery/i);
+  assert.match(OUTBOUND_STATUS_DESCRIPTIONS.read, /read/i);
 });
 
 test("approval policy labels cover every supported choice", () => {

@@ -304,6 +304,8 @@ type WhatsAppWebhookPayload = {
   status: "ok" | "ignored";
   stored?: number;
   duplicates?: number;
+  deliveryProcessed?: number;
+  deliveryIgnored?: number;
 };
 
 type WhatsAppConversationsPayload = {
@@ -4562,6 +4564,10 @@ test("WhatsApp webhook validates signatures against the exact raw body", async (
       status: "ok",
       stored: 1,
       duplicates: 0,
+      deliveryProcessed: 0,
+      deliveryIgnored: 0,
+      deliveryProcessed: 0,
+      deliveryIgnored: 0,
     });
   } finally {
     await stopServer(app.server);
@@ -4598,6 +4604,8 @@ test("WhatsApp webhook persists a text message and exposes it in the protected i
       status: "ok",
       stored: 1,
       duplicates: 0,
+      deliveryProcessed: 0,
+      deliveryIgnored: 0,
     });
 
     const conversations = await pool.query<{
@@ -4736,6 +4744,8 @@ test("WhatsApp webhook supports BSUID senders when phone numbers are omitted", a
       status: "ok",
       stored: 1,
       duplicates: 0,
+      deliveryProcessed: 0,
+      deliveryIgnored: 0,
     });
 
     const conversation = await pool.query<{
@@ -4814,6 +4824,8 @@ test("WhatsApp webhook stores messages from multiple entries and changes once", 
       status: "ok",
       stored: 3,
       duplicates: 0,
+      deliveryProcessed: 0,
+      deliveryIgnored: 0,
     });
 
     const conversations = await pool.query<{
@@ -4865,6 +4877,8 @@ test("WhatsApp webhook persists unsupported message types without inventing text
       status: "ok",
       stored: 1,
       duplicates: 0,
+      deliveryProcessed: 0,
+      deliveryIgnored: 0,
     });
 
     const conversation = await pool.query<{ id: string }>(
@@ -5053,6 +5067,8 @@ test("WhatsApp webhook acknowledges duplicate provider message IDs without new a
       status: "ok",
       stored: 1,
       duplicates: 0,
+      deliveryProcessed: 0,
+      deliveryIgnored: 0,
     });
 
     const before = await pool.query<{
