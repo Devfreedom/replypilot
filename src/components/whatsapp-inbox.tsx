@@ -24,6 +24,7 @@ import {
   mergeConversations,
   mergeMessages,
   messageDayKey,
+  outboundMessageStatusLabel,
   parseConversationMessagesResponse,
   parseConversationsResponse,
   type ConversationFilter,
@@ -31,6 +32,7 @@ import {
   type WhatsAppConversation,
   type WhatsAppMessage,
 } from "@/lib/whatsapp";
+import { OUTBOUND_STATUS_DESCRIPTIONS } from "@/lib/messaging";
 
 const CONVERSATION_PAGE_SIZE = 30;
 const MESSAGE_PAGE_SIZE = 30;
@@ -144,6 +146,11 @@ function DayDivider({ value }: { value: string }) {
 function MessageBubble({ message }: { message: WhatsAppMessage }) {
   const outbound = message.direction === "outbound";
   const unsupported = message.processingStatus === "unsupported";
+  const outboundStatus = outbound
+    ? outboundMessageStatusLabel(message.outboundStatus)
+    : null;
+  const outboundFailed = outbound && message.outboundStatus === "failed";
+  const outboundCancelled = outbound && message.outboundStatus === "cancelled";
 
   return (
     <div className={`flex ${outbound ? "justify-end" : "justify-start"}`}>
@@ -151,9 +158,13 @@ function MessageBubble({ message }: { message: WhatsAppMessage }) {
         className={`max-w-[85%] rounded-2xl px-4 py-2.5 shadow-sm ring-1 sm:max-w-[75%] ${
           unsupported
             ? "bg-warning-soft text-warning-ink ring-[color-mix(in_oklab,var(--rp-warning)_25%,transparent)]"
-            : outbound
-              ? "bg-accent text-on-accent ring-transparent"
-              : "bg-raised text-ink ring-line"
+            : outboundFailed
+              ? "bg-danger-soft text-danger-ink ring-[color-mix(in_oklab,var(--rp-danger)_25%,transparent)]"
+              : outboundCancelled
+                ? "bg-warning-soft text-warning-ink ring-[color-mix(in_oklab,var(--rp-warning)_25%,transparent)]"
+                : outbound
+                  ? "bg-accent text-on-accent ring-transparent"
+                  : "bg-raised text-ink ring-line"
         }`}
       >
         <span className="sr-only">

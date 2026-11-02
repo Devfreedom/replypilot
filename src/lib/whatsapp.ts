@@ -214,6 +214,12 @@ export function conversationInitials(
   return digits.slice(-2) || "#";
 }
 
+export function outboundMessageStatusLabel(
+  status: OutboundMessageStatus | null,
+): string | null {
+  return status ? OUTBOUND_STATUS_LABELS[status] : null;
+}
+
 export function conversationPreview(
   conversation: WhatsAppConversation,
 ): string {
@@ -225,7 +231,18 @@ export function conversationPreview(
     return `Unsupported ${conversation.lastMessageType} message`;
   }
 
-  return conversation.lastMessagePreview?.trim() || "Message content unavailable";
+  const preview =
+    conversation.lastMessagePreview?.trim() || "Message content unavailable";
+
+  if (conversation.lastMessageDirection !== "outbound") {
+    return preview;
+  }
+
+  const status = outboundMessageStatusLabel(
+    conversation.lastMessageOutboundStatus,
+  );
+
+  return status ? `${status}: ${preview}` : `You: ${preview}`;
 }
 
 export function mergeConversations(
