@@ -167,6 +167,15 @@ export async function ensureWorkspaceForUser(
       [user.id, workspaceId],
     );
 
+    await client.query(
+      `
+        INSERT INTO workspace_messaging_settings (workspace_id)
+        VALUES ($1)
+        ON CONFLICT (workspace_id) DO NOTHING
+      `,
+      [workspaceId],
+    );
+
     const created = await selectDefaultMembership(client, user.id);
 
     if (!created) {

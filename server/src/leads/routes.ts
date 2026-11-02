@@ -10,12 +10,13 @@ import {
   createRequireWorkspace,
   getAuthContext,
 } from "../auth/middleware.js";
+import { approveReplyDraft } from "../reply-drafts/approval.js";
 import {
   createReplyDraft,
   getReplyDraftForLead,
   listReplyDraftsForLead,
   replaceGeneratedReplyDraft,
-  updateReplyDraftStatus,
+  returnReplyDraftToDraft,
   updateReplyDraftText,
 } from "../reply-drafts/repository.js";
 import {
@@ -303,7 +304,7 @@ export function createLeadsRouter({
         return;
       }
 
-      const { workspace } = getAuthContext(response);
+      const { workspace, user } = getAuthContext(response);
       const lead = await getLeadById(pool, workspace.id, id.data);
 
       if (!lead) {
@@ -311,29 +312,96 @@ export function createLeadsRouter({
         return;
       }
 
-      const draft =
-        parsed.data.draftReply !== undefined
-          ? await updateReplyDraftText(
-              pool,
-              workspace.id,
-              id.data,
-              draftId.data,
-              parsed.data.draftReply,
-            )
-          : await updateReplyDraftStatus(
-              pool,
-              workspace.id,
-              id.data,
-              draftId.data,
-              parsed.data.status ?? "draft",
-            );
+      if (parsed.data.draftReply !== undefined) {
+        const draft = await updateReplyDraftText(
+          pool,
+          workspace.id,
+          id.data,
+          draftId.data,
+          parsed.data.draftReply,
+        );
 
-      if (!draft) {
+        if (!draft) {
+          response.status(404).json({ error: "Reply draft not found" });
+          return;
+        }
+
+        response.status(200).json({ draft });
+        return;
+      }
+
+      if (parsed.data.status === "draft") {
+        const draft = await returnReplyDraftToDraft(
+          pool,
+          workspace.id,
+          id.data,
+          draftId.data,
+        );
+
+        if (!draft) {
+          response.status(404).json({ error: "Reply draft not found" });
+          return;
+        }
+
+        response.status(200).json({ draft });
+        return;
+      }
+
+      if (parsed.data.status !== "approved") {
+        response.status(400).json({
+          error: "Invalid request",
+          details: [
+            {
+              field: "body.status",
+              message: "Provide draftReply or status",
+            },
+          ],
+        });
+        return;
+      }
+
+      const result = await approveReplyDraft(pool, {
+        workspaceId: workspace.id,
+        userId: user.id,
+        leadId: id.data,
+        draftId: draftId.data,
+        sendPolicy: parsed.data.sendPolicy,
+        conversationId: parsed.data.conversationId,
+      });
+
+      if (result.kind === "not-found") {
         response.status(404).json({ error: "Reply draft not found" });
         return;
       }
 
-      response.status(200).json({ draft });
+      if (result.kind === "conversation-required") {
+        response.status(409).json({
+          error:
+            "This lead has no active WhatsApp conversation. Link a conversation before using approve and send.",
+        });
+        return;
+      }
+
+      if (result.kind === "conversation-ambiguous") {
+        response.status(409).json({
+          error:
+            "This lead has multiple active WhatsApp conversations. Supply a conversationId to choose one.",
+        });
+        return;
+      }
+
+      if (result.kind === "conversation-not-found") {
+        response.status(409).json({
+          error:
+            "The selected conversation is not an active conversation linked to this lead.",
+        });
+        return;
+      }
+
+      response.status(200).json({
+        draft: result.draft,
+        outboundMessage: result.outboundMessage,
+      });
     },
   );
 

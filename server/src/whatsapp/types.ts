@@ -1,3 +1,5 @@
+import type { OutboundMessageStatus } from "../messaging/types.js";
+
 export type WhatsAppIntegrationConfig = Readonly<{
   verifyToken: string;
   appSecret: string;
@@ -34,6 +36,8 @@ export type ConversationSummary = Readonly<{
   lastMessagePreview: string | null;
   lastMessageType: string | null;
   lastMessageStatus: WhatsAppMessageProcessingStatus | null;
+  lastMessageDirection: "inbound" | "outbound" | null;
+  lastMessageOutboundStatus: OutboundMessageStatus | null;
   createdAt: string;
   updatedAt: string;
 }>;
