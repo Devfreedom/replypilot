@@ -52,7 +52,7 @@ const OUTBOUND_MESSAGE_RETURNING_COLUMNS = `
   message.created_at,
   message.updated_at,
   NULL::text AS customer_phone_e164
-`;
+`; // Used by future queries that UPDATE...RETURNING with a message table alias.
 
 const OUTBOUND_MESSAGE_SELECT_COLUMNS = `
   message.id,

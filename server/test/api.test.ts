@@ -8508,11 +8508,15 @@ test("worker recovers stale claims with the original idempotency key", async () 
     conversationId,
     content: outbound.content,
     idempotencyKey,
+    recipientPhone: null,
+    workspaceId: requireSession().workspace.id,
   });
   const repeatedAcceptance = await provider.send({
     conversationId,
     content: outbound.content,
     idempotencyKey,
+    recipientPhone: null,
+    workspaceId: requireSession().workspace.id,
   });
   assert.equal(
     repeatedAcceptance.providerMessageId,
@@ -8720,6 +8724,8 @@ test("mock provider idempotency key produces a stable provider message ID", asyn
     conversationId: randomUUID(),
     content: "Stable outbound content.",
     idempotencyKey: "reply-draft:stable-idempotency-test",
+    recipientPhone: null,
+    workspaceId: LEGACY_WORKSPACE_ID,
   };
   const first = await provider.send(input);
   const second = await provider.send(input);

@@ -331,9 +331,11 @@ function parseDeliveryStatus(
   }
 
   const providerTimestamp = parseDeliveryTimestamp(value.timestamp);
+  const firstError =
+    Array.isArray(value.errors) ? value.errors[0] : null;
   const errorDescription =
     status === "failed"
-      ? parseDeliveryErrorDescription(value.errors?.[0] ?? null)
+      ? parseDeliveryErrorDescription(firstError ?? null)
       : null;
 
   return {
