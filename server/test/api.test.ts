@@ -7955,6 +7955,7 @@ test("permanent worker failure is retryable only through explicit manual send", 
   const failed = history.messages[0];
   assert.ok(failed);
   assert.equal(failed.status, "failed");
+  assert.equal(failed.conversation.status, "open");
   assert.equal(failed.attempts, 3);
   assert.equal(failed.canRetry, true);
   assert.ok(failed.failureReason);
@@ -8233,6 +8234,8 @@ test("failed outbound messages cannot be retried after their conversation is arc
   const history = await readJson<OutboundHistoryPayload>(
     await listOutboundMessages(),
   );
+  assert.equal(history.messages[0]?.status, "failed");
+  assert.equal(history.messages[0]?.conversation.status, "archived");
   assert.equal(history.messages[0]?.canRetry, false);
   assert.equal(
     history.messages[0]?.retryBlockReason,

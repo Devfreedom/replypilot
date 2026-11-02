@@ -22,6 +22,7 @@ import {
   APPROVAL_SEND_POLICY_LABELS,
   OUTBOUND_STATUS_DESCRIPTIONS,
   OUTBOUND_STATUS_LABELS,
+  isRetryableConversationStatus,
   parseMessagingSettingsResponse,
   parseOutboundMessageLookupResponse,
   preferredConversationIdForDraft,
@@ -171,6 +172,7 @@ export function DraftReplyDialog({
   const requestIdRef = useRef(0);
   const approvalContextRequestIdRef = useRef(0);
   const outboundRequestIdRef = useRef(0);
+  const conversationsRequestIdRef = useRef(0);
   const loadedLeadIdRef = useRef<string | null>(null);
   const conversationsRef = useRef<WhatsAppConversation[]>([]);
   const outboundMessageRef = useRef<OutboundMessage | null>(null);
@@ -219,8 +221,7 @@ export function DraftReplyDialog({
     ? conversations.filter(
         (conversation) =>
           conversation.leadId === lead.id &&
-          (conversation.status === "open" ||
-            conversation.status === "closed"),
+          isRetryableConversationStatus(conversation.status),
       )
     : [];
   const outboundConversation = outboundMessage
@@ -253,8 +254,7 @@ export function DraftReplyDialog({
           nextConversations.filter(
             (conversation) =>
               conversation.leadId === leadId &&
-              (conversation.status === "open" ||
-                conversation.status === "closed"),
+              isRetryableConversationStatus(conversation.status),
           ),
         ),
       );
@@ -272,8 +272,7 @@ export function DraftReplyDialog({
           conversationsRef.current.filter(
             (conversation) =>
               conversation.leadId === leadId &&
-              (conversation.status === "open" ||
-                conversation.status === "closed"),
+              isRetryableConversationStatus(conversation.status),
           ),
         ),
       );
@@ -336,18 +335,32 @@ export function DraftReplyDialog({
   const loadOutboundMessage = useCallback(
     async (draftId: string, leadId: string) => {
       const requestId = ++outboundRequestIdRef.current;
+      const conversationsRequestId = ++conversationsRequestIdRef.current;
       setOutboundLoading(true);
       setOutboundLoadError(null);
 
       try {
-        const response = await fetch(
-          `/api/outbound-messages/by-draft/${draftId}`,
-        );
-        const data = await readJson(response);
+        const [response, conversationsResponse] = await Promise.all([
+          fetch(`/api/outbound-messages/by-draft/${draftId}`),
+          fetch(`/api/conversations/by-lead/${leadId}`),
+        ]);
+        const [data, conversationsData] = await Promise.all([
+          readJson(response),
+          readJson(conversationsResponse),
+        ]);
 
         if (!response.ok) {
           throw new Error(
             errorMessage(data, "Unable to load this draft's outbound status."),
+          );
+        }
+
+        if (!conversationsResponse.ok) {
+          throw new Error(
+            errorMessage(
+              conversationsData,
+              "Unable to refresh WhatsApp conversation status.",
+            ),
           );
         }
 
@@ -359,11 +372,27 @@ export function DraftReplyDialog({
           );
         }
 
-        if (requestId === outboundRequestIdRef.current) {
+        const conversationResult =
+          parseConversationsResponse(conversationsData);
+
+        if (!conversationResult) {
+          throw new Error(
+            "The conversation service returned an unexpected response.",
+          );
+        }
+
+        if (
+          requestId === outboundRequestIdRef.current &&
+          conversationsRequestId === conversationsRequestIdRef.current
+        ) {
+          setConversationsForLead(leadId, conversationResult.conversations);
           setOutboundForLead(leadId, result.outboundMessage);
         }
       } catch (requestError) {
-        if (requestId === outboundRequestIdRef.current) {
+        if (
+          requestId === outboundRequestIdRef.current &&
+          conversationsRequestId === conversationsRequestIdRef.current
+        ) {
           setOutboundLoadError(
             requestError instanceof Error
               ? requestError.message
@@ -376,11 +405,12 @@ export function DraftReplyDialog({
         }
       }
     },
-    [setOutboundForLead],
+    [setConversationsForLead, setOutboundForLead],
   );
 
   async function loadApprovalContext(selectedLead: Lead) {
       const requestId = ++approvalContextRequestIdRef.current;
+      const conversationsRequestId = ++conversationsRequestIdRef.current;
       setApprovalContextLoading(true);
       setApprovalContextError(null);
       setConversationsForLead(selectedLead.id, []);
@@ -438,7 +468,11 @@ export function DraftReplyDialog({
           return;
         }
 
-        setConversationsForLead(selectedLead.id, result.conversations);
+        if (
+          conversationsRequestId === conversationsRequestIdRef.current
+        ) {
+          setConversationsForLead(selectedLead.id, result.conversations);
+        }
       } catch {
         if (requestId === approvalContextRequestIdRef.current) {
           setApprovalContextError(
@@ -551,6 +585,7 @@ export function DraftReplyDialog({
         loadedLeadIdRef.current = lead.id;
         approvalContextRequestIdRef.current += 1;
         outboundRequestIdRef.current += 1;
+        conversationsRequestIdRef.current += 1;
         setSendPolicyChoice("default");
         setSelectedConversationId("");
         void loadDraftsForEffect(lead);
@@ -1174,7 +1209,7 @@ export function DraftReplyDialog({
               ) : eligibleConversations.length === 0 ? (
                 <p className="mt-2 text-xs leading-5 text-warning-ink">
                   {retryBlockedByInactiveConversation
-                    ? "The original conversation is inactive. This failed message cannot be retried or retargeted; create a new draft after linking an active conversation."
+                    ? "This conversation is archived. Reopen it before retrying. The failed message cannot be retargeted."
                     : "No active WhatsApp conversation is linked to this lead."}
                 </p>
               ) : eligibleConversations.length === 1 &&
@@ -1288,8 +1323,8 @@ export function DraftReplyDialog({
                 {outboundMessage.status === "failed" &&
                 retryBlockedByInactiveConversation ? (
                   <p className="mt-2 text-xs leading-5 text-warning-ink">
-                    The original conversation is inactive. This message cannot
-                    be retargeted.
+                    This conversation is archived. Reopen it before retrying.
+                    This message cannot be retargeted.
                   </p>
                 ) : null}
               </section>

@@ -182,6 +182,12 @@ export function preferredConversationIdForDraft(
   return conversations.length === 1 ? conversations[0].id : "";
 }
 
+export function isRetryableConversationStatus(
+  status: "open" | "closed" | "archived",
+): boolean {
+  return status === "open" || status === "closed";
+}
+
 export function retryBlockDescription(
   reason: OutboundRetryBlockReason,
 ): string {
@@ -191,7 +197,7 @@ export function retryBlockDescription(
     case "content_changed":
       return "The draft differs from the original message snapshot. Create a new draft to send revised content.";
     case "conversation_inactive":
-      return "The original conversation is inactive. The message cannot be retargeted.";
+      return "This conversation is archived. Reopen it before retrying. The message cannot be retargeted.";
   }
 }
 

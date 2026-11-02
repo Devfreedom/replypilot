@@ -7,6 +7,7 @@ import {
   OUTBOUND_STATUS_DESCRIPTIONS,
   OUTBOUND_STATUS_LABELS,
   canRetryOutboundForRole,
+  isRetryableConversationStatus,
   parseOutboundMessageLookupResponse,
   parseMessagingSettingsResponse,
   parseOutboundMessage,
@@ -154,7 +155,21 @@ test("draft conversation selection keeps the outbound target and avoids guessing
 
 test("retry-block explanations describe the safe next step", () => {
   assert.match(retryBlockDescription("content_changed"), /new draft/i);
-  assert.match(retryBlockDescription("conversation_inactive"), /retargeted/i);
+  assert.match(retryBlockDescription("conversation_inactive"), /archived/i);
+  assert.match(retryBlockDescription("conversation_inactive"), /reopen it/i);
+});
+
+test("archived conversations are not eligible for outbound retries", () => {
+  assert.equal(isRetryableConversationStatus("open"), true);
+  assert.equal(isRetryableConversationStatus("closed"), true);
+  assert.equal(isRetryableConversationStatus("archived"), false);
+  assert.equal(
+    canRetryOutboundForRole(
+      "owner",
+      isRetryableConversationStatus("archived"),
+    ),
+    false,
+  );
 });
 
 test("only owners see retry controls for retryable outbound messages", () => {
