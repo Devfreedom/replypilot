@@ -166,7 +166,7 @@ export function DraftReplyDialog({
   const [editedReply, setEditedReply] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [pendingAction, setPendingAction] = useState<
-    "save" | "approve" | "unapprove" | "regenerate" | "send" | null
+    "save" | "approve" | "unapprove" | "regenerate" | "new" | "send" | null
   >(null);
   const [error, setError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -629,6 +629,51 @@ export function DraftReplyDialog({
     }
   }
 
+  async function createNewDraft() {
+    if (!lead) return;
+
+    setPendingAction("new");
+    setActionError(null);
+    setValidationError(null);
+    setNotice(null);
+    setCopyMessage(null);
+
+    try {
+      const response = await fetch(`/api/leads/${lead.id}/reply-drafts`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      const data = await readJson(response);
+
+      if (!response.ok) {
+        throw new Error(
+          errorMessage(data, "Unable to create a new draft reply."),
+        );
+      }
+
+      const newDraft = parseSavedReplyDraftResponse(data);
+
+      if (!newDraft) {
+        throw new Error("The draft service returned an unexpected response.");
+      }
+
+      replaceDraft(newDraft);
+      setOutboundMessage(null);
+      setNotice(
+        "New draft created from the current approved business facts. Review and edit it before approval.",
+      );
+    } catch (requestError) {
+      setActionError(
+        requestError instanceof Error
+          ? requestError.message
+          : "Unable to create a new draft reply.",
+      );
+    } finally {
+      setPendingAction(null);
+    }
+  }
+
   async function regenerateDraft() {
     if (!lead || !selectedDraft) return;
 
@@ -1032,6 +1077,14 @@ export function DraftReplyDialog({
           </p>
 
           <div className="flex flex-col-reverse gap-3 border-t border-line pt-5 sm:flex-row sm:flex-wrap sm:justify-end">
+            <button
+              type="button"
+              onClick={() => void createNewDraft()}
+              disabled={isBusy}
+              className="btn btn-secondary"
+            >
+              {pendingAction === "new" ? "Creating…" : "New draft"}
+            </button>
             <button
               type="button"
               onClick={() => void regenerateDraft()}

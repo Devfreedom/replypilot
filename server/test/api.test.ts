@@ -7677,7 +7677,7 @@ test("permanent worker failure is retryable only through explicit manual send", 
   assert.equal(retried.messages[0]?.attempts, 1);
 });
 
-test("worker cancels queued work when approval is withdrawn", async () => {
+test("draft edits cancel queued work and worker cancels inactive conversations", async () => {
   const { lead, conversationId } = await createLeadWithConversation();
   const draft = await createSavedDraftPayload(lead.id);
   const approved = await approveSavedDraft(lead.id, draft.id, {
@@ -7706,6 +7706,136 @@ test("worker cancels queued work when approval is withdrawn", async () => {
       };
     },
   };
+  const afterEdit = await runOutboundWorkerOnce(pool, provider, {
+    batchSize: 10,
+    baseRetryDelayMs: 0,
+    staleAfterMs: 60_000,
+  });
+  assert.equal(afterEdit.cancelled, 0);
+  assert.equal(afterEdit.claimed, 0);
+  assert.equal(providerCalls, 0);
+
+  let history = await readJson<OutboundHistoryPayload>(
+    await listOutboundMessages(),
+  );
+  assert.equal(history.messages[0]?.status, "cancelled");
+  assert.equal(history.messages[0]?.canRetry, false);
+
+  const reapproved = await approveSavedDraft(lead.id, draft.id, {
+    status: "approved",
+    sendPolicy: "approve_and_send",
+    conversationId,
+  });
+  assert.equal(reapproved.status, 200);
+  const cancelled = await readJson<ReplyDraftApprovalPayload>(reapproved);
+  assert.equal(cancelled.outboundMessage?.status, "cancelled");
+
+  const retry = await sendSavedDraft(draft.id);
+  assert.equal(retry.status, 409);
+  assert.match(
+    (await readJson<ErrorPayload>(retry)).error,
+    /draft content changed/i,
+  );
+
+  const second = await createLeadWithConversation(
+    { name: "Archived Conversation Lead" },
+    {
+      senderWaId: "2348031234567",
+      senderPhoneNumber: "2348031234567",
+    },
+  );
+  const secondDraft = await createSavedDraftPayload(second.lead.id);
+  const secondApproved = await approveSavedDraft(
+    second.lead.id,
+    secondDraft.id,
+    {
+      status: "approved",
+      sendPolicy: "approve_and_send",
+      conversationId: second.conversationId,
+    },
+  );
+  assert.equal(secondApproved.status, 200);
+
+  await pool.query(
+    `
+      UPDATE whatsapp_conversations
+      SET status = 'archived', updated_at = now()
+      WHERE workspace_id = $1 AND id = $2
+    `,
+    [requireSession().workspace.id, second.conversationId],
+  );
+
+  const inactive = await runOutboundWorkerOnce(pool, provider, {
+    batchSize: 10,
+    baseRetryDelayMs: 0,
+    staleAfterMs: 60_000,
+  });
+  assert.equal(inactive.cancelled, 1);
+  assert.equal(inactive.claimed, 0);
+  assert.equal(providerCalls, 0);
+
+  history = await readJson<OutboundHistoryPayload>(
+    await listOutboundMessages(),
+  );
+  const secondOutbound = history.messages.find(
+    (message) => message.replyDraftId === secondDraft.id,
+  );
+  assert.ok(secondOutbound);
+  assert.equal(secondOutbound.status, "cancelled");
+  assert.equal(secondOutbound.canRetry, false);
+
+  await pool.query(
+    `
+      UPDATE whatsapp_conversations
+      SET status = 'open', updated_at = now()
+      WHERE workspace_id = $1 AND id = $2
+    `,
+    [requireSession().workspace.id, second.conversationId],
+  );
+
+  const cancelledRetry = await sendSavedDraft(secondDraft.id);
+  assert.equal(cancelledRetry.status, 409);
+  assert.match(
+    (await readJson<ErrorPayload>(cancelledRetry)).error,
+    /cancelled and cannot be retried/i,
+  );
+});
+
+test("worker cancels a queued snapshot when approved draft content changes", async () => {
+  const { lead, conversationId } = await createLeadWithConversation();
+  const draft = await createSavedDraftPayload(lead.id);
+  const approved = await approveSavedDraft(lead.id, draft.id, {
+    status: "approved",
+    sendPolicy: "approve_and_send",
+    conversationId,
+  });
+  assert.equal(approved.status, 200);
+
+  // Simulate a race or an out-of-band write that leaves the draft approved but
+  // changes its content after the outbound snapshot was queued.
+  await pool.query(
+    `
+      UPDATE reply_drafts
+      SET draft_reply = $3, updated_at = now()
+      WHERE workspace_id = $1 AND id = $2
+    `,
+    [
+      requireSession().workspace.id,
+      draft.id,
+      "Changed approved content that must not reuse the queued snapshot.",
+    ],
+  );
+
+  let providerCalls = 0;
+  const provider: OutboundMessageProvider = {
+    async send() {
+      providerCalls += 1;
+      return {
+        providerMessageId: "should-not-be-used",
+        status: "sent",
+      };
+    },
+  };
   const result = await runOutboundWorkerOnce(pool, provider, {
     batchSize: 10,
     baseRetryDelayMs: 0,
@@ -7720,17 +7850,51 @@ test("worker cancels queued work when approval is withdrawn", async () => {
   );
   assert.equal(history.messages[0]?.status, "cancelled");
   assert.equal(history.messages[0]?.canRetry, false);
+});
+
+test("manual retry refuses a snapshot from different draft content", async () => {
+  const { lead, conversationId } = await createLeadWithConversation();
+  const draft = await createSavedDraftPayload(lead.id);
+  const approved = await approveSavedDraft(lead.id, draft.id, {
+    status: "approved",
+    sendPolicy: "approve_and_send",
+    conversationId,
+  });
+  assert.equal(approved.status, 200);
+
+  const failing = new MockOutboundMessageProvider({ failAll: true });
+  const options = {
+    batchSize: 10,
+    baseRetryDelayMs: 0,
+    staleAfterMs: 60_000,
+  };
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    await runOutboundWorkerOnce(pool, failing, options);
+  }
+
+  const edited = await patchSavedDraft(lead.id, draft.id, {
+    draftReply: "Revised content that must not reuse the failed snapshot.",
+  });
+  assert.equal(edited.status, 200);
 
   const reapproved = await approveSavedDraft(lead.id, draft.id);
   assert.equal(reapproved.status, 200);
-  const cancelled = await readJson<ReplyDraftApprovalPayload>(reapproved);
-  assert.equal(cancelled.outboundMessage?.status, "cancelled");
+  const reapprovedPayload =
+    await readJson<ReplyDraftApprovalPayload>(reapproved);
+  assert.equal(reapprovedPayload.outboundMessage?.status, "failed");
+
+  const history = await readJson<OutboundHistoryPayload>(
+    await listOutboundMessages(),
+  );
+  assert.equal(history.messages[0]?.status, "failed");
+  assert.equal(history.messages[0]?.canRetry, false);
 
   const retry = await sendSavedDraft(draft.id);
   assert.equal(retry.status, 409);
   assert.match(
     (await readJson<ErrorPayload>(retry)).error,
-    /cancelled and cannot be retried/i,
+    /draft content changed/i,
   );
 });
 

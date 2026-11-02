@@ -346,10 +346,11 @@ export async function listOutboundMessages(
 }
 
 /**
- * Cancels queued work whose draft is no longer approved or whose conversation
- * is no longer active. This is the deterministic authorization gate before the
- * worker claims anything, and it prevents an edited or revoked draft from being
- * sent from an old snapshot.
+ * Cancels queued work whose draft is no longer approved, whose approved content
+ * no longer matches the outbound snapshot, or whose conversation is no longer
+ * active. This is the deterministic authorization gate before the worker claims
+ * anything, and it prevents an edited or revoked draft from being sent from an
+ * old snapshot.
  */
 export async function cancelUnauthorizedQueuedOutbound(
   pool: Pool,
@@ -359,7 +360,7 @@ export async function cancelUnauthorizedQueuedOutbound(
       UPDATE outbound_messages AS message
       SET status = 'cancelled',
           failure_reason =
-            'Draft approval or active conversation is no longer valid.',
+            'Draft content, approval, or active conversation is no longer valid.',
           next_attempt_at = NULL,
           updated_at = now()
       WHERE message.status = 'queued'
@@ -375,13 +376,6 @@ export async function cancelUnauthorizedQueuedOutbound(
               AND draft.status = 'approved'
               AND draft.draft_reply = message.content
               AND conversation.status IN ('open', 'closed')
-          )
-          OR EXISTS (
-            SELECT 1
-            FROM reply_drafts AS draft
-            WHERE draft.id = message.reply_draft_id
-              AND draft.workspace_id = message.workspace_id
-              AND draft.draft_reply IS DISTINCT FROM message.content
           )
         )
     `,
@@ -495,7 +489,7 @@ export async function cancelOutboundClaim(
       UPDATE outbound_messages
       SET status = 'cancelled',
           failure_reason =
-            'Draft approval or active conversation is no longer valid.',
+            'Draft content, approval, or active conversation is no longer valid.',
           next_attempt_at = NULL,
           updated_at = now()
       WHERE id = $1

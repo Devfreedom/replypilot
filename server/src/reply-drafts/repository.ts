@@ -157,22 +157,38 @@ export async function replaceGeneratedReplyDraft(
 ): Promise<SavedReplyDraft | null> {
   const result = await pool.query<ReplyDraftRow>(
     `
-      UPDATE reply_drafts
-      SET intent = $4,
-          summary = $5,
-          missing_information = $6,
-          draft_reply = $7,
-          provider = $8,
-          is_demo = $9,
-          status = 'draft',
-          sources = $10,
-          approved_at = NULL,
-          approved_by = NULL,
-          send_policy_override = NULL,
-          approval_send_policy = NULL,
-          updated_at = now()
-      WHERE workspace_id = $1 AND id = $2 AND lead_id = $3
-      RETURNING ${REPLY_DRAFT_COLUMNS}
+      WITH updated_draft AS (
+        UPDATE reply_drafts
+        SET intent = $4,
+            summary = $5,
+            missing_information = $6,
+            draft_reply = $7,
+            provider = $8,
+            is_demo = $9,
+            status = 'draft',
+            sources = $10,
+            approved_at = NULL,
+            approved_by = NULL,
+            send_policy_override = NULL,
+            approval_send_policy = NULL,
+            updated_at = now()
+        WHERE workspace_id = $1 AND id = $2 AND lead_id = $3
+        RETURNING ${REPLY_DRAFT_COLUMNS}
+      ),
+      cancelled_outbound AS (
+        UPDATE outbound_messages
+        SET status = 'cancelled',
+            failure_reason =
+              'Draft content or approval changed before the message was sent.',
+            next_attempt_at = NULL,
+            updated_at = now()
+        WHERE workspace_id = $1
+          AND reply_draft_id = $2
+          AND status = 'queued'
+          AND EXISTS (SELECT 1 FROM updated_draft)
+      )
+      SELECT ${REPLY_DRAFT_COLUMNS}
+      FROM updated_draft
     `,
     [
       workspaceId,
@@ -201,16 +217,32 @@ export async function updateReplyDraftText(
 ): Promise<SavedReplyDraft | null> {
   const result = await pool.query<ReplyDraftRow>(
     `
-      UPDATE reply_drafts
-      SET draft_reply = $4,
-          status = 'draft',
-          approved_at = NULL,
-          approved_by = NULL,
-          send_policy_override = NULL,
-          approval_send_policy = NULL,
-          updated_at = now()
-      WHERE workspace_id = $1 AND id = $2 AND lead_id = $3
-      RETURNING ${REPLY_DRAFT_COLUMNS}
+      WITH updated_draft AS (
+        UPDATE reply_drafts
+        SET draft_reply = $4,
+            status = 'draft',
+            approved_at = NULL,
+            approved_by = NULL,
+            send_policy_override = NULL,
+            approval_send_policy = NULL,
+            updated_at = now()
+        WHERE workspace_id = $1 AND id = $2 AND lead_id = $3
+        RETURNING ${REPLY_DRAFT_COLUMNS}
+      ),
+      cancelled_outbound AS (
+        UPDATE outbound_messages
+        SET status = 'cancelled',
+            failure_reason =
+              'Draft content or approval changed before the message was sent.',
+            next_attempt_at = NULL,
+            updated_at = now()
+        WHERE workspace_id = $1
+          AND reply_draft_id = $2
+          AND status = 'queued'
+          AND EXISTS (SELECT 1 FROM updated_draft)
+      )
+      SELECT ${REPLY_DRAFT_COLUMNS}
+      FROM updated_draft
     `,
     [workspaceId, draftId, leadId, draftReply],
   );
@@ -227,15 +259,31 @@ export async function returnReplyDraftToDraft(
 ): Promise<SavedReplyDraft | null> {
   const result = await pool.query<ReplyDraftRow>(
     `
-      UPDATE reply_drafts
-      SET status = 'draft',
-          approved_at = NULL,
-          approved_by = NULL,
-          send_policy_override = NULL,
-          approval_send_policy = NULL,
-          updated_at = now()
-      WHERE workspace_id = $1 AND id = $2 AND lead_id = $3
-      RETURNING ${REPLY_DRAFT_COLUMNS}
+      WITH updated_draft AS (
+        UPDATE reply_drafts
+        SET status = 'draft',
+            approved_at = NULL,
+            approved_by = NULL,
+            send_policy_override = NULL,
+            approval_send_policy = NULL,
+            updated_at = now()
+        WHERE workspace_id = $1 AND id = $2 AND lead_id = $3
+        RETURNING ${REPLY_DRAFT_COLUMNS}
+      ),
+      cancelled_outbound AS (
+        UPDATE outbound_messages
+        SET status = 'cancelled',
+            failure_reason =
+              'Draft content or approval changed before the message was sent.',
+            next_attempt_at = NULL,
+            updated_at = now()
+        WHERE workspace_id = $1
+          AND reply_draft_id = $2
+          AND status = 'queued'
+          AND EXISTS (SELECT 1 FROM updated_draft)
+      )
+      SELECT ${REPLY_DRAFT_COLUMNS}
+      FROM updated_draft
     `,
     [workspaceId, draftId, leadId],
   );

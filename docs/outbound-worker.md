@@ -19,6 +19,9 @@ contacts WhatsApp or any other external service.
 - Retries provider failures up to `max_attempts` (3 by default), then marks the
   row `failed`. A failed row can be requeued explicitly from the outbound
   history page; the original content snapshot is preserved.
+- Only sends when the outbound snapshot still exactly matches the approved
+  draft content. Editing or returning a draft cancels queued work immediately;
+  an in-flight `sending` claim is re-checked before the provider call.
 
 ## Run in development
 
@@ -62,5 +65,8 @@ recovers the stale `sending` row after `OUTBOUND_WORKER_STALE_MS`.
   WhatsApp send, or delivery webhook is implemented in this milestone.
 - Queueing is durable in PostgreSQL. Redis and other infrastructure are not
   required.
+- There is one outbound record per reply draft. A draft edited after a previous
+  outbound record was created needs a new draft to send revised content. The
+  draft dialog includes a **New draft** action for this case.
 - This worker does not process inbound WhatsApp messages; those continue through
   the existing webhook path.
