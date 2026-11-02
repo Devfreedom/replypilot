@@ -585,8 +585,8 @@ function ConversationThread({
       </div>
 
       <p className="border-t border-line px-4 py-2.5 text-[11px] text-ink-faint sm:px-5">
-        Inbound messages come from the WhatsApp webhook. Outbound entries
-        reflect ReplyPilot&apos;s mock queue only; they are not real WhatsApp
+        Inbound messages come from the WhatsApp webhook. Outbound entries show
+        the server-selected provider status; mock records are not real WhatsApp
         deliveries.
       </p>
     </>
@@ -799,9 +799,10 @@ export function WhatsAppInbox() {
       <div className="mt-4 space-y-3">
         <Alert tone="info">
           <span className="font-semibold">Inbound WhatsApp integration.</span>{" "}
-          Inbound webhook messages appear here. ReplyPilot&apos;s separate
-          outbound queue uses a mock provider; no real WhatsApp sending,
-          templates, or automatic replies are connected.
+          Inbound messages and delivery-status updates appear here. Outbound
+          messages use the server-selected provider; Meta sends are limited to
+          configured test workspaces and recipients and are unavailable in
+          production. Replies are never sent automatically from this inbox.
         </Alert>
 
         {sessionExpired ? (
