@@ -4,6 +4,19 @@ export type OutboundProviderSendInput = Readonly<{
   conversationId: string;
   content: string;
   idempotencyKey: string;
+  /**
+   * E.164-normalized recipient phone number resolved from the outbound row's
+   * conversation customer. Null when the customer is identified only by a
+   * provider contact ID (e.g. a BSUID) and has no phone number. Providers
+   * that require a phone number (e.g. Meta Cloud API) must reject null here.
+   */
+  recipientPhone: string | null;
+  /**
+   * The workspace that owns this send request. Providers that restrict real
+   * sending to a configured test workspace validate this before calling the
+   * upstream API.
+   */
+  workspaceId: string;
 }>;
 
 export type OutboundProviderSendResult = Readonly<{
