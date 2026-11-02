@@ -30,6 +30,8 @@ CREATE UNIQUE INDEX outbound_messages_workspace_provider_message_id_uidx
   ON outbound_messages (workspace_id, provider_message_id)
   WHERE provider_message_id IS NOT NULL;
 
+DROP INDEX IF EXISTS outbound_messages_workspace_provider_message_id_idx;
+
 CREATE TABLE whatsapp_delivery_events (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   event_key TEXT NOT NULL
@@ -45,6 +47,9 @@ CREATE TABLE whatsapp_delivery_events (
     CHECK (char_length(btrim(provider_status)) BETWEEN 1 AND 64),
   provider_timestamp TIMESTAMPTZ NOT NULL,
   received_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  last_received_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  duplicate_count INTEGER NOT NULL DEFAULT 0
+    CHECK (duplicate_count >= 0),
   processing_outcome TEXT NOT NULL
     CHECK (processing_outcome IN ('processing', 'processed', 'ignored', 'failed')),
   processing_reason TEXT

@@ -732,7 +732,6 @@ function deliveryEventKey(event: DeliveryStatusEvent): string {
         event.providerMessageId,
         event.status,
         event.providerTimestamp.toISOString(),
-        event.errorDescription,
       ]),
     )
     .digest("hex");
@@ -778,6 +777,7 @@ export async function processOutboundDeliveryEvent(
         INSERT INTO whatsapp_delivery_events (
           event_key,
           workspace_id,
+          outbound_message_id,
           provider_message_id,
           phone_number_id,
           provider_status,
@@ -813,6 +813,21 @@ export async function processOutboundDeliveryEvent(
       const outcome = existing.rows[0]?.processing_outcome;
 
       if (outcome === "processed" || outcome === "ignored") {
+        await client.query(
+          `
+            UPDATE whatsapp_delivery_events
+            SET duplicate_count = duplicate_count + 1,
+                last_received_at = now(),
+                processing_reason = CASE
+                  WHEN duplicate_count = 0
+                    THEN 'Duplicate provider webhook delivery observed.'
+                  ELSE processing_reason
+                END
+            WHERE workspace_id = $1
+              AND event_key = $2
+          `,
+          [workspaceId, eventKey],
+        );
         await client.query("COMMIT");
         return "duplicate";
       }
@@ -979,6 +994,7 @@ export async function processOutboundDeliveryEvent(
         INSERT INTO whatsapp_delivery_events (
           event_key,
           workspace_id,
+          outbound_message_id,
           provider_message_id,
           phone_number_id,
           provider_status,
@@ -986,11 +1002,30 @@ export async function processOutboundDeliveryEvent(
           processing_outcome,
           failure_reason
         )
-        VALUES ($1, $2, $3, $4, $5, $6, 'failed', $7)
+        SELECT
+          $1,
+          $2,
+          (
+            SELECT id
+            FROM outbound_messages
+            WHERE workspace_id = $2
+              AND provider_message_id = $3
+            LIMIT 1
+          ),
+          $3,
+          $4,
+          $5,
+          $6,
+          'failed',
+          $7
         ON CONFLICT (workspace_id, event_key)
         DO UPDATE SET
           processing_outcome = 'failed',
-          failure_reason = EXCLUDED.failure_reason
+          failure_reason = EXCLUDED.failure_reason,
+          outbound_message_id = COALESCE(
+            whatsapp_delivery_events.outbound_message_id,
+            EXCLUDED.outbound_message_id
+          )
       `,
       [
         eventKey,

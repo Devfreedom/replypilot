@@ -17,6 +17,7 @@ import { MetaWhatsAppCloudProvider } from "../src/outbound/meta-provider.js";
 import { loadConfig } from "../src/config.js";
 import {
   markOutboundDeliveryEventDelivered,
+  markOutboundDeliveryEventFailed,
   markOutboundDeliveryEventRead,
   markOutboundDeliveryEventSent,
   getOutboundMessageByWamid,
@@ -30,7 +31,11 @@ import {
 import { processDeliveryStatusEvents } from "../src/whatsapp/delivery-webhook.js";
 import { isValidMetaSignature } from "../src/whatsapp/signature.js";
 import { persistInboundMessages } from "../src/whatsapp/repository.js";
-import type { InboundWhatsAppMessage } from "../src/whatsapp/types.js";
+import type {
+  DeliveryStatusEvent,
+  InboundWhatsAppMessage,
+} from "../src/whatsapp/types.js";
+import { runOutboundWorkerOnce } from "../src/outbound/worker.js";
 import { createPool } from "../src/db/pool.js";
 import {
   getTestDatabaseUrl,
@@ -75,6 +80,10 @@ async function createTestCustomerAndConversation(options: {
   const workspaceId = options.workspaceId ?? TEST_WORKSPACE_ID;
   const customerPhone = options.customerPhone ?? TEST_CUSTOMER_PHONE;
   const providerTimestamp = options.providerTimestamp ?? new Date();
+  await pool.query(
+    "INSERT INTO workspaces (id, name) VALUES ($1, 'Additional Test Workspace') ON CONFLICT (id) DO NOTHING",
+    [workspaceId],
+  );
 
   const msg: InboundWhatsAppMessage = {
     providerMessageId: `wamid.${randomUUID()}`,
@@ -112,10 +121,14 @@ async function insertTestOutboundRow(options: {
   conversationId: string;
   providerMessageId?: string;
   status?: string;
+  content?: string;
+  provider?: string;
 }): Promise<string> {
   const workspaceId = options.workspaceId ?? TEST_WORKSPACE_ID;
   const providerMessageId = options.providerMessageId ?? null;
   const status = options.status ?? "sent";
+  const content = options.content ?? "Test content";
+  const provider = options.provider ?? "whatsapp";
 
   // Create a lead first (required FK for reply_drafts).
   const leadResult = await pool.query<{ id: string }>(
@@ -139,12 +152,12 @@ async function insertTestOutboundRow(options: {
       )
       VALUES (
         $1, $2,
-        'general-enquiry', 'test summary', '[]', 'Test reply', 'mock', true,
+        'general-enquiry', 'test summary', '[]', $3, 'mock', true,
         'approved', '[]', now()
       )
       RETURNING id
     `,
-    [workspaceId, leadId],
+    [workspaceId, leadId, content],
   );
 
   const draftId = draftResult.rows[0]?.id;
@@ -157,14 +170,16 @@ async function insertTestOutboundRow(options: {
         provider, provider_message_id, content, status,
         idempotency_key, max_attempts
       )
-      VALUES ($1, $2, $3, 'whatsapp', $4, 'Test content', $5, $6, 3)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 3)
       RETURNING id
     `,
     [
       workspaceId,
       options.conversationId,
       draftId,
+      provider,
       providerMessageId,
+      content,
       status,
       `test-idempotency-${randomUUID()}`,
     ],
@@ -416,6 +431,161 @@ test("6. Tokens never appear in provider name, logs, or error messages", () => {
   );
 });
 
+test("Meta provider sends the configured request and worker persists the wamid", async () => {
+  const { conversationId } = await createTestCustomerAndConversation({
+    providerTimestamp: new Date(),
+  });
+  const wamid = `wamid.success-${randomUUID()}`;
+  const outboundId = await insertTestOutboundRow({
+    conversationId,
+    status: "queued",
+    provider: "whatsapp",
+    content: "Approved test snapshot",
+  });
+  let requestCount = 0;
+  const config = loadMetaOutboundConfig({
+    META_OUTBOUND_ENABLED: "true",
+    META_ACCESS_TOKEN: "EAABc0FakeTestAccessTokenAtLeast20Characters",
+    META_GRAPH_API_VERSION: "v21.0",
+    WHATSAPP_SENDER_PHONE_NUMBER_ID: TEST_PHONE_NUMBER_ID,
+    META_OUTBOUND_TEST_WORKSPACE_ID: TEST_WORKSPACE_ID,
+    META_TEST_RECIPIENT_PHONE_NUMBERS: TEST_CUSTOMER_PHONE,
+  });
+  assert.ok(config);
+  const provider = new MetaWhatsAppCloudProvider(config, pool, async (input, init) => {
+    requestCount += 1;
+    assert.equal(
+      input,
+      `https://graph.facebook.com/v21.0/${TEST_PHONE_NUMBER_ID}/messages`,
+    );
+    assert.equal(init?.method, "POST");
+    const headers = new Headers(init?.headers);
+    assert.equal(
+      headers.get("authorization"),
+      `Bearer ${config.accessToken}`,
+    );
+    assert.equal(headers.get("content-type"), "application/json");
+    const payload = JSON.parse(String(init?.body)) as {
+      messaging_product: string;
+      to: string;
+      type: string;
+      text: { body: string };
+    };
+    assert.deepEqual(payload, {
+      messaging_product: "whatsapp",
+      to: TEST_CUSTOMER_PHONE.slice(1),
+      type: "text",
+      text: { body: "Approved test snapshot" },
+    });
+    return new Response(
+      JSON.stringify({ messages: [{ id: wamid }] }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+  });
+
+  const result = await runOutboundWorkerOnce(pool, provider, {
+    staleAfterMs: 60_000,
+  });
+  assert.equal(result.claimed, 1);
+  assert.equal(result.sent, 1);
+  assert.equal(requestCount, 1);
+  const persisted = await pool.query<{
+    status: string;
+    provider_message_id: string | null;
+  }>(
+    "SELECT status, provider_message_id FROM outbound_messages WHERE id = $1",
+    [outboundId],
+  );
+  assert.deepEqual(persisted.rows[0], {
+    status: "sent",
+    provider_message_id: wamid,
+  });
+});
+
+test("Meta provider maps malformed responses, HTTP errors, network errors and timeouts safely", async () => {
+  const { conversationId } = await createTestCustomerAndConversation({
+    providerTimestamp: new Date(),
+  });
+  const config = loadMetaOutboundConfig({
+    META_OUTBOUND_ENABLED: "true",
+    META_ACCESS_TOKEN: "EAABc0FakeTestAccessTokenAtLeast20Characters",
+    META_GRAPH_API_VERSION: "v21.0",
+    WHATSAPP_SENDER_PHONE_NUMBER_ID: TEST_PHONE_NUMBER_ID,
+    META_OUTBOUND_TEST_WORKSPACE_ID: TEST_WORKSPACE_ID,
+    META_TEST_RECIPIENT_PHONE_NUMBERS: TEST_CUSTOMER_PHONE,
+  });
+  assert.ok(config);
+  const input = {
+    workspaceId: TEST_WORKSPACE_ID,
+    conversationId,
+    content: "Approved test snapshot",
+    idempotencyKey: "meta-response-shape-test",
+    recipientPhone: TEST_CUSTOMER_PHONE,
+  };
+
+  const malformed = new MetaWhatsAppCloudProvider(config, pool, async () =>
+    new Response(JSON.stringify({ messages: [] }), { status: 200 }),
+  );
+  await assert.rejects(
+    malformed.send(input),
+    (error: unknown) => error instanceof OutboundProviderAmbiguousError,
+  );
+
+  const httpToken = config.accessToken;
+  let httpCalls = 0;
+  const rejected = new MetaWhatsAppCloudProvider(config, pool, async () => {
+    httpCalls += 1;
+    return new Response(
+      JSON.stringify({
+        error: {
+          code: 131000,
+          type: "OAuthException",
+          message: `sensitive body ${httpToken}`,
+        },
+      }),
+      { status: 400 },
+    );
+  });
+  await assert.rejects(rejected.send(input), (error: unknown) => {
+    assert.ok(error instanceof OutboundProviderError);
+    assert.ok(!(error instanceof OutboundProviderAmbiguousError));
+    assert.equal(error.message.includes(httpToken), false);
+    assert.equal(error.message.includes("sensitive body"), false);
+    assert.ok(error.message.length <= 500);
+    return true;
+  });
+  assert.equal(httpCalls, 1);
+
+  const network = new MetaWhatsAppCloudProvider(config, pool, async () => {
+    throw new Error("simulated network failure");
+  });
+  await assert.rejects(
+    network.send(input),
+    (error: unknown) => error instanceof OutboundProviderAmbiguousError,
+  );
+
+  let timeoutCalls = 0;
+  const timeout = new MetaWhatsAppCloudProvider(
+    config,
+    pool,
+    async (_input, init) =>
+      new Promise<Response>((_resolve, reject) => {
+        timeoutCalls += 1;
+        init?.signal?.addEventListener(
+          "abort",
+          () => reject(new Error("aborted by request timeout")),
+          { once: true },
+        );
+      }),
+    5,
+  );
+  await assert.rejects(
+    timeout.send(input),
+    (error: unknown) => error instanceof OutboundProviderAmbiguousError,
+  );
+  assert.equal(timeoutCalls, 1);
+});
+
 // ─── 2. Workspace, sender and recipient restrictions ─────────────────────────
 
 test("7. Only the configured test workspace can send", async () => {
@@ -432,7 +602,11 @@ test("7. Only the configured test workspace can send", async () => {
   assert.equal(isWorkspaceAllowedForMetaSending(config, TEST_WORKSPACE_ID), true);
   assert.equal(isWorkspaceAllowedForMetaSending(config, randomUUID()), false);
 
-  const provider = new MetaWhatsAppCloudProvider(config, pool);
+  let fetchCalls = 0;
+  const provider = new MetaWhatsAppCloudProvider(config, pool, async () => {
+    fetchCalls += 1;
+    return new Response("{}", { status: 200 });
+  });
   const wrongWorkspaceId = randomUUID();
 
   await assert.rejects(
@@ -450,6 +624,7 @@ test("7. Only the configured test workspace can send", async () => {
       return true;
     },
   );
+  assert.equal(fetchCalls, 0);
 });
 
 test("8. Only the configured sender phone-number ID can be used", () => {
@@ -519,7 +694,11 @@ test("10. Non-allowlisted recipients are rejected before any HTTP request", asyn
     customerPhone: "+19995550000",
   });
 
-  const provider = new MetaWhatsAppCloudProvider(config, pool);
+  let fetchCalls = 0;
+  const provider = new MetaWhatsAppCloudProvider(config, pool, async () => {
+    fetchCalls += 1;
+    return new Response("{}", { status: 200 });
+  });
 
   // Should be rejected with a definite error (not ambiguous) since no HTTP
   // request is made.
@@ -538,6 +717,7 @@ test("10. Non-allowlisted recipients are rejected before any HTTP request", asyn
       return true;
     },
   );
+  assert.equal(fetchCalls, 0);
 });
 
 test("11. Missing or invalid allowlist fails closed when enabled", () => {
@@ -581,7 +761,11 @@ test("12. Frontend input cannot override workspace, sender, or recipient restric
   });
 
   assert.ok(config);
-  const provider = new MetaWhatsAppCloudProvider(config, pool);
+  let fetchCalls = 0;
+  const provider = new MetaWhatsAppCloudProvider(config, pool, async () => {
+    fetchCalls += 1;
+    return new Response("{}", { status: 200 });
+  });
 
   // Even if a caller passes a different workspaceId that would match in DB,
   // the workspace restriction is enforced against config.testWorkspaceId.
@@ -618,6 +802,7 @@ test("12. Frontend input cannot override workspace, sender, or recipient restric
       return true;
     },
   );
+  assert.equal(fetchCalls, 0);
 });
 
 // ─── 3. Customer service window ───────────────────────────────────────────────
@@ -726,7 +911,11 @@ test("17. Window is revalidated immediately before provider invocation", async (
   });
 
   assert.ok(config);
-  const provider = new MetaWhatsAppCloudProvider(config, pool);
+  let fetchCalls = 0;
+  const provider = new MetaWhatsAppCloudProvider(config, pool, async () => {
+    fetchCalls += 1;
+    return new Response("{}", { status: 200 });
+  });
 
   await assert.rejects(
     () =>
@@ -743,6 +932,7 @@ test("17. Window is revalidated immediately before provider invocation", async (
       return true;
     },
   );
+  assert.equal(fetchCalls, 0);
 });
 
 // ─── 4. Suppression ───────────────────────────────────────────────────────────
@@ -767,7 +957,11 @@ test("18. Suppressed customer cannot receive messages", async () => {
   });
 
   assert.ok(config);
-  const provider = new MetaWhatsAppCloudProvider(config, pool);
+  let fetchCalls = 0;
+  const provider = new MetaWhatsAppCloudProvider(config, pool, async () => {
+    fetchCalls += 1;
+    return new Response("{}", { status: 200 });
+  });
 
   await assert.rejects(
     () =>
@@ -784,6 +978,7 @@ test("18. Suppressed customer cannot receive messages", async () => {
       return true;
     },
   );
+  assert.equal(fetchCalls, 0);
 });
 
 test("19. Suppression is workspace-scoped", async () => {
@@ -826,6 +1021,36 @@ test("19. Suppression is workspace-scoped", async () => {
   );
 });
 
+test("migration enforces suppression customer/workspace integrity", async () => {
+  const { customerId } = await createTestCustomerAndConversation();
+  const valid = await suppressCustomer(pool, {
+    workspaceId: TEST_WORKSPACE_ID,
+    customerId,
+    reason: "opt_out",
+  });
+  assert.equal(valid.customerId, customerId);
+  assert.equal(valid.workspaceId, TEST_WORKSPACE_ID);
+
+  const mismatched = await createTestCustomerAndConversation({
+    workspaceId: OTHER_WORKSPACE_ID,
+    customerPhone: "+447911123456",
+  });
+  await assert.rejects(
+    pool.query(
+      `
+        INSERT INTO customer_suppressions (workspace_id, customer_id, reason)
+        VALUES ($1, $2, 'opt_out')
+      `,
+      [TEST_WORKSPACE_ID, mismatched.customerId],
+    ),
+    (error: unknown) =>
+      typeof error === "object" &&
+      error !== null &&
+      "code" in error &&
+      error.code === "23503",
+  );
+});
+
 test("20. Suppression is rechecked immediately before sending", async () => {
   // Arrange: unsuppressed customer at queue time, suppressed at send time.
   const { customerId, conversationId } = await createTestCustomerAndConversation({
@@ -855,7 +1080,11 @@ test("20. Suppression is rechecked immediately before sending", async () => {
   });
 
   assert.ok(config);
-  const provider = new MetaWhatsAppCloudProvider(config, pool);
+  let fetchCalls = 0;
+  const provider = new MetaWhatsAppCloudProvider(config, pool, async () => {
+    fetchCalls += 1;
+    return new Response("{}", { status: 200 });
+  });
 
   await assert.rejects(
     () =>
@@ -872,6 +1101,7 @@ test("20. Suppression is rechecked immediately before sending", async () => {
       return true;
     },
   );
+  assert.equal(fetchCalls, 0);
 });
 
 // ─── 5. Delivery events ───────────────────────────────────────────────────────
@@ -892,23 +1122,78 @@ test("21. Duplicate delivery events are processed only once", async () => {
   );
   assert.equal(firstResult, true);
 
-  // Second identical event: row already at delivered, no regression possible.
+  // Second identical event is deduplicated durably.
   const secondResult = await markOutboundDeliveryEventDelivered(
     pool,
     TEST_WORKSPACE_ID,
     wamid,
     eventTime,
   );
-  // The second call should be a no-op (no update needed) because state is already delivered.
-  // Returns false because the WHERE clause does not match (status is already delivered
-  // and the condition prevents regression; delivered can still update delivered idempotently).
-  // This is fine — the message remains at delivered.
+  assert.equal(secondResult, false);
   const row = await getOutboundMessageByWamid(pool, TEST_WORKSPACE_ID, wamid);
   assert.ok(row);
   assert.equal(row.status, "delivered");
+  const audit = await pool.query<{ duplicate_count: number }>(
+    `
+      SELECT duplicate_count
+      FROM whatsapp_delivery_events
+      WHERE workspace_id = $1 AND provider_message_id = $2
+    `,
+    [TEST_WORKSPACE_ID, wamid],
+  );
+  assert.equal(firstResult, true);
+  assert.equal(audit.rows[0]?.duplicate_count, 1);
+});
 
-  void firstResult;
-  void secondResult;
+test("failed delivery persists its provider timestamp and bounded reason", async () => {
+  const { conversationId } = await createTestCustomerAndConversation();
+  const wamid = `wamid.failed-${randomUUID()}`;
+  const outboundId = await insertTestOutboundRow({
+    conversationId,
+    providerMessageId: wamid,
+  });
+  const eventTimestamp = new Date("2026-10-11T12:13:14.000Z");
+  const failureReason = `Delivery failed: ${"x".repeat(900)}`;
+  const updated = await markOutboundDeliveryEventFailed(
+    pool,
+    TEST_WORKSPACE_ID,
+    wamid,
+    eventTimestamp,
+    failureReason,
+  );
+  assert.equal(updated, true);
+
+  const persisted = await pool.query<{
+    status: string;
+    failure_reason: string | null;
+    provider_status_at: Date | null;
+  }>(
+    `
+      SELECT status, failure_reason, provider_status_at
+      FROM outbound_messages
+      WHERE id = $1
+    `,
+    [outboundId],
+  );
+  assert.equal(persisted.rows[0]?.status, "failed");
+  assert.equal(persisted.rows[0]?.provider_status_at.toISOString(), eventTimestamp.toISOString());
+  assert.ok((persisted.rows[0]?.failure_reason?.length ?? 0) <= 500);
+
+  const event = await pool.query<{
+    provider_timestamp: Date;
+    processing_outcome: string;
+    failure_reason: string | null;
+  }>(
+    `
+      SELECT provider_timestamp, processing_outcome, failure_reason
+      FROM whatsapp_delivery_events
+      WHERE workspace_id = $1 AND provider_message_id = $2
+    `,
+    [TEST_WORKSPACE_ID, wamid],
+  );
+  assert.equal(event.rows[0]?.provider_timestamp.toISOString(), eventTimestamp.toISOString());
+  assert.equal(event.rows[0]?.processing_outcome, "processed");
+  assert.ok((event.rows[0]?.failure_reason?.length ?? 0) <= 500);
 });
 
 test("22. Older events cannot overwrite newer valid states", async () => {

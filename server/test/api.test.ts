@@ -407,6 +407,30 @@ function whatsappEnvelope(
   });
 }
 
+function whatsappDeliveryEnvelope(
+  statuses: Array<{
+    id: string;
+    status: string;
+    timestamp: string;
+    recipient_id?: string;
+    errors?: unknown[];
+  }>,
+): string {
+  return whatsappEnvelope([
+    {
+      field: "messages",
+      value: {
+        messaging_product: "whatsapp",
+        metadata: {
+          display_phone_number: "15550783881",
+          phone_number_id: TEST_WHATSAPP_PHONE_NUMBER_ID,
+        },
+        statuses,
+      },
+    },
+  ]);
+}
+
 function textWhatsAppMessage({
   id = `wamid.${randomUUID()}`,
   from = TEST_WHATSAPP_CUSTOMER_WA_ID,
@@ -5046,6 +5070,308 @@ test("WhatsApp webhook ignores status and unrelated changes", async () => {
   }
 });
 
+test("signed delivery webhook durably deduplicates, audits, and orders status events", async () => {
+  const app = await startWhatsAppServer();
+  const createOutbound = async (label: string) => {
+    const { lead, conversationId } = await createLeadWithConversation(
+      { name: label },
+      {
+        senderWaId: label === "Delivery second" ? "2348031234567" : undefined,
+        senderPhoneNumber:
+          label === "Delivery second" ? "2348031234567" : undefined,
+      },
+    );
+    const draft = await createSavedDraftPayload(lead.id);
+    const approval = await approveSavedDraft(lead.id, draft.id, {
+      status: "approved",
+      sendPolicy: "approve_and_send",
+      conversationId,
+    });
+    assert.equal(approval.status, 200);
+    const outbound = (
+      await readJson<ReplyDraftApprovalPayload>(approval)
+    ).outboundMessage;
+    assert.ok(outbound);
+    return outbound;
+  };
+  const first = await createOutbound("Delivery first");
+  const second = await createOutbound("Delivery second");
+  const firstWamid = `wamid.delivery-${randomUUID()}`;
+  const secondWamid = `wamid.failed-${randomUUID()}`;
+  await pool.query(
+    `
+      UPDATE outbound_messages
+      SET status = 'sent', provider_message_id = $2, sent_at = now()
+      WHERE id = $1
+    `,
+    [first.id, firstWamid],
+  );
+  await pool.query(
+    `
+      UPDATE outbound_messages
+      SET status = 'sent', provider_message_id = $2, sent_at = now()
+      WHERE id = $1
+    `,
+    [second.id, secondWamid],
+  );
+
+  const t1 = "1760001000";
+  const t2 = "1760001002";
+  try {
+    const ordered = await postWhatsApp(
+      app,
+      whatsappDeliveryEnvelope([
+        { id: firstWamid, status: "sent", timestamp: t1 },
+        { id: firstWamid, status: "delivered", timestamp: t2 },
+        { id: firstWamid, status: "sent", timestamp: "1760001001" },
+        { id: firstWamid, status: "delivered", timestamp: t2 },
+        { id: firstWamid, status: "warning", timestamp: "1760001003" },
+        {
+          id: `wamid.unknown-${randomUUID()}`,
+          status: "sent",
+          timestamp: t1,
+        },
+      ]),
+    );
+    assert.equal(ordered.status, 200);
+    const orderedResult = await readJson<WhatsAppWebhookPayload>(ordered);
+    assert.equal(orderedResult.deliveryProcessed, 2);
+    assert.equal(orderedResult.deliveryIgnored, 3);
+
+    const finalPositive = await postWhatsApp(
+      app,
+      whatsappDeliveryEnvelope([
+        { id: firstWamid, status: "read", timestamp: "1760001004" },
+        { id: firstWamid, status: "sent", timestamp: "1760001005" },
+        { id: firstWamid, status: "failed", timestamp: "1760001006" },
+      ]),
+    );
+    assert.equal(finalPositive.status, 200);
+    const firstState = await pool.query<{
+      status: string;
+      provider_status_at: Date;
+    }>(
+      `
+        SELECT status, provider_status_at
+        FROM outbound_messages
+        WHERE id = $1
+      `,
+      [first.id],
+    );
+    assert.equal(firstState.rows[0]?.status, "read");
+    assert.equal(
+      firstState.rows[0]?.provider_status_at.toISOString(),
+      new Date(1760001004_000).toISOString(),
+    );
+
+    const failed = await postWhatsApp(
+      app,
+      whatsappDeliveryEnvelope([
+        {
+          id: secondWamid,
+          status: "failed",
+          timestamp: "1760001010",
+          errors: [{ code: 131000, type: "OAuthException" }],
+        },
+      ]),
+    );
+    assert.equal(failed.status, 200);
+    const failedState = await pool.query<{
+      status: string;
+      failure_reason: string | null;
+      provider_status_at: Date;
+    }>(
+      `
+        SELECT status, failure_reason, provider_status_at
+        FROM outbound_messages
+        WHERE id = $1
+      `,
+      [second.id],
+    );
+    assert.equal(failedState.rows[0]?.status, "failed");
+    assert.equal(
+      failedState.rows[0]?.provider_status_at.toISOString(),
+      new Date(1760001010_000).toISOString(),
+    );
+    assert.match(failedState.rows[0]?.failure_reason ?? "", /131000/);
+
+    const recovery = await postWhatsApp(
+      app,
+      whatsappDeliveryEnvelope([
+        { id: secondWamid, status: "delivered", timestamp: "1760001009" },
+        { id: secondWamid, status: "delivered", timestamp: "1760001011" },
+      ]),
+    );
+    assert.equal(recovery.status, 200);
+    const recoveryResult = await readJson<WhatsAppWebhookPayload>(recovery);
+    assert.equal(recoveryResult.deliveryProcessed, 1);
+    assert.equal(recoveryResult.deliveryIgnored, 1);
+    const recoveredState = await pool.query<{
+      status: string;
+      delivered_at: Date | null;
+    }>(
+      "SELECT status, delivered_at FROM outbound_messages WHERE id = $1",
+      [second.id],
+    );
+    assert.equal(recoveredState.rows[0]?.status, "delivered");
+    assert.equal(
+      recoveredState.rows[0]?.delivered_at?.toISOString(),
+      new Date(1760001011_000).toISOString(),
+    );
+
+    const events = await pool.query<{
+      provider_status: string;
+      provider_timestamp: Date;
+      received_at: Date;
+      last_received_at: Date;
+      duplicate_count: number;
+      processing_outcome: string;
+      outbound_message_id: string | null;
+    }>(
+      `
+        SELECT
+          provider_status,
+          provider_timestamp,
+          received_at,
+          last_received_at,
+          duplicate_count,
+          processing_outcome,
+          outbound_message_id
+        FROM whatsapp_delivery_events
+        WHERE workspace_id = $1
+          AND provider_message_id IN ($2, $3)
+        ORDER BY provider_timestamp, provider_status
+      `,
+      [requireSession().workspace.id, firstWamid, secondWamid],
+    );
+    assert.equal(events.rows.length, 10);
+    assert.ok(events.rows.every((event) => event.received_at instanceof Date));
+    assert.ok(events.rows.every((event) => event.last_received_at instanceof Date));
+    assert.ok(
+      events.rows.every((event) => event.outbound_message_id !== null),
+    );
+    assert.ok(events.rows.some((event) => event.processing_outcome === "ignored"));
+    assert.equal(
+      events.rows.find(
+        (event) =>
+          event.provider_status === "delivered" &&
+          event.provider_timestamp.toISOString() ===
+            new Date(1760001002_000).toISOString(),
+      )?.duplicate_count,
+      1,
+    );
+
+    const duplicate = await postWhatsApp(
+      app,
+      whatsappDeliveryEnvelope([
+        { id: firstWamid, status: "delivered", timestamp: t2 },
+      ]),
+    );
+    assert.equal(duplicate.status, 200);
+    const eventCount = await pool.query<{ count: number }>(
+      `
+        SELECT count(*)::int AS count
+        FROM whatsapp_delivery_events
+        WHERE workspace_id = $1 AND provider_message_id = $2
+      `,
+      [requireSession().workspace.id, firstWamid],
+    );
+    assert.equal(eventCount.rows[0]?.count, 7);
+  } finally {
+    await stopServer(app.server);
+  }
+});
+
+test("signed delivery webhook records processing failure and recovers on redelivery", async () => {
+  const { lead, conversationId } = await createLeadWithConversation();
+  const draft = await createSavedDraftPayload(lead.id);
+  const approval = await approveSavedDraft(lead.id, draft.id, {
+    status: "approved",
+    sendPolicy: "approve_and_send",
+    conversationId,
+  });
+  assert.equal(approval.status, 200);
+  const outbound = (
+    await readJson<ReplyDraftApprovalPayload>(approval)
+  ).outboundMessage;
+  assert.ok(outbound);
+  const wamid = `wamid.recovery-${randomUUID()}`;
+  await pool.query(
+    `
+      UPDATE outbound_messages
+      SET status = 'sent', provider_message_id = $2, sent_at = now()
+      WHERE id = $1
+    `,
+    [outbound.id, wamid],
+  );
+
+  const app = await startWhatsAppServer();
+  const body = whatsappDeliveryEnvelope([
+    { id: wamid, status: "delivered", timestamp: "1760002000" },
+  ]);
+  try {
+    await pool.query(`
+      CREATE FUNCTION replypilot_test_reject_delivery_update()
+      RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN
+        IF NEW.provider_status_at IS NOT NULL THEN
+          RAISE EXCEPTION 'intentional delivery processing test failure';
+        END IF;
+        RETURN NEW;
+      END
+      $$
+    `);
+    await pool.query(`
+      CREATE TRIGGER replypilot_test_reject_delivery_update
+      BEFORE UPDATE ON outbound_messages
+      FOR EACH ROW EXECUTE FUNCTION replypilot_test_reject_delivery_update()
+    `);
+
+    const failed = await postWhatsApp(app, body);
+    assert.equal(failed.status, 500);
+    const failedAudit = await pool.query<{
+      processing_outcome: string;
+      failure_reason: string | null;
+    }>(
+      `
+        SELECT processing_outcome, failure_reason
+        FROM whatsapp_delivery_events
+        WHERE workspace_id = $1 AND provider_message_id = $2
+      `,
+      [requireSession().workspace.id, wamid],
+    );
+    assert.equal(failedAudit.rows[0]?.processing_outcome, "failed");
+    assert.ok(failedAudit.rows[0]?.failure_reason);
+
+    await pool.query(
+      "DROP TRIGGER replypilot_test_reject_delivery_update ON outbound_messages",
+    );
+    await pool.query(
+      "DROP FUNCTION replypilot_test_reject_delivery_update()",
+    );
+
+    const recovered = await postWhatsApp(app, body);
+    assert.equal(recovered.status, 200);
+    assert.equal(
+      (await readJson<WhatsAppWebhookPayload>(recovered)).deliveryProcessed,
+      1,
+    );
+    const final = await pool.query<{ status: string }>(
+      "SELECT status FROM outbound_messages WHERE id = $1",
+      [outbound.id],
+    );
+    assert.equal(final.rows[0]?.status, "delivered");
+  } finally {
+    await pool.query(
+      "DROP TRIGGER IF EXISTS replypilot_test_reject_delivery_update ON outbound_messages",
+    );
+    await pool.query(
+      "DROP FUNCTION IF EXISTS replypilot_test_reject_delivery_update()",
+    );
+    await stopServer(app.server);
+  }
+});
+
 test("WhatsApp webhook rejects malformed signed payloads", async () => {
   const app = await startWhatsAppServer();
 
@@ -5197,6 +5523,106 @@ test("WhatsApp webhook acknowledges duplicate provider message IDs without new a
       [requireSession().workspace.id],
     );
     assert.equal(counts.rows[0]?.count, 1);
+  } finally {
+    await stopServer(app.server);
+  }
+});
+
+test("inbound opt-out suppresses idempotently and cancels queued sends without false positives", async () => {
+  const { lead, conversationId } = await createLeadWithConversation();
+  const draft = await createSavedDraftPayload(lead.id);
+  const approved = await approveSavedDraft(lead.id, draft.id, {
+    status: "approved",
+    sendPolicy: "approve_and_send",
+    conversationId,
+  });
+  assert.equal(approved.status, 200);
+
+  const app = await startWhatsAppServer();
+  const stopBody = whatsappEnvelope([
+    whatsappChange({
+      messages: [
+        textWhatsAppMessage({
+          id: `wamid.opt-out-${randomUUID()}`,
+          text: "STOP",
+          timestamp: String(Math.floor(Date.now() / 1_000)),
+        }),
+      ],
+    }),
+  ]);
+  const unrelatedBody = whatsappEnvelope([
+    whatsappChange({
+      messages: [
+        textWhatsAppMessage({
+          id: `wamid.unrelated-stop-${randomUUID()}`,
+          from: "2348031234567",
+          text: "I said stop by the shop tomorrow.",
+          timestamp: String(Math.floor(Date.now() / 1_000)),
+        }),
+      ],
+    }),
+  ]);
+
+  try {
+    const stopResponse = await postWhatsApp(app, stopBody);
+    assert.equal(stopResponse.status, 200);
+    assert.equal((await readJson<WhatsAppWebhookPayload>(stopResponse)).stored, 1);
+    const duplicate = await postWhatsApp(app, stopBody);
+    assert.equal(duplicate.status, 200);
+    assert.equal((await readJson<WhatsAppWebhookPayload>(duplicate)).duplicates, 1);
+
+    const suppression = await pool.query<{ reason: string; count: number }>(
+      `
+        SELECT reason, count(*) OVER ()::int AS count
+        FROM customer_suppressions
+        WHERE workspace_id = $1
+          AND customer_id = (
+            SELECT customer_id
+            FROM whatsapp_conversations
+            WHERE workspace_id = $1 AND id = $2
+          )
+      `,
+      [requireSession().workspace.id, conversationId],
+    );
+    assert.equal(suppression.rows[0]?.reason, "opt_out");
+    assert.equal(suppression.rows[0]?.count, 1);
+
+    const unrelated = await postWhatsApp(app, unrelatedBody);
+    assert.equal(unrelated.status, 200);
+    const unrelatedSuppression = await pool.query<{ count: number }>(
+      `
+        SELECT count(*)::int AS count
+        FROM customer_suppressions AS suppression
+        JOIN customers AS customer
+          ON customer.id = suppression.customer_id
+         AND customer.workspace_id = suppression.workspace_id
+        WHERE suppression.workspace_id = $1
+          AND customer.phone_e164 = '+2348031234567'
+      `,
+      [requireSession().workspace.id],
+    );
+    assert.equal(unrelatedSuppression.rows[0]?.count, 0);
+
+    const workerResult = await runOutboundWorkerOnce(
+      pool,
+      new MockOutboundMessageProvider(),
+      { staleAfterMs: 60_000 },
+    );
+    assert.equal(workerResult.cancelled, 1);
+    assert.equal(workerResult.claimed, 0);
+    const history = await pool.query<{
+      status: string;
+      failure_reason: string | null;
+    }>(
+      `
+        SELECT status, failure_reason
+        FROM outbound_messages
+        WHERE workspace_id = $1 AND reply_draft_id = $2
+      `,
+      [requireSession().workspace.id, draft.id],
+    );
+    assert.equal(history.rows[0]?.status, "cancelled");
+    assert.match(history.rows[0]?.failure_reason ?? "", /suppressed/i);
   } finally {
     await stopServer(app.server);
   }
