@@ -54,8 +54,9 @@ export const OUTBOUND_STATUS_DESCRIPTIONS: Record<
 > = {
   queued: "Waiting for the outbound worker.",
   sending: "The worker is attempting provider acceptance.",
-  sent: "The mock provider accepted the message. Delivery is not confirmed.",
+  sent: "The provider accepted the message. Delivery is not confirmed.",
   delivered: "The provider reported delivery.",
+  read: "The provider reported that the customer read the message.",
   failed: "The provider rejected the message after the allowed attempts.",
   cancelled: "The approval or active conversation is no longer valid.",
   manual_review:
