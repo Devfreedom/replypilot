@@ -88,9 +88,6 @@ export function OutboundHistory() {
   const [reloadToken, setReloadToken] = useState(0);
 
   const load = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-
     try {
       const query = new URLSearchParams({
         limit: String(PAGE_SIZE),
@@ -208,6 +205,8 @@ export function OutboundHistory() {
           <select
             value={statusFilter}
             onChange={(event) => {
+              setLoading(true);
+              setError(null);
               setStatusFilter(event.target.value as StatusFilter);
               setOffset(0);
             }}
@@ -228,7 +227,11 @@ export function OutboundHistory() {
           {error}{" "}
           <button
             type="button"
-            onClick={() => setReloadToken((value) => value + 1)}
+            onClick={() => {
+              setLoading(true);
+              setError(null);
+              setReloadToken((value) => value + 1);
+            }}
             className="ml-2 font-semibold underline"
           >
             Try again
@@ -322,7 +325,11 @@ export function OutboundHistory() {
         <div className="mt-6 flex items-center justify-between gap-3">
           <button
             type="button"
-            onClick={() => setOffset(Math.max(0, offset - PAGE_SIZE))}
+            onClick={() => {
+              setLoading(true);
+              setError(null);
+              setOffset(Math.max(0, offset - PAGE_SIZE));
+            }}
             disabled={offset === 0}
             className="btn btn-secondary"
           >
@@ -330,7 +337,11 @@ export function OutboundHistory() {
           </button>
           <button
             type="button"
-            onClick={() => setOffset(offset + PAGE_SIZE)}
+            onClick={() => {
+              setLoading(true);
+              setError(null);
+              setOffset(offset + PAGE_SIZE);
+            }}
             disabled={!hasMore}
             className="btn btn-secondary"
           >
