@@ -57,7 +57,7 @@ export const OUTBOUND_STATUS_DESCRIPTIONS: Record<
   failed: "The provider rejected the message after the allowed attempts.",
   cancelled: "The approval or active conversation is no longer valid.",
   manual_review:
-    "The provider outcome is unknown. Reconcile with the provider before any further send.",
+    "The provider outcome is unknown. Do not retry until you check the provider's own records. ReplyPilot cannot reconcile this automatically.",
 };
 
 const approvalSendPolicySchema = z.enum(APPROVAL_SEND_POLICIES);
@@ -96,6 +96,13 @@ const outboundHistoryItemSchema = outboundMessageSchema.extend({
     status: z.enum(["open", "closed", "archived"]),
   }),
   canRetry: z.boolean(),
+  retryBlockReason: z
+    .enum([
+      "draft_not_approved",
+      "content_changed",
+      "conversation_inactive",
+    ])
+    .nullable(),
 });
 
 const outboundMessagesResponseSchema = z.object({
@@ -108,6 +115,10 @@ const outboundMessagesResponseSchema = z.object({
   }),
 });
 
+const outboundMessageLookupResponseSchema = z.object({
+  outboundMessage: outboundMessageSchema.nullable(),
+});
+
 const messagingSettingsSchema = z.object({
   defaultApprovalSendPolicy: approvalSendPolicySchema,
 });
@@ -118,6 +129,10 @@ const messagingSettingsResponseSchema = z.object({
 
 export type OutboundMessage = z.infer<typeof outboundMessageSchema>;
 export type OutboundHistoryItem = z.infer<typeof outboundHistoryItemSchema>;
+export type OutboundRetryBlockReason =
+  | "draft_not_approved"
+  | "content_changed"
+  | "conversation_inactive";
 export type OutboundMessagesResponse = z.infer<
   typeof outboundMessagesResponseSchema
 >;
@@ -125,6 +140,13 @@ export type MessagingSettings = z.infer<typeof messagingSettingsSchema>;
 
 export function parseOutboundMessage(data: unknown): OutboundMessage | null {
   const parsed = outboundMessageSchema.safeParse(data);
+  return parsed.success ? parsed.data : null;
+}
+
+export function parseOutboundMessageLookupResponse(
+  data: unknown,
+): Readonly<{ outboundMessage: OutboundMessage | null }> | null {
+  const parsed = outboundMessageLookupResponseSchema.safeParse(data);
   return parsed.success ? parsed.data : null;
 }
 
@@ -143,6 +165,34 @@ export function sendPolicyChoiceForDraftSelection(
   currentChoice: ApprovalSendPolicy | "default",
 ): ApprovalSendPolicy | "default" {
   return previousDraftId === nextDraftId ? currentChoice : "default";
+}
+
+export function preferredConversationIdForDraft(
+  existingConversationId: string | null,
+  conversations: readonly Readonly<{ id: string }>[],
+): string {
+  if (existingConversationId !== null) {
+    return conversations.some(
+      (conversation) => conversation.id === existingConversationId,
+    )
+      ? existingConversationId
+      : "";
+  }
+
+  return conversations.length === 1 ? conversations[0].id : "";
+}
+
+export function retryBlockDescription(
+  reason: OutboundRetryBlockReason,
+): string {
+  switch (reason) {
+    case "draft_not_approved":
+      return "The draft is no longer approved. Approve it again before retrying.";
+    case "content_changed":
+      return "The draft differs from the original message snapshot. Create a new draft to send revised content.";
+    case "conversation_inactive":
+      return "The original conversation is inactive. The message cannot be retargeted.";
+  }
 }
 
 export function canRetryOutboundForRole(

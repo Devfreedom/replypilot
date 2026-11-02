@@ -100,6 +100,18 @@ export function mapOutboundMessageRow(
 function mapOutboundMessageHistoryRow(
   row: OutboundMessageHistoryRow,
 ): OutboundMessageHistoryItem {
+  const retryBlockReason =
+    row.status !== "failed"
+      ? null
+      : row.reply_draft_status !== "approved"
+        ? "draft_not_approved"
+        : row.content !== row.reply_draft_content
+          ? "content_changed"
+          : row.conversation_status !== "open" &&
+              row.conversation_status !== "closed"
+            ? "conversation_inactive"
+            : null;
+
   return {
     ...mapOutboundMessageRow(row),
     conversation: {
@@ -112,10 +124,8 @@ function mapOutboundMessageHistoryRow(
       },
       status: row.conversation_status,
     },
-    canRetry:
-      row.status === "failed" &&
-      row.reply_draft_status === "approved" &&
-      row.content === row.reply_draft_content,
+    canRetry: row.status === "failed" && retryBlockReason === null,
+    retryBlockReason,
   };
 }
 

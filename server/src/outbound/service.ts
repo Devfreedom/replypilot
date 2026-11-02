@@ -24,6 +24,7 @@ export type QueueManualSendResult =
   | Readonly<{ kind: "conversation-required" }>
   | Readonly<{ kind: "conversation-ambiguous" }>
   | Readonly<{ kind: "conversation-not-found" }>
+  | Readonly<{ kind: "conversation-mismatch" }>
   | Readonly<{ kind: "manual-review" }>;
 
 /**
@@ -72,6 +73,20 @@ export async function queueManualSend(
       input.draftId,
     );
 
+    if (existingOutbound?.status === "manual_review") {
+      await client.query("ROLLBACK");
+      return { kind: "manual-review" };
+    }
+
+    if (
+      existingOutbound &&
+      input.conversationId !== undefined &&
+      input.conversationId !== existingOutbound.conversationId
+    ) {
+      await client.query("ROLLBACK");
+      return { kind: "conversation-mismatch" };
+    }
+
     // Never retry a historical snapshot against different approved text. The
     // one-outbound-per-draft constraint means the owner must start a new draft
     // for revised content rather than silently sending stale content.
@@ -83,10 +98,24 @@ export async function queueManualSend(
       return { kind: "content-changed" };
     }
 
+    if (existingOutbound?.status === "cancelled") {
+      await client.query("ROLLBACK");
+      return { kind: "not-retryable" };
+    }
+
+    if (
+      existingOutbound &&
+      existingOutbound.status !== "failed"
+    ) {
+      await client.query("COMMIT");
+      return { kind: "ok", outboundMessage: existingOutbound };
+    }
+
     const conversation = await resolveConversationForLead(client, {
       workspaceId: input.workspaceId,
       leadId: draft.lead_id,
-      conversationId: input.conversationId,
+      conversationId:
+        existingOutbound?.conversationId ?? input.conversationId,
     });
 
     if (conversation.kind !== "ok") {

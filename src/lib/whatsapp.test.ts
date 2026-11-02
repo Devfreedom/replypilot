@@ -5,6 +5,7 @@ import {
   conversationDisplayName,
   conversationIdentity,
   conversationInitials,
+  conversationOptionLabel,
   conversationPreview,
   mergeConversations,
   mergeMessages,
@@ -85,6 +86,17 @@ test("conversation identity falls back from name to phone to provider ID", () =>
   assert.deepEqual(conversationIdentity(phoneOnly), {
     label: "Phone",
     value: "+2348031234567",
+  });
+
+  test("conversation labels distinguish threads for the same customer", () => {
+    const first = conversation({ phoneNumberId: "1111111111" });
+    const second = conversation({ phoneNumberId: "2222222222" });
+    assert.notEqual(
+      conversationOptionLabel(first),
+      conversationOptionLabel(second),
+    );
+    assert.match(conversationOptionLabel(first), /Phone: \+16505551234/);
+    assert.match(conversationOptionLabel(first), /WhatsApp number 1111111111/);
   });
 
   const providerOnly = conversation({

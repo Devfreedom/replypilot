@@ -8,6 +8,7 @@ import {
   canRetryOutboundForRole,
   parseOutboundMessagesResponse,
   parseSendOutboundMessageResponse,
+  retryBlockDescription,
   type OutboundHistoryItem,
   type OutboundMessageStatus,
 } from "@/lib/messaging";
@@ -326,6 +327,12 @@ export function OutboundHistory() {
                 {OUTBOUND_STATUS_DESCRIPTIONS[item.status]}
                 {item.failureReason ? ` ${item.failureReason}` : ""}
               </p>
+              {item.status === "failed" && item.retryBlockReason ? (
+                <p className="mt-2 text-xs leading-5 text-warning-ink">
+                  Retry unavailable:{" "}
+                  {retryBlockDescription(item.retryBlockReason)}
+                </p>
+              ) : null}
             </li>
           ))}
         </ul>

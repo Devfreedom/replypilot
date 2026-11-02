@@ -28,7 +28,9 @@ contacts WhatsApp or any other external service.
 - Treats timeouts and unclassified exceptions as ambiguous outcomes. If the
   provider does not guarantee idempotency for the supplied key, the row moves
   to `manual_review`; it is not automatically sent again. An owner/operator
-  must reconcile the provider outcome before any further send.
+  must check the provider's own records before any further send. ReplyPilot
+  does not currently reconcile provider records automatically or offer an
+  action to mark an uncertain message as sent or delivered.
 - Only sends when the outbound snapshot still exactly matches the approved
   draft content. Editing or returning a draft cancels queued work immediately.
   A `sending` claim is a short-lived authorization reservation: mutations that
@@ -51,6 +53,9 @@ contacts WhatsApp or any other external service.
   worker crosses that boundary, but a crash can still leave an unknown provider
   outcome. Idempotency or provider-side reconciliation is required; this
   system does not claim exactly-once delivery.
+- Thread history uses `sent_at` for outbound provider acceptance time and falls
+  back to `queued_at` until acceptance. Inbound provider timestamps and inbound
+  message records are unchanged.
 
 ## Run in development
 

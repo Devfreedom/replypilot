@@ -53,10 +53,6 @@ export class MockOutboundMessageProvider implements OutboundMessageProvider {
   readonly name = "mock";
   readonly idempotency = "guaranteed" as const;
   private readonly failures = new Map<string, number>();
-  private readonly accepted = new Map<
-    string,
-    OutboundProviderSendResult
-  >();
   private readonly failAll: boolean;
 
   constructor(options: MockOutboundMessageProviderOptions = {}) {
@@ -79,12 +75,6 @@ export class MockOutboundMessageProvider implements OutboundMessageProvider {
   async send(
     input: OutboundProviderSendInput,
   ): Promise<OutboundProviderSendResult> {
-    const accepted = this.accepted.get(input.idempotencyKey);
-
-    if (accepted) {
-      return accepted;
-    }
-
     const remaining = this.failures.get(input.idempotencyKey) ?? 0;
 
     if (this.failAll || remaining > 0) {
@@ -102,12 +92,9 @@ export class MockOutboundMessageProvider implements OutboundMessageProvider {
       .digest("hex")
       .slice(0, 24);
 
-    const result = {
+    return {
       providerMessageId: `mock-${digest}`,
       status: "sent",
     } as const;
-
-    this.accepted.set(input.idempotencyKey, result);
-    return result;
   }
 }

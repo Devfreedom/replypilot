@@ -7,7 +7,10 @@ import {
   getAuthContext,
 } from "../auth/middleware.js";
 import { OUTBOUND_MESSAGE_STATUSES } from "../messaging/types.js";
-import { listOutboundMessages } from "./repository.js";
+import {
+  getOutboundMessageForDraft,
+  listOutboundMessages,
+} from "./repository.js";
 
 const DEFAULT_PAGE_SIZE = 25;
 const MAX_PAGE_SIZE = 100;
@@ -63,6 +66,24 @@ export function createOutboundMessagesRouter({
     auth,
     pool,
     roles: ["owner", "member"],
+  });
+
+  router.get("/by-draft/:draftId", requireMember, async (request, response) => {
+    const draftId = z.uuid().safeParse(request.params.draftId);
+
+    if (!draftId.success) {
+      sendValidationError(response, draftId.error);
+      return;
+    }
+
+    const { workspace } = getAuthContext(response);
+    const outboundMessage = await getOutboundMessageForDraft(
+      pool,
+      workspace.id,
+      draftId.data,
+    );
+
+    response.status(200).json({ outboundMessage });
   });
 
   router.get("/", requireMember, async (request, response) => {

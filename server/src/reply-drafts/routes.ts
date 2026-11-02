@@ -100,6 +100,14 @@ export function createReplyDraftsRouter({
       return;
     }
 
+    if (result.kind === "conversation-mismatch") {
+      response.status(409).json({
+        error:
+          "This outbound message is tied to a different conversation and cannot be retargeted.",
+      });
+      return;
+    }
+
     if (result.kind === "not-retryable") {
       response.status(409).json({
         error: "This outbound message is cancelled and cannot be retried.",

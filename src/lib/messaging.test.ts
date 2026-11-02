@@ -7,10 +7,13 @@ import {
   OUTBOUND_STATUS_DESCRIPTIONS,
   OUTBOUND_STATUS_LABELS,
   canRetryOutboundForRole,
+  parseOutboundMessageLookupResponse,
   parseMessagingSettingsResponse,
   parseOutboundMessage,
   parseOutboundMessagesResponse,
   parseSendOutboundMessageResponse,
+  preferredConversationIdForDraft,
+  retryBlockDescription,
   sendPolicyChoiceForDraftSelection,
 } from "./messaging.js";
 
@@ -70,6 +73,7 @@ test("outbound history parser preserves provider acceptance and retry eligibilit
           status: "open",
         },
         canRetry: false,
+        retryBlockReason: null,
       },
     ],
     pagination: {
@@ -103,6 +107,18 @@ test("manual retry parser accepts the API envelope", () => {
   assert.equal(parseSendOutboundMessageResponse(outboundMessage), null);
 });
 
+test("outbound lookup parser accepts an existing message or an empty result", () => {
+  assert.deepEqual(
+    parseOutboundMessageLookupResponse({ outboundMessage }),
+    { outboundMessage },
+  );
+  assert.deepEqual(
+    parseOutboundMessageLookupResponse({ outboundMessage: null }),
+    { outboundMessage: null },
+  );
+  assert.equal(parseOutboundMessageLookupResponse({}), null);
+});
+
 test("changing drafts resets the per-draft policy choice", () => {
   assert.equal(
     sendPolicyChoiceForDraftSelection(
@@ -120,6 +136,25 @@ test("changing drafts resets the per-draft policy choice", () => {
     ),
     "approve_and_send",
   );
+});
+
+test("draft conversation selection keeps the outbound target and avoids guessing", () => {
+  const conversations = [{ id: "one" }, { id: "two" }];
+  assert.equal(
+    preferredConversationIdForDraft("two", conversations),
+    "two",
+  );
+  assert.equal(preferredConversationIdForDraft(null, conversations), "");
+  assert.equal(
+    preferredConversationIdForDraft(null, [{ id: "only" }]),
+    "only",
+  );
+  assert.equal(preferredConversationIdForDraft("archived", conversations), "");
+});
+
+test("retry-block explanations describe the safe next step", () => {
+  assert.match(retryBlockDescription("content_changed"), /new draft/i);
+  assert.match(retryBlockDescription("conversation_inactive"), /retargeted/i);
 });
 
 test("only owners see retry controls for retryable outbound messages", () => {

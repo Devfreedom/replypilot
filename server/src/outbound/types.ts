@@ -33,6 +33,11 @@ export type OutboundMessageHistoryItem = Readonly<
       status: ConversationStatus;
     }>;
     canRetry: boolean;
+    retryBlockReason:
+      | "draft_not_approved"
+      | "content_changed"
+      | "conversation_inactive"
+      | null;
   }
 >;
 

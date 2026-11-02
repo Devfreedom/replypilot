@@ -783,6 +783,26 @@ export async function listConversationSummaries(
   };
 }
 
+export async function listConversationsForLead(
+  pool: Pool,
+  workspaceId: string,
+  leadId: string,
+): Promise<ConversationSummary[]> {
+  const result = await pool.query<ConversationSummaryRow>(
+    `
+      ${CONVERSATION_SUMMARY_SELECT}
+      WHERE conversation.workspace_id = $1
+        AND conversation.lead_id = $2
+      ORDER BY
+        COALESCE(latest.provider_timestamp, conversation.created_at) DESC,
+        conversation.id ASC
+    `,
+    [workspaceId, leadId],
+  );
+
+  return result.rows.map(mapConversationSummaryRow);
+}
+
 export async function getConversationSummary(
   pool: Pool,
   workspaceId: string,

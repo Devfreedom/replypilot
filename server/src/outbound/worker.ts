@@ -19,6 +19,20 @@ export const DEFAULT_WORKER_BATCH_SIZE = 10;
 export const DEFAULT_WORKER_RETRY_DELAY_MS = 2_000;
 export const DEFAULT_WORKER_STALE_AFTER_MS = 5 * 60 * 1_000;
 const MAX_RETRY_DELAY_MS = 60_000;
+const MAX_FAILURE_REASON_LENGTH = 1000;
+
+function boundedFailureReason(reason: string): string {
+  let codePointLength = 0;
+  let characterLength = 0;
+
+  for (const character of reason) {
+    if (codePointLength === MAX_FAILURE_REASON_LENGTH) break;
+    codePointLength += 1;
+    characterLength += character.length;
+  }
+
+  return reason.slice(0, characterLength);
+}
 
 export type OutboundWorkerOptions = Readonly<{
   batchSize?: number;
@@ -107,10 +121,11 @@ export async function runOutboundWorkerOnce(
       const ambiguous =
         error instanceof OutboundProviderAmbiguousError ||
         !(error instanceof OutboundProviderError);
-      const failureReason =
+      const failureReason = boundedFailureReason(
         error instanceof Error
           ? error.message
-          : "Outbound provider returned an unknown failure.";
+          : "Outbound provider returned an unknown failure.",
+      );
 
       const retryDelayMs = Math.min(
         baseRetryDelayMs * 2 ** Math.max(0, row.attempts - 1),
@@ -124,7 +139,9 @@ export async function runOutboundWorkerOnce(
           ? await markOutboundManualReview(
               pool,
               row,
-              `Provider outcome is ambiguous: ${failureReason} Reconcile with the provider before any further send.`,
+              boundedFailureReason(
+                `Provider outcome is ambiguous: ${failureReason} Reconcile with the provider before any further send.`,
+              ),
             )
           : await markOutboundFailed(pool, row, failureReason, retryDelayMs);
 

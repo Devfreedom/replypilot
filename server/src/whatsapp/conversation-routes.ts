@@ -9,6 +9,7 @@ import {
 import { MAX_MESSAGE_CURSOR_LENGTH, decodeMessageCursor } from "./cursor.js";
 import {
   getConversationSummary,
+  listConversationsForLead,
   listConversationSummaries,
   listMessagesForConversationCursor,
   listMessagesForConversationPage,
@@ -23,6 +24,7 @@ const MAX_PAGE_SIZE = 100;
 const MAX_OFFSET = 1_000_000;
 
 const conversationIdSchema = z.uuid();
+const leadIdSchema = z.uuid();
 
 const paginationSchema = z.object({
   limit: z.coerce
@@ -155,6 +157,24 @@ export function createConversationsRouter({
         result.conversations.length,
       ),
     });
+  });
+
+  router.get("/by-lead/:leadId", requireMember, async (request, response) => {
+    const leadId = leadIdSchema.safeParse(request.params.leadId);
+
+    if (!leadId.success) {
+      sendValidationError(response, leadId.error, "leadId");
+      return;
+    }
+
+    const { workspace } = getAuthContext(response);
+    const conversations = await listConversationsForLead(
+      pool,
+      workspace.id,
+      leadId.data,
+    );
+
+    response.status(200).json({ conversations });
   });
 
   router.get(
