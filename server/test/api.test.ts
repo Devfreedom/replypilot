@@ -7573,6 +7573,48 @@ test("worker sends queued outbound and conversation view exposes direction and s
   assert.equal(conversation.conversation.lastMessageStatus, null);
 });
 
+test("worker only claims outbound messages assigned to its provider", async () => {
+  const { lead, conversationId } = await createLeadWithConversation();
+  const draft = await createSavedDraftPayload(lead.id);
+  const approved = await approveSavedDraft(lead.id, draft.id, {
+    status: "approved",
+    sendPolicy: "approve_and_send",
+    conversationId,
+  });
+  assert.equal(approved.status, 200);
+  const outbound = (await readJson<ReplyDraftApprovalPayload>(approved))
+    .outboundMessage;
+  assert.ok(outbound);
+
+  await pool.query(
+    "UPDATE outbound_messages SET provider = 'other-provider' WHERE id = $1",
+    [outbound.id],
+  );
+
+  let providerCalls = 0;
+  const provider: OutboundMessageProvider = {
+    name: "mock",
+    idempotency: "guaranteed",
+    async send() {
+      providerCalls += 1;
+      return { providerMessageId: "unexpected", status: "sent" };
+    },
+  };
+
+  const result = await runOutboundWorkerOnce(pool, provider, {
+    batchSize: 10,
+    staleAfterMs: 60_000,
+  });
+  assert.equal(result.claimed, 0);
+  assert.equal(result.sent, 0);
+  assert.equal(providerCalls, 0);
+
+  const history = await readJson<OutboundHistoryPayload>(
+    await listOutboundMessages(),
+  );
+  assert.equal(history.messages[0]?.status, "queued");
+});
+
 test("worker retries provider failures with bounded backoff and preserves content", async () => {
   const { lead, conversationId } = await createLeadWithConversation();
   const draft = await createSavedDraftPayload(lead.id);

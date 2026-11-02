@@ -55,20 +55,24 @@ export async function runOutboundWorkerOnce(
   const staleAfterMs =
     options.staleAfterMs ?? DEFAULT_WORKER_STALE_AFTER_MS;
 
-  const recovered = await recoverStaleSending(
+  const recovery = await recoverStaleSending(
     pool,
     staleAfterMs,
     provider.name,
     provider.idempotency,
   );
   const cancelledBeforeClaim = await cancelUnauthorizedQueuedOutbound(pool);
-  const claimed = await claimQueuedOutboundMessages(pool, batchSize);
+  const claimed = await claimQueuedOutboundMessages(
+    pool,
+    batchSize,
+    provider.name,
+  );
 
   let cancelled = cancelledBeforeClaim;
   let sent = 0;
   let retried = 0;
   let failed = 0;
-  let manualReview = 0;
+  let manualReview = recovery.manualReview;
   let skipped = 0;
 
   for (const row of claimed) {
@@ -137,7 +141,7 @@ export async function runOutboundWorkerOnce(
   }
 
   return {
-    recovered,
+    recovered: recovery.recovered,
     cancelled,
     claimed: claimed.length,
     sent,

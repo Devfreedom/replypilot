@@ -392,6 +392,7 @@ export async function cancelUnauthorizedQueuedOutbound(
 export async function claimQueuedOutboundMessages(
   pool: Pool,
   batchSize: number,
+  providerName: string,
 ): Promise<OutboundMessageRow[]> {
   const client = await pool.connect();
 
@@ -404,6 +405,7 @@ export async function claimQueuedOutboundMessages(
           SELECT message.id
           FROM outbound_messages AS message
           WHERE message.status = 'queued'
+            AND message.provider = $2
             AND (message.next_attempt_at IS NULL OR message.next_attempt_at <= now())
             AND EXISTS (
               SELECT 1
@@ -430,7 +432,7 @@ export async function claimQueuedOutboundMessages(
         WHERE message.id = claimed.id
         RETURNING ${OUTBOUND_MESSAGE_RETURNING_COLUMNS}
       `,
-      [batchSize],
+      [batchSize, providerName],
     );
 
     await client.query("COMMIT");
@@ -588,8 +590,8 @@ export async function recoverStaleSending(
   staleAfterMs: number,
   providerName: string,
   providerIdempotency: "guaranteed" | "unsupported",
-): Promise<number> {
-  const result = await pool.query(
+): Promise<{ recovered: number; manualReview: number }> {
+  const result = await pool.query<{ status: string }>(
     `
       UPDATE outbound_messages
       SET status = CASE
@@ -615,11 +617,17 @@ export async function recoverStaleSending(
           END,
           updated_at = now()
       WHERE status = 'sending'
+        AND provider = $2
         AND started_at IS NOT NULL
         AND started_at < now() - ($1 * interval '1 millisecond')
+      RETURNING status
     `,
     [staleAfterMs, providerName, providerIdempotency],
   );
 
-  return result.rowCount ?? 0;
+  return {
+    recovered: result.rows.length,
+    manualReview: result.rows.filter((row) => row.status === "manual_review")
+      .length,
+  };
 }
