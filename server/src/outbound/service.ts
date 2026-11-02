@@ -1,6 +1,7 @@
 import type { Pool } from "pg";
 import { REPLY_DRAFT_COLUMNS } from "../reply-drafts/repository.js";
 import type { ReplyDraftRow } from "../reply-drafts/types.js";
+import { getOutboundProviderNameForWorkspace } from "./meta-config.js";
 import {
   getOutboundMessageForDraft,
   insertQueuedOutboundMessage,
@@ -138,6 +139,7 @@ export async function queueManualSend(
       replyDraftId: input.draftId,
       content: draft.draft_reply,
       idempotencyKey: `reply-draft:${input.draftId}`,
+      provider: getOutboundProviderNameForWorkspace(input.workspaceId),
     });
 
     if (!outboundMessage) {

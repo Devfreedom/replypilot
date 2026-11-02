@@ -186,6 +186,18 @@ const TEST_AUTH_ORIGIN = "http://127.0.0.1:3000";
 const TEST_AUTH_SECRET = "replypilot-test-only-secret-0123456789abcdef";
 const TEST_CLIENT_IP = "127.0.0.1";
 const nativeFetch = globalThis.fetch.bind(globalThis);
+const META_OUTBOUND_ENV_KEYS = [
+  "META_OUTBOUND_ENABLED",
+  "META_ACCESS_TOKEN",
+  "META_GRAPH_API_VERSION",
+  "WHATSAPP_SENDER_PHONE_NUMBER_ID",
+  "META_OUTBOUND_TEST_WORKSPACE_ID",
+  "META_TEST_RECIPIENT_PHONE_NUMBERS",
+] as const;
+const originalMetaOutboundEnvironment = new Map<
+  (typeof META_OUTBOUND_ENV_KEYS)[number],
+  string | undefined
+>();
 
 type TestWorkspacePayload = {
   id: string;
@@ -765,6 +777,46 @@ function jsonRequest(
   });
 }
 
+async function withMetaOutboundEnabled<T>(
+  workspaceId: string,
+  action: () => Promise<T>,
+): Promise<T> {
+  const previous = new Map(
+    META_OUTBOUND_ENV_KEYS.map((key) => [key, process.env[key]] as const),
+  );
+  const previousNodeEnv = process.env.NODE_ENV;
+
+  process.env.NODE_ENV = "test";
+  Object.assign(process.env, {
+    META_OUTBOUND_ENABLED: "true",
+    META_ACCESS_TOKEN: "EAABc0FakeTestAccessTokenAtLeast20Characters",
+    META_GRAPH_API_VERSION: "v21.0",
+    WHATSAPP_SENDER_PHONE_NUMBER_ID: "123456789012345",
+    META_OUTBOUND_TEST_WORKSPACE_ID: workspaceId,
+    META_TEST_RECIPIENT_PHONE_NUMBERS: "+16505551234",
+  });
+
+  try {
+    return await action();
+  } finally {
+    for (const key of META_OUTBOUND_ENV_KEYS) {
+      const value = previous.get(key);
+
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+
+    if (previousNodeEnv === undefined) {
+      delete process.env.NODE_ENV;
+    } else {
+      process.env.NODE_ENV = previousNodeEnv;
+    }
+  }
+}
+
 const validProfileBody = {
   businessName: "Lagos Light Studio",
   businessDescription: "Wedding and portrait photography.",
@@ -910,6 +962,11 @@ function makeContext(overrides: Partial<ReplyContext> = {}): ReplyContext {
 
 
 before(async () => {
+  for (const key of META_OUTBOUND_ENV_KEYS) {
+    originalMetaOutboundEnvironment.set(key, process.env[key]);
+  }
+  process.env.META_OUTBOUND_ENABLED = "false";
+
   pool = createPool(testDatabaseUrl);
   await prepareTestDatabase(pool);
   ({ server, baseUrl } = await startServer(pool));
@@ -931,6 +988,16 @@ after(async () => {
 
   if (pool) {
     await pool.end();
+  }
+
+  for (const key of META_OUTBOUND_ENV_KEYS) {
+    const value = originalMetaOutboundEnvironment.get(key);
+
+    if (value === undefined) {
+      delete process.env[key];
+    } else {
+      process.env[key] = value;
+    }
   }
 });
 
@@ -7215,6 +7282,85 @@ test("per-draft approve-and-send snapshots content and creates one outbound reco
   assert.equal(outboundCount.rows[0]?.count, 1);
 });
 
+test("approval routes configured test-workspace messages to the Meta worker", async () => {
+  const testWorkspaceSession = requireSession();
+  const { lead, conversationId } = await createLeadWithConversation();
+  const draft = await createSavedDraftPayload(lead.id);
+
+  await withMetaOutboundEnabled(testWorkspaceSession.workspace.id, async () => {
+    const approved = await approveSavedDraft(lead.id, draft.id, {
+      status: "approved",
+      sendPolicy: "approve_and_send",
+      conversationId,
+    });
+
+    assert.equal(approved.status, 200);
+    const outbound = (
+      await readJson<ReplyDraftApprovalPayload>(approved)
+    ).outboundMessage;
+    assert.ok(outbound);
+    assert.equal(outbound.provider, "whatsapp");
+
+    const persisted = await pool.query<{ provider: string }>(
+      "SELECT provider FROM outbound_messages WHERE id = $1",
+      [outbound.id],
+    );
+    assert.equal(persisted.rows[0]?.provider, "whatsapp");
+
+    currentSession = await registerUser({
+      email: `outbound-mock-${randomUUID()}@example.test`,
+    });
+    const otherWorkspace = await createLeadWithConversation(
+      { name: "Non-test Workspace" },
+      {
+        senderWaId: "2348031234567",
+        senderPhoneNumber: "2348031234567",
+      },
+    );
+    const otherDraft = await createSavedDraftPayload(otherWorkspace.lead.id);
+    const otherApproval = await approveSavedDraft(
+      otherWorkspace.lead.id,
+      otherDraft.id,
+      {
+        status: "approved",
+        sendPolicy: "approve_and_send",
+        conversationId: otherWorkspace.conversationId,
+      },
+    );
+    assert.equal(otherApproval.status, 200);
+    const otherOutbound = (
+      await readJson<ReplyDraftApprovalPayload>(otherApproval)
+    ).outboundMessage;
+    assert.ok(otherOutbound);
+    assert.equal(otherOutbound.provider, "mock");
+
+    const mockResult = await runOutboundWorkerOnce(
+      pool,
+      new MockOutboundMessageProvider(),
+      { staleAfterMs: 60_000 },
+    );
+    assert.equal(mockResult.claimed, 1);
+    assert.equal(mockResult.sent, 1);
+
+    let providerCalls = 0;
+    const metaTestProvider: OutboundMessageProvider = {
+      name: "whatsapp",
+      idempotency: "unsupported",
+      async send() {
+        providerCalls += 1;
+        return { providerMessageId: "test-wamid-routing", status: "sent" };
+      },
+    };
+    const metaResult = await runOutboundWorkerOnce(pool, metaTestProvider, {
+      staleAfterMs: 60_000,
+    });
+    assert.equal(metaResult.claimed, 1);
+    assert.equal(metaResult.sent, 1);
+    assert.equal(providerCalls, 1);
+    currentSession = testWorkspaceSession;
+  });
+});
+
 test("concurrent approvals converge on one approved draft and one outbound record", async () => {
   const { lead, conversationId } = await createLeadWithConversation();
   const draft = await createSavedDraftPayload(lead.id);
@@ -7587,6 +7733,41 @@ test("manual send only queues approved drafts and is idempotent", async () => {
 
   const invalidDraftId = await sendSavedDraft("not-a-uuid");
   assert.equal(invalidDraftId.status, 400);
+});
+
+test("manual queueing uses configured provider and clients cannot override provider selection", async () => {
+  const { lead, conversationId } = await createLeadWithConversation();
+  const draft = await createSavedDraftPayload(lead.id);
+
+  const forgedApproval = await approveSavedDraft(lead.id, draft.id, {
+    status: "approved",
+    sendPolicy: "approve_and_send",
+    conversationId,
+    provider: "whatsapp",
+  });
+  assert.equal(forgedApproval.status, 400);
+
+  const approved = await approveSavedDraft(lead.id, draft.id);
+  assert.equal(approved.status, 200);
+
+  const forgedManualQueue = await sendSavedDraft(draft.id, {
+    provider: "whatsapp",
+  });
+  assert.equal(forgedManualQueue.status, 400);
+
+  await withMetaOutboundEnabled(requireSession().workspace.id, async () => {
+    const queued = await sendSavedDraft(draft.id);
+    assert.equal(queued.status, 200);
+    const outbound = (await readJson<OutboundMessagePayload>(queued))
+      .outboundMessage;
+    assert.equal(outbound.provider, "whatsapp");
+
+    const persisted = await pool.query<{ provider: string }>(
+      "SELECT provider FROM outbound_messages WHERE id = $1",
+      [outbound.id],
+    );
+    assert.equal(persisted.rows[0]?.provider, "whatsapp");
+  });
 });
 
 test("outbound history filters by workspace, status, and conversation", async () => {

@@ -7,8 +7,14 @@ import {
   OutboundProviderAmbiguousError,
   OutboundProviderError,
 } from "../src/outbound/provider.js";
-import { loadMetaOutboundConfig, isWorkspaceAllowedForMetaSending, isRecipientAllowlisted } from "../src/outbound/meta-config.js";
+import {
+  getOutboundProviderNameForWorkspace,
+  isRecipientAllowlisted,
+  isWorkspaceAllowedForMetaSending,
+  loadMetaOutboundConfig,
+} from "../src/outbound/meta-config.js";
 import { MetaWhatsAppCloudProvider } from "../src/outbound/meta-provider.js";
+import { loadConfig } from "../src/config.js";
 import {
   markOutboundDeliveryEventDelivered,
   markOutboundDeliveryEventRead,
@@ -311,6 +317,58 @@ test("5. Real provider remains disabled by default (META_OUTBOUND_ENABLED not se
       META_TEST_RECIPIENT_PHONE_NUMBERS: "+16505551234",
     }),
     null,
+  );
+});
+
+test("Meta provider routing is server-configured and workspace-scoped", () => {
+  const environment = {
+    META_OUTBOUND_ENABLED: "true",
+    META_ACCESS_TOKEN: "EAABc0FakeTestAccessTokenAtLeast20Characters",
+    META_GRAPH_API_VERSION: "v21.0",
+    WHATSAPP_SENDER_PHONE_NUMBER_ID: "123456789012345",
+    META_OUTBOUND_TEST_WORKSPACE_ID: TEST_WORKSPACE_ID,
+    META_TEST_RECIPIENT_PHONE_NUMBERS: "+16505551234",
+  };
+
+  assert.equal(
+    getOutboundProviderNameForWorkspace(TEST_WORKSPACE_ID, environment),
+    "whatsapp",
+  );
+  assert.equal(
+    getOutboundProviderNameForWorkspace(OTHER_WORKSPACE_ID, environment),
+    "mock",
+  );
+  assert.equal(
+    getOutboundProviderNameForWorkspace(TEST_WORKSPACE_ID, {
+      META_OUTBOUND_ENABLED: "false",
+    }),
+    "mock",
+  );
+});
+
+test("production startup rejects Meta sending even with valid enabled configuration", () => {
+  const environment = {
+    NODE_ENV: "production",
+    DATABASE_URL: "postgres://replypilot:replypilot@localhost:5432/replypilot",
+    BETTER_AUTH_SECRET: "replypilot-production-test-secret-0123456789",
+    BETTER_AUTH_URL: "https://replypilot.example.test",
+    META_OUTBOUND_ENABLED: "true",
+    META_ACCESS_TOKEN: "EAABc0FakeTestAccessTokenAtLeast20Characters",
+    META_GRAPH_API_VERSION: "v21.0",
+    WHATSAPP_SENDER_PHONE_NUMBER_ID: "123456789012345",
+    META_OUTBOUND_TEST_WORKSPACE_ID: TEST_WORKSPACE_ID,
+    META_TEST_RECIPIENT_PHONE_NUMBERS: "+16505551234",
+  };
+
+  assert.throws(() => loadConfig(environment), {
+    message: /Meta outbound sending is disabled in production/i,
+  });
+  assert.equal(
+    getOutboundProviderNameForWorkspace(TEST_WORKSPACE_ID, {
+      ...environment,
+      META_OUTBOUND_ENABLED: "false",
+    }),
+    "mock",
   );
 });
 

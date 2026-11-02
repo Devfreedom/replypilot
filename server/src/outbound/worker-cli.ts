@@ -60,18 +60,25 @@ async function main(): Promise<void> {
   );
   const pool = createPool(config.databaseUrl);
 
-  // Load Meta outbound configuration. Fails closed when META_OUTBOUND_ENABLED=true
-  // but required variables are missing or invalid.
+  // Load Meta outbound configuration. Fails closed for production and invalid
+  // enabled configurations.
   const metaConfig = loadMetaOutboundConfig();
 
-  let provider: OutboundMessageProvider;
-  let providerLabel: string;
+  const providers: Array<
+    Readonly<{ provider: OutboundMessageProvider; label: string }>
+  > = [];
 
   if (metaConfig) {
-    provider = new MetaWhatsAppCloudProvider(metaConfig, pool);
+    providers.push({
+      provider: new MetaWhatsAppCloudProvider(metaConfig, pool),
+      label: `whatsapp (sender=${metaConfig.senderPhoneNumberId}, workspace=${metaConfig.testWorkspaceId})`,
+    });
+    providers.push({
+      provider: new MockOutboundMessageProvider(),
+      label: "mock",
+    });
     // Never log the access token or any credential. Only log the provider name
     // and sender phone-number ID (non-secret) for operational visibility.
-    providerLabel = `whatsapp (sender=${metaConfig.senderPhoneNumberId}, workspace=${metaConfig.testWorkspaceId})`;
     log("outbound_worker_provider_meta", {
       senderPhoneNumberId: metaConfig.senderPhoneNumberId,
       testWorkspaceId: metaConfig.testWorkspaceId,
@@ -79,8 +86,10 @@ async function main(): Promise<void> {
       allowedRecipients: metaConfig.allowedRecipients.size,
     });
   } else {
-    provider = new MockOutboundMessageProvider();
-    providerLabel = "mock";
+    providers.push({
+      provider: new MockOutboundMessageProvider(),
+      label: "mock",
+    });
   }
 
   let stopping = false;
@@ -101,34 +110,37 @@ async function main(): Promise<void> {
     pollIntervalMs,
     batchSize,
     staleAfterMs,
-    provider: providerLabel,
+    providers: providers.map(({ label }) => label),
   });
 
   try {
     while (!stopping) {
-      try {
-        const result = await runOutboundWorkerOnce(pool, provider, {
-          batchSize,
-          staleAfterMs,
-        });
+      for (const { provider } of providers) {
+        try {
+          const result = await runOutboundWorkerOnce(pool, provider, {
+            batchSize,
+            staleAfterMs,
+          });
 
-        if (
-          result.recovered > 0 ||
-          result.cancelled > 0 ||
-          result.claimed > 0 ||
-          result.sent > 0 ||
-          result.retried > 0 ||
-          result.failed > 0 ||
-          result.manualReview > 0 ||
-          result.skipped > 0
-        ) {
-          log("outbound_worker_tick", result);
+          if (
+            result.recovered > 0 ||
+            result.cancelled > 0 ||
+            result.claimed > 0 ||
+            result.sent > 0 ||
+            result.retried > 0 ||
+            result.failed > 0 ||
+            result.manualReview > 0 ||
+            result.skipped > 0
+          ) {
+            log("outbound_worker_tick", { provider: provider.name, ...result });
+          }
+        } catch (error) {
+          log("outbound_worker_error", {
+            provider: provider.name,
+            message:
+              error instanceof Error ? error.message : "Unknown error.",
+          });
         }
-      } catch (error) {
-        log("outbound_worker_error", {
-          message:
-            error instanceof Error ? error.message : "Unknown worker error.",
-        });
       }
 
       if (!stopping) {

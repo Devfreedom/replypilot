@@ -67,9 +67,10 @@ export type MetaOutboundConfig = Readonly<{
  * Loads and validates Meta outbound configuration from the environment.
  *
  * Returns null when real sending is not enabled. Throws when
- * META_OUTBOUND_ENABLED=true but required variables are missing, malformed,
- * or the allowlist is empty or invalid. This fails closed: a partial
- * configuration never silently falls back to disabled.
+ * META_OUTBOUND_ENABLED=true but the runtime is production or required
+ * variables are missing, malformed, or the allowlist is empty or invalid.
+ * This fails closed: a partial configuration never silently falls back to
+ * disabled.
  */
 export function loadMetaOutboundConfig(
   environment: NodeJS.ProcessEnv = process.env,
@@ -78,6 +79,12 @@ export function loadMetaOutboundConfig(
 
   if (enabledRaw !== "true") {
     return null;
+  }
+
+  if (environment["NODE_ENV"] === "production") {
+    throw new Error(
+      "Meta outbound sending is disabled in production. Set META_OUTBOUND_ENABLED=false before starting the application.",
+    );
   }
 
   const accessToken = environment["META_ACCESS_TOKEN"]?.trim() ?? "";
@@ -183,6 +190,17 @@ export function isWorkspaceAllowedForMetaSending(
   workspaceId: string,
 ): boolean {
   return config.testWorkspaceId === workspaceId;
+}
+
+export function getOutboundProviderNameForWorkspace(
+  workspaceId: string,
+  environment: NodeJS.ProcessEnv = process.env,
+): "mock" | "whatsapp" {
+  const config = loadMetaOutboundConfig(environment);
+
+  return config && isWorkspaceAllowedForMetaSending(config, workspaceId)
+    ? "whatsapp"
+    : "mock";
 }
 
 /**
