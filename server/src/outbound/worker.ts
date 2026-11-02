@@ -104,6 +104,8 @@ export async function runOutboundWorkerOnce(
         conversationId: row.conversation_id,
         content: row.content,
         idempotencyKey: row.idempotency_key,
+        recipientPhone: row.customer_phone_e164,
+        workspaceId: row.workspace_id,
       });
 
       const updated = await markOutboundSent(
