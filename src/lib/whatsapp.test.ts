@@ -32,6 +32,8 @@ const BASE_CONVERSATION: WhatsAppConversation = {
   lastMessagePreview: "Hello there",
   lastMessageType: "text",
   lastMessageStatus: "stored",
+  lastMessageDirection: "inbound",
+  lastMessageOutboundStatus: null,
   createdAt: "2026-10-01T09:00:00.000Z",
   updatedAt: "2026-10-01T10:00:00.000Z",
 };
@@ -57,6 +59,8 @@ const BASE_MESSAGE: WhatsAppMessage = {
   text: "Hello",
   providerTimestamp: "2026-10-01T10:00:00.000Z",
   processingStatus: "stored",
+  outboundStatus: null,
+  failureReason: null,
   createdAt: "2026-10-01T10:00:00.000Z",
 };
 
@@ -171,6 +175,47 @@ test("conversation preview handles text, empty, and unsupported messages", () =>
     ),
     "Message content unavailable",
   );
+
+  assert.equal(
+    conversationPreview(
+      conversation({
+        lastMessageDirection: "outbound",
+        lastMessageOutboundStatus: "queued",
+        lastMessagePreview: "Thanks for reaching out",
+      }),
+    ),
+    "Queued: Thanks for reaching out",
+  );
+  assert.equal(
+    conversationPreview(
+      conversation({
+        lastMessageDirection: "outbound",
+        lastMessageOutboundStatus: "sent",
+        lastMessagePreview: "Thanks for reaching out",
+      }),
+    ),
+    "Sent: Thanks for reaching out",
+  );
+  assert.equal(
+    conversationPreview(
+      conversation({
+        lastMessageDirection: "outbound",
+        lastMessageOutboundStatus: "delivered",
+        lastMessagePreview: "Thanks for reaching out",
+      }),
+    ),
+    "Delivered: Thanks for reaching out",
+  );
+  assert.equal(
+    conversationPreview(
+      conversation({
+        lastMessageDirection: "outbound",
+        lastMessageOutboundStatus: "failed",
+        lastMessagePreview: "Thanks for reaching out",
+      }),
+    ),
+    "Failed: Thanks for reaching out",
+  );
 });
 
 test("mergeConversations deduplicates by ID and preserves order", () => {
@@ -259,6 +304,22 @@ test("response parsers accept summary and cursor payloads", () => {
   assert.equal(messages.messages.length, 1);
   assert.equal(messages.pagination?.prevCursor, "prev");
   assert.equal(messages.pagination?.direction, "before");
+
+  const outbound = parseConversationMessagesResponse({
+    conversation: conversation(),
+    messages: [
+      message({
+        id: "77777777-7777-4777-8777-777777777777",
+        direction: "outbound",
+        processingStatus: null,
+        outboundStatus: "sent",
+        failureReason: null,
+      }),
+    ],
+  });
+  assert.ok(outbound);
+  assert.equal(outbound.messages[0]?.processingStatus, null);
+  assert.equal(outbound.messages[0]?.outboundStatus, "sent");
 
   assert.equal(
     parseConversationsResponse({
