@@ -559,32 +559,66 @@ export async function markOutboundFailed(
   return updated ? mapOutboundMessageRow(updated) : null;
 }
 
+export async function markOutboundManualReview(
+  pool: Pool,
+  row: OutboundMessageRow,
+  reason: string,
+): Promise<OutboundMessageRecord | null> {
+  const result = await pool.query<OutboundMessageRow>(
+    `
+      UPDATE outbound_messages
+      SET status = 'manual_review',
+          failure_reason = $3,
+          next_attempt_at = NULL,
+          updated_at = now()
+      WHERE id = $1
+        AND status = 'sending'
+        AND attempts = $2
+      RETURNING ${OUTBOUND_MESSAGE_COLUMNS}
+    `,
+    [row.id, row.attempts, reason],
+  );
+
+  const updated = result.rows[0];
+  return updated ? mapOutboundMessageRow(updated) : null;
+}
+
 export async function recoverStaleSending(
   pool: Pool,
   staleAfterMs: number,
+  providerName: string,
+  providerIdempotency: "guaranteed" | "unsupported",
 ): Promise<number> {
   const result = await pool.query(
     `
       UPDATE outbound_messages
       SET status = CASE
-            WHEN attempts >= max_attempts THEN 'failed'
-            ELSE 'queued'
+            WHEN $3 = 'guaranteed'
+              AND provider = $2
+              AND attempts < max_attempts
+              THEN 'queued'
+            ELSE 'manual_review'
           END,
           failure_reason = CASE
-            WHEN attempts >= max_attempts
-              THEN 'Worker interrupted after maximum attempts.'
-            ELSE 'Worker interrupted before completion; retrying.'
+            WHEN $3 = 'guaranteed'
+              AND provider = $2
+              AND attempts < max_attempts
+              THEN 'Worker outcome is unknown; retry uses the same provider idempotency key.'
+            ELSE 'Worker outcome is unknown. Reconcile with the provider before any further send.'
           END,
           next_attempt_at = CASE
-            WHEN attempts >= max_attempts THEN NULL
-            ELSE now()
+            WHEN $3 = 'guaranteed'
+              AND provider = $2
+              AND attempts < max_attempts
+              THEN now()
+            ELSE NULL
           END,
           updated_at = now()
       WHERE status = 'sending'
         AND started_at IS NOT NULL
         AND started_at < now() - ($1 * interval '1 millisecond')
     `,
-    [staleAfterMs],
+    [staleAfterMs, providerName, providerIdempotency],
   );
 
   return result.rowCount ?? 0;
