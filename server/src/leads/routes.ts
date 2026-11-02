@@ -252,7 +252,7 @@ export function createLeadsRouter({
       }
 
       if (existingDraftId) {
-        const draft = await replaceGeneratedReplyDraft(
+        const result = await replaceGeneratedReplyDraft(
           pool,
           workspace.id,
           id.data,
@@ -260,12 +260,20 @@ export function createLeadsRouter({
           generated,
         );
 
-        if (!draft) {
+        if (result.kind === "not-found") {
           response.status(404).json({ error: "Reply draft not found" });
           return;
         }
 
-        response.status(200).json({ draft });
+        if (result.kind === "send-in-progress") {
+          response.status(409).json({
+            error:
+              "This reply is currently being sent. Wait for the provider outcome before changing it.",
+          });
+          return;
+        }
+
+        response.status(200).json({ draft: result.draft });
         return;
       }
 
@@ -313,7 +321,7 @@ export function createLeadsRouter({
       }
 
       if (parsed.data.draftReply !== undefined) {
-        const draft = await updateReplyDraftText(
+        const result = await updateReplyDraftText(
           pool,
           workspace.id,
           id.data,
@@ -321,29 +329,45 @@ export function createLeadsRouter({
           parsed.data.draftReply,
         );
 
-        if (!draft) {
+        if (result.kind === "not-found") {
           response.status(404).json({ error: "Reply draft not found" });
           return;
         }
 
-        response.status(200).json({ draft });
+        if (result.kind === "send-in-progress") {
+          response.status(409).json({
+            error:
+              "This reply is currently being sent. Wait for the provider outcome before changing it.",
+          });
+          return;
+        }
+
+        response.status(200).json({ draft: result.draft });
         return;
       }
 
       if (parsed.data.status === "draft") {
-        const draft = await returnReplyDraftToDraft(
+        const result = await returnReplyDraftToDraft(
           pool,
           workspace.id,
           id.data,
           draftId.data,
         );
 
-        if (!draft) {
+        if (result.kind === "not-found") {
           response.status(404).json({ error: "Reply draft not found" });
           return;
         }
 
-        response.status(200).json({ draft });
+        if (result.kind === "send-in-progress") {
+          response.status(409).json({
+            error:
+              "This reply is currently being sent. Wait for the provider outcome before changing it.",
+          });
+          return;
+        }
+
+        response.status(200).json({ draft: result.draft });
         return;
       }
 

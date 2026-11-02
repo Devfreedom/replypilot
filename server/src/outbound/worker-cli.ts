@@ -94,6 +94,7 @@ async function main(): Promise<void> {
           result.sent > 0 ||
           result.retried > 0 ||
           result.failed > 0 ||
+          result.manualReview > 0 ||
           result.skipped > 0
         ) {
           log("outbound_worker_tick", result);

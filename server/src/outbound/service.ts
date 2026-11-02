@@ -23,7 +23,8 @@ export type QueueManualSendResult =
   | Readonly<{ kind: "content-changed" }>
   | Readonly<{ kind: "conversation-required" }>
   | Readonly<{ kind: "conversation-ambiguous" }>
-  | Readonly<{ kind: "conversation-not-found" }>;
+  | Readonly<{ kind: "conversation-not-found" }>
+  | Readonly<{ kind: "manual-review" }>;
 
 /**
  * Explicit owner-initiated send. This only queues a record; it never calls the
@@ -129,6 +130,9 @@ export async function queueManualSend(
           input.workspaceId,
           outboundMessage.id,
         )) ?? outboundMessage;
+    } else if (outboundMessage.status === "manual_review") {
+      await client.query("ROLLBACK");
+      return { kind: "manual-review" };
     } else if (outboundMessage.status === "cancelled") {
       await client.query("ROLLBACK");
       return { kind: "not-retryable" };
