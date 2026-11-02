@@ -44,6 +44,7 @@ export type OutboundMessageRow = Readonly<{
   provider_message_id: string | null;
   content: string;
   status: OutboundMessageStatus;
+  idempotency_key: string;
   failure_reason: string | null;
   attempts: number;
   max_attempts: number;
