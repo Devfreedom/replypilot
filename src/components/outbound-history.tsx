@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import {
   OUTBOUND_MESSAGE_STATUSES,
   OUTBOUND_STATUS_DESCRIPTIONS,
@@ -87,50 +87,62 @@ export function OutboundHistory() {
   const [retryingId, setRetryingId] = useState<string | null>(null);
   const [reloadToken, setReloadToken] = useState(0);
 
-  const load = useCallback(async () => {
-    try {
-      const query = new URLSearchParams({
-        limit: String(PAGE_SIZE),
-        offset: String(offset),
-      });
-
-      if (statusFilter !== "all") {
-        query.set("status", statusFilter);
-      }
-
-      const response = await fetch(`/api/outbound-messages?${query}`);
-      const data = await readJson(response);
-
-      if (!response.ok) {
-        throw new Error(
-          apiError(data, "Unable to load outbound messages."),
-        );
-      }
-
-      const parsed = parseOutboundMessagesResponse(data);
-
-      if (!parsed) {
-        throw new Error(
-          "The outbound message service returned an unexpected response.",
-        );
-      }
-
-      setItems(parsed.messages);
-      setHasMore(parsed.pagination.hasMore);
-    } catch (requestError) {
-      setError(
-        requestError instanceof Error
-          ? requestError.message
-          : "Unable to load outbound messages.",
-      );
-    } finally {
-      setLoading(false);
-    }
-  }, [offset, statusFilter]);
-
   useEffect(() => {
+    let active = true;
+
+    async function load() {
+      try {
+        const query = new URLSearchParams({
+          limit: String(PAGE_SIZE),
+          offset: String(offset),
+        });
+
+        if (statusFilter !== "all") {
+          query.set("status", statusFilter);
+        }
+
+        const response = await fetch(`/api/outbound-messages?${query}`);
+        const data = await readJson(response);
+
+        if (!response.ok) {
+          throw new Error(
+            apiError(data, "Unable to load outbound messages."),
+          );
+        }
+
+        const parsed = parseOutboundMessagesResponse(data);
+
+        if (!parsed) {
+          throw new Error(
+            "The outbound message service returned an unexpected response.",
+          );
+        }
+
+        if (active) {
+          setItems(parsed.messages);
+          setHasMore(parsed.pagination.hasMore);
+        }
+      } catch (requestError) {
+        if (active) {
+          setError(
+            requestError instanceof Error
+              ? requestError.message
+              : "Unable to load outbound messages.",
+          );
+        }
+      } finally {
+        if (active) {
+          setLoading(false);
+        }
+      }
+    }
+
     void load();
-  }, [load, reloadToken]);
+
+    return () => {
+      active = false;
+    };
+  }, [offset, statusFilter, reloadToken]);
 
   async function retry(item: OutboundHistoryItem) {
     setRetryingId(item.id);

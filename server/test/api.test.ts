@@ -21,6 +21,16 @@ import type {
 import { createPool } from "../src/db/pool.js";
 import { runMigrations } from "../src/db/migrate.js";
 import { seedLeads } from "../src/db/seed.js";
+import type { ApprovalSendPolicy } from "../src/messaging/types.js";
+import {
+  MockOutboundMessageProvider,
+  type OutboundMessageProvider,
+} from "../src/outbound/provider.js";
+import type {
+  OutboundMessageHistoryItem,
+  OutboundMessageRecord,
+} from "../src/outbound/types.js";
+import { runOutboundWorkerOnce } from "../src/outbound/worker.js";
 import {
   LEGACY_WORKSPACE_ID,
   bootstrapLegacyWorkspace,
@@ -92,12 +102,27 @@ type SavedReplyDraftPayload = {
   status: "draft" | "approved";
   sources: ReplyDraftSourcePayload[];
   approvedAt: string | null;
+  approvedBy: string | null;
+  sendPolicyOverride: ApprovalSendPolicy | null;
+  approvalSendPolicy: ApprovalSendPolicy | null;
   createdAt: string;
   updatedAt: string;
 };
 
 type ReplyDraftPayload = { draft: SavedReplyDraftPayload };
 type ReplyDraftsPayload = { drafts: SavedReplyDraftPayload[] };
+type ReplyDraftApprovalPayload = {
+  draft: SavedReplyDraftPayload;
+  outboundMessage: OutboundMessageRecord | null;
+};
+type OutboundMessagePayload = { outboundMessage: OutboundMessageRecord };
+type OutboundHistoryPayload = {
+  messages: OutboundMessageHistoryItem[];
+  pagination: ConversationPaginationPayload;
+};
+type MessagingSettingsPayload = {
+  settings: { defaultApprovalSendPolicy: ApprovalSendPolicy };
+};
 
 type BusinessProfile = {
   id: string;
@@ -636,6 +661,85 @@ async function createDraftLead(
 
   assert.equal(response.status, 201);
   return (await readJson<LeadPayload>(response)).lead;
+}
+
+function getMessagingSettings(): Promise<Response> {
+  return jsonRequest("/api/settings/messaging", "GET");
+}
+
+function patchMessagingSettings(
+  defaultApprovalSendPolicy: ApprovalSendPolicy,
+): Promise<Response> {
+  return jsonRequest("/api/settings/messaging", "PATCH", {
+    defaultApprovalSendPolicy,
+  });
+}
+
+function approveSavedDraft(
+  leadId: string,
+  draftId: string,
+  body: Record<string, unknown> = { status: "approved" },
+): Promise<Response> {
+  return patchSavedDraft(leadId, draftId, body);
+}
+
+function sendSavedDraft(
+  draftId: string,
+  body: Record<string, unknown> = {},
+): Promise<Response> {
+  return jsonRequest(`/api/reply-drafts/${draftId}/send`, "POST", body);
+}
+
+function listOutboundMessages(query = ""): Promise<Response> {
+  return jsonRequest(`/api/outbound-messages${query}`, "GET");
+}
+
+async function conversationIdsForLead(leadId: string): Promise<string[]> {
+  const result = await pool.query<{ id: string }>(
+    `
+      SELECT id
+      FROM whatsapp_conversations
+      WHERE workspace_id = $1
+        AND lead_id = $2
+      ORDER BY created_at ASC, id ASC
+    `,
+    [requireSession().workspace.id, leadId],
+  );
+
+  return result.rows.map((row) => row.id);
+}
+
+async function createSavedDraftPayload(leadId: string): Promise<SavedReplyDraftPayload> {
+  const response = await createSavedDraft(leadId);
+  assert.equal(response.status, 201);
+  return (await readJson<ReplyDraftPayload>(response)).draft;
+}
+
+async function createLeadWithConversation(
+  overrides: Record<string, unknown> = {},
+  messageOverrides: Partial<InboundWhatsAppMessage> = {},
+): Promise<Readonly<{ lead: Lead; conversationId: string }>> {
+  const lead = await createDraftLead({
+    whatsappNumber: TEST_WHATSAPP_CUSTOMER_WA_ID,
+    ...overrides,
+  });
+  const stored = await persistInboundMessages(
+    pool,
+    requireSession().workspace.id,
+    [
+      inboundMessage({
+        senderWaId: TEST_WHATSAPP_CUSTOMER_WA_ID,
+        senderPhoneNumber: TEST_WHATSAPP_CUSTOMER_WA_ID,
+        ...messageOverrides,
+      }),
+    ],
+  );
+
+  assert.equal(stored.stored, 1);
+  const conversationIds = await conversationIdsForLead(lead.id);
+  assert.ok(conversationIds[0]);
+
+  return { lead, conversationId: conversationIds[0] };
 }
 
 function jsonRequest(
