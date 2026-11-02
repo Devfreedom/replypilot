@@ -5,12 +5,11 @@ import {
   savedReplyDraftSourcesSchema,
 } from "./schemas.js";
 import type {
-  ReplyDraftReviewStatus,
   ReplyDraftRow,
   SavedReplyDraft,
 } from "./types.js";
 
-const REPLY_DRAFT_COLUMNS = `
+export const REPLY_DRAFT_COLUMNS = `
   id,
   lead_id,
   intent,
@@ -22,11 +21,14 @@ const REPLY_DRAFT_COLUMNS = `
   status,
   sources,
   approved_at,
+  approved_by,
+  send_policy_override,
+  approval_send_policy,
   created_at,
   updated_at
 `;
 
-function mapReplyDraftRow(row: ReplyDraftRow): SavedReplyDraft {
+export function mapReplyDraftRow(row: ReplyDraftRow): SavedReplyDraft {
   const missingInformation = missingInformationSchema.safeParse(
     row.missing_information,
   );
@@ -52,6 +54,9 @@ function mapReplyDraftRow(row: ReplyDraftRow): SavedReplyDraft {
     status: row.status,
     sources: sources.data,
     approvedAt: row.approved_at ? row.approved_at.toISOString() : null,
+    approvedBy: row.approved_by,
+    sendPolicyOverride: row.send_policy_override,
+    approvalSendPolicy: row.approval_send_policy,
     createdAt: row.created_at.toISOString(),
     updatedAt: row.updated_at.toISOString(),
   };
@@ -113,9 +118,12 @@ export async function createReplyDraft(
         is_demo,
         status,
         sources,
-        approved_at
+        approved_at,
+        approved_by,
+        send_policy_override,
+        approval_send_policy
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'draft', $9, NULL)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'draft', $9, NULL, NULL, NULL, NULL)
       RETURNING ${REPLY_DRAFT_COLUMNS}
     `,
     [
@@ -159,6 +167,9 @@ export async function replaceGeneratedReplyDraft(
           status = 'draft',
           sources = $10,
           approved_at = NULL,
+          approved_by = NULL,
+          send_policy_override = NULL,
+          approval_send_policy = NULL,
           updated_at = now()
       WHERE workspace_id = $1 AND id = $2 AND lead_id = $3
       RETURNING ${REPLY_DRAFT_COLUMNS}
@@ -194,6 +205,9 @@ export async function updateReplyDraftText(
       SET draft_reply = $4,
           status = 'draft',
           approved_at = NULL,
+          approved_by = NULL,
+          send_policy_override = NULL,
+          approval_send_policy = NULL,
           updated_at = now()
       WHERE workspace_id = $1 AND id = $2 AND lead_id = $3
       RETURNING ${REPLY_DRAFT_COLUMNS}
@@ -205,26 +219,25 @@ export async function updateReplyDraftText(
   return row ? mapReplyDraftRow(row) : null;
 }
 
-export async function updateReplyDraftStatus(
+export async function returnReplyDraftToDraft(
   pool: Pool,
   workspaceId: string,
   leadId: string,
   draftId: string,
-  status: ReplyDraftReviewStatus,
 ): Promise<SavedReplyDraft | null> {
   const result = await pool.query<ReplyDraftRow>(
     `
       UPDATE reply_drafts
-      SET status = $4,
-          approved_at = CASE
-            WHEN $4 = 'approved' THEN now()
-            ELSE NULL
-          END,
+      SET status = 'draft',
+          approved_at = NULL,
+          approved_by = NULL,
+          send_policy_override = NULL,
+          approval_send_policy = NULL,
           updated_at = now()
       WHERE workspace_id = $1 AND id = $2 AND lead_id = $3
       RETURNING ${REPLY_DRAFT_COLUMNS}
     `,
-    [workspaceId, draftId, leadId, status],
+    [workspaceId, draftId, leadId],
   );
 
   const row = result.rows[0];

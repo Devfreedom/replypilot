@@ -1,4 +1,5 @@
 import type { ReplyDraft } from "../ai/reply-draft.js";
+import type { ApprovalSendPolicy } from "../messaging/types.js";
 
 export const REPLY_DRAFT_REVIEW_STATUSES = ["draft", "approved"] as const;
 export type ReplyDraftReviewStatus =
@@ -10,6 +11,9 @@ export type SavedReplyDraft = Readonly<
     leadId: string;
     status: ReplyDraftReviewStatus;
     approvedAt: string | null;
+    approvedBy: string | null;
+    sendPolicyOverride: ApprovalSendPolicy | null;
+    approvalSendPolicy: ApprovalSendPolicy | null;
     createdAt: string;
     updatedAt: string;
   }
@@ -27,6 +31,9 @@ export type ReplyDraftRow = Readonly<{
   status: ReplyDraftReviewStatus;
   sources: unknown;
   approved_at: Date | null;
+  approved_by: string | null;
+  send_policy_override: ApprovalSendPolicy | null;
+  approval_send_policy: ApprovalSendPolicy | null;
   created_at: Date;
   updated_at: Date;
 }>;
