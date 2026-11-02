@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: replypilot
+          POSTGRES_USER: replypilot
+          POSTGRES_PASSWORD: ci-only-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U replypilot -d replypilot"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql://replypilot:ci-only-password@127.0.0.1:5432/replypilot
+      TEST_DATABASE_URL: postgresql://replypilot:ci-only-password@127.0.0.1:5432/replypilot_test
+      API_ORIGIN: http://127.0.0.1:4000
+      BETTER_AUTH_SECRET: ci-only-secret-not-used-anywhere-else-0123456789
+      BETTER_AUTH_URL: http://localhost:3000
+      BETTER_AUTH_TRUSTED_ORIGINS: http://localhost:3000,http://127.0.0.1:3000
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Create test database
+        run: psql "postgresql://replypilot:ci-only-password@127.0.0.1:5432/replypilot" -c "CREATE DATABASE replypilot_test;"
+
+      - run: npm run lint
+      - run: npm run typecheck:api
+      - run: npm run test:web
+      - run: npm run test:api
+      - run: npm run build:api
