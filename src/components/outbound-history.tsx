@@ -5,12 +5,14 @@ import {
   OUTBOUND_MESSAGE_STATUSES,
   OUTBOUND_STATUS_DESCRIPTIONS,
   OUTBOUND_STATUS_LABELS,
-  parseOutboundMessage,
+  canRetryOutboundForRole,
   parseOutboundMessagesResponse,
+  parseSendOutboundMessageResponse,
   type OutboundHistoryItem,
   type OutboundMessageStatus,
 } from "@/lib/messaging";
 import { formatWhatsAppTimestamp } from "@/lib/whatsapp";
+import { useAuth } from "./auth-provider";
 import { Alert, Spinner } from "./ui";
 
 const PAGE_SIZE = 20;
@@ -69,6 +71,10 @@ function statusBadgeClass(status: OutboundMessageStatus): string {
     return "badge bg-warning-soft text-warning-ink";
   }
 
+  if (status === "manual_review") {
+    return "badge bg-warning-soft text-warning-ink";
+  }
+
   if (status === "sent" || status === "delivered") {
     return "badge badge-approved";
   }
@@ -77,6 +83,7 @@ function statusBadgeClass(status: OutboundMessageStatus): string {
 }
 
 export function OutboundHistory() {
+  const { role } = useAuth();
   const [items, setItems] = useState<OutboundHistoryItem[]>([]);
   const [offset, setOffset] = useState(0);
   const [hasMore, setHasMore] = useState(false);
@@ -166,7 +173,7 @@ export function OutboundHistory() {
         );
       }
 
-      const updated = parseOutboundMessage(data);
+      const updated = parseSendOutboundMessageResponse(data);
 
       if (!updated) {
         throw new Error(
@@ -174,20 +181,11 @@ export function OutboundHistory() {
         );
       }
 
-      setItems((current) =>
-        current.map((currentItem) =>
-          currentItem.id === updated.id
-            ? {
-                ...currentItem,
-                ...updated,
-                canRetry: updated.status === "failed",
-              }
-            : currentItem,
-        ),
-      );
       setNotice(
         "The message was returned to the queue with its original content. The worker will retry it.",
       );
+      setLoading(true);
+      setReloadToken((value) => value + 1);
     } catch (requestError) {
       setError(
         requestError instanceof Error
@@ -288,7 +286,7 @@ export function OutboundHistory() {
                     {item.content}
                   </p>
                 </div>
-                {item.canRetry ? (
+                {canRetryOutboundForRole(role, item.canRetry) ? (
                   <button
                     type="button"
                     onClick={() => void retry(item)}
