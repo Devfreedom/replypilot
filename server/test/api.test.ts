@@ -4566,8 +4566,6 @@ test("WhatsApp webhook validates signatures against the exact raw body", async (
       duplicates: 0,
       deliveryProcessed: 0,
       deliveryIgnored: 0,
-      deliveryProcessed: 0,
-      deliveryIgnored: 0,
     });
   } finally {
     await stopServer(app.server);
@@ -5090,6 +5088,8 @@ test("WhatsApp webhook acknowledges duplicate provider message IDs without new a
       status: "ok",
       stored: 0,
       duplicates: 1,
+      deliveryProcessed: 0,
+      deliveryIgnored: 0,
     });
 
     const after = await pool.query<{

@@ -111,52 +111,38 @@ async function insertTestOutboundRow(options: {
   const providerMessageId = options.providerMessageId ?? null;
   const status = options.status ?? "sent";
 
-  // Insert a minimal reply draft first (required FK).
-  const draftResult = await pool.query<{ id: string }>(
+  // Create a lead first (required FK for reply_drafts).
+  const leadResult = await pool.query<{ id: string }>(
     `
-      INSERT INTO reply_drafts (
-        workspace_id, lead_id, intent, summary, missing_information,
-        draft_reply, provider, is_demo, status, sources
-      )
-      VALUES (
-        $1,
-        (SELECT id FROM leads WHERE workspace_id = $1 LIMIT 1),
-        'general-enquiry', 'test summary', '[]', 'Test reply', 'mock', true,
-        'approved', '[]'
-      )
+      INSERT INTO leads (workspace_id, name, service, channel, last_message, status)
+      VALUES ($1, 'Test Lead For Delivery', 'Photography', 'WhatsApp', 'Hi', 'New')
       RETURNING id
     `,
     [workspaceId],
   );
 
-  let draftId = draftResult.rows[0]?.id;
+  const leadId = leadResult.rows[0]?.id;
+  assert.ok(leadId, "Expected lead to be created");
 
-  if (!draftId) {
-    // No lead exists — create one first.
-    await pool.query(
-      `INSERT INTO leads (workspace_id, name, service, last_message, status)
-       VALUES ($1, 'Test Lead', 'Photography', 'Hi', 'New')`,
-      [workspaceId],
-    );
-    const draftResult2 = await pool.query<{ id: string }>(
-      `
-        INSERT INTO reply_drafts (
-          workspace_id, lead_id, intent, summary, missing_information,
-          draft_reply, provider, is_demo, status, sources
-        )
-        VALUES (
-          $1,
-          (SELECT id FROM leads WHERE workspace_id = $1 LIMIT 1),
-          'general-enquiry', 'test summary', '[]', 'Test reply', 'mock', true,
-          'approved', '[]'
-        )
-        RETURNING id
-      `,
-      [workspaceId],
-    );
-    draftId = draftResult2.rows[0]?.id;
-    assert.ok(draftId, "Expected reply draft to be created");
-  }
+  // Insert a minimal reply draft (required FK).
+  const draftResult = await pool.query<{ id: string }>(
+    `
+      INSERT INTO reply_drafts (
+        workspace_id, lead_id, intent, summary, missing_information,
+        draft_reply, provider, is_demo, status, sources, approved_at
+      )
+      VALUES (
+        $1, $2,
+        'general-enquiry', 'test summary', '[]', 'Test reply', 'mock', true,
+        'approved', '[]', now()
+      )
+      RETURNING id
+    `,
+    [workspaceId, leadId],
+  );
+
+  const draftId = draftResult.rows[0]?.id;
+  assert.ok(draftId, "Expected reply draft to be created");
 
   const result = await pool.query<{ id: string }>(
     `

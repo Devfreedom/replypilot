@@ -417,40 +417,45 @@ export async function claimQueuedOutboundMessages(
           ORDER BY message.queued_at ASC, message.id ASC
           FOR UPDATE SKIP LOCKED
           LIMIT $1
+        ),
+        updated AS (
+          UPDATE outbound_messages AS message
+          SET status = 'sending',
+              started_at = now(),
+              attempts = message.attempts + 1,
+              updated_at = now()
+          FROM claimed
+          WHERE message.id = claimed.id
+          RETURNING
+            message.id,
+            message.workspace_id,
+            message.conversation_id,
+            message.reply_draft_id,
+            message.provider,
+            message.provider_message_id,
+            message.content,
+            message.status,
+            message.idempotency_key,
+            message.failure_reason,
+            message.attempts,
+            message.max_attempts,
+            message.queued_at,
+            message.started_at,
+            message.sent_at,
+            message.delivered_at,
+            message.created_at,
+            message.updated_at
         )
-        UPDATE outbound_messages AS message
-        SET status = 'sending',
-            started_at = now(),
-            attempts = message.attempts + 1,
-            updated_at = now()
-        FROM claimed
+        SELECT
+          updated.*,
+          cust.phone_e164 AS customer_phone_e164
+        FROM updated
         JOIN whatsapp_conversations AS conv
-          ON conv.id = message.conversation_id
-         AND conv.workspace_id = message.workspace_id
+          ON conv.id = updated.conversation_id
+         AND conv.workspace_id = updated.workspace_id
         JOIN customers AS cust
           ON cust.id = conv.customer_id
          AND cust.workspace_id = conv.workspace_id
-        WHERE message.id = claimed.id
-        RETURNING
-          message.id,
-          message.workspace_id,
-          message.conversation_id,
-          message.reply_draft_id,
-          message.provider,
-          message.provider_message_id,
-          message.content,
-          message.status,
-          message.idempotency_key,
-          message.failure_reason,
-          message.attempts,
-          message.max_attempts,
-          message.queued_at,
-          message.started_at,
-          message.sent_at,
-          message.delivered_at,
-          message.created_at,
-          message.updated_at,
-          cust.phone_e164 AS customer_phone_e164
       `,
       [batchSize, providerName],
     );
