@@ -1034,8 +1034,9 @@ export function DraftReplyDialog({
       >
         Demonstration output from ReplyPilot&apos;s mock provider. No live AI
         model was used. Approval records your review; approve and queue adds the
-        reply to the mock outbound worker. Nothing is sent to WhatsApp in this
-        milestone.
+        approved snapshot to the server-selected outbound worker. Meta delivery
+        requires restricted server-side test configuration and is unavailable
+        in production.
       </p>
 
       {isLoading ? (
@@ -1086,7 +1087,7 @@ export function DraftReplyDialog({
                   {APPROVAL_SEND_POLICY_LABELS[defaultApprovalSendPolicy]}
                 </strong>
                 . Approving always records your review; approve and queue also
-                adds the reply to the mock outbound worker.
+                adds the reply to the server-selected outbound queue.
               </p>
               <label className={`${labelClass} mt-3`}>
                 On approval

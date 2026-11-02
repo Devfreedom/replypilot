@@ -33,8 +33,8 @@ export type QueueManualSendResult =
  * provider from the HTTP request. The content snapshot is always the existing
  * outbound content or the approved draft content, never a browser payload.
  *
- * Future WhatsApp compliance checks belong here (or in the shared insert
- * helper) so both approval-triggered and manual sends use the same gate.
+ * Provider selection and compliance restrictions are resolved server-side;
+ * both approval-triggered and manual sends use the same queue insert helper.
  */
 export async function queueManualSend(
   pool: Pool,

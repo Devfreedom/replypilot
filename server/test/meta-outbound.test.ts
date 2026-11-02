@@ -32,7 +32,6 @@ import { processDeliveryStatusEvents } from "../src/whatsapp/delivery-webhook.js
 import { isValidMetaSignature } from "../src/whatsapp/signature.js";
 import { persistInboundMessages } from "../src/whatsapp/repository.js";
 import type {
-  DeliveryStatusEvent,
   InboundWhatsAppMessage,
 } from "../src/whatsapp/types.js";
 import { runOutboundWorkerOnce } from "../src/outbound/worker.js";
@@ -1176,7 +1175,10 @@ test("failed delivery persists its provider timestamp and bounded reason", async
     [outboundId],
   );
   assert.equal(persisted.rows[0]?.status, "failed");
-  assert.equal(persisted.rows[0]?.provider_status_at.toISOString(), eventTimestamp.toISOString());
+  assert.equal(
+    persisted.rows[0]?.provider_status_at?.toISOString(),
+    eventTimestamp.toISOString(),
+  );
   assert.ok((persisted.rows[0]?.failure_reason?.length ?? 0) <= 500);
 
   const event = await pool.query<{

@@ -21,7 +21,7 @@ export const APPROVAL_SEND_POLICY_DESCRIPTIONS: Record<
   approve_only:
     "Approval records your review. A send must be started explicitly from an approved draft.",
   approve_and_send:
-    "Approval also queues the reply for the mock outbound worker. Nothing is sent to WhatsApp in this milestone.",
+    "Approval also queues the reply for the server-selected provider. Meta delivery is restricted to configured test workspaces and recipients, and is unavailable in production.",
 };
 
 export const OUTBOUND_MESSAGE_STATUSES = [

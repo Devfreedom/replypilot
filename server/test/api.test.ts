@@ -5015,7 +5015,7 @@ test("WhatsApp webhook persists unsupported message types without inventing text
   }
 });
 
-test("WhatsApp webhook ignores status and unrelated changes", async () => {
+test("WhatsApp webhook audits unknown statuses and ignores unrelated changes", async () => {
   const app = await startWhatsAppServer();
   const body = JSON.stringify({
     object: "whatsapp_business_account",
@@ -5053,7 +5053,11 @@ test("WhatsApp webhook ignores status and unrelated changes", async () => {
     const response = await postWhatsApp(app, body);
     assert.equal(response.status, 200);
     assert.deepEqual(await readJson<WhatsAppWebhookPayload>(response), {
-      status: "ignored",
+      status: "ok",
+      stored: 0,
+      duplicates: 0,
+      deliveryProcessed: 0,
+      deliveryIgnored: 1,
     });
 
     const counts = await pool.query<{
@@ -5065,6 +5069,27 @@ test("WhatsApp webhook ignores status and unrelated changes", async () => {
         (SELECT count(*) FROM whatsapp_messages)::int AS messages
     `);
     assert.deepEqual(counts.rows[0], { conversations: 0, messages: 0 });
+
+    const audit = await pool.query<{
+      provider_message_id: string;
+      processing_outcome: string;
+      processing_reason: string | null;
+    }>(
+      `
+        SELECT provider_message_id, processing_outcome, processing_reason
+        FROM whatsapp_delivery_events
+        WHERE workspace_id = $1
+      `,
+      [requireSession().workspace.id],
+    );
+    assert.deepEqual(audit.rows, [
+      {
+        provider_message_id: "wamid.status",
+        processing_outcome: "ignored",
+        processing_reason:
+          "No outbound message matches this wamid in the configured workspace.",
+      },
+    ]);
   } finally {
     await stopServer(app.server);
   }

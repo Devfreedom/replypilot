@@ -154,11 +154,12 @@ export function MessagingSettings() {
           </h2>
           <p className="mt-1 max-w-2xl text-sm leading-6 text-ink-soft">
             Choose what approval does by default. The safe default is approve
-            only. This milestone uses a mock outbound worker and never contacts
-            WhatsApp.
+            only. The server selects the outbound provider. Meta delivery is
+            limited to configured test workspaces and recipients, and is
+            unavailable in production.
           </p>
         </div>
-        <span className="badge badge-neutral">Mock provider</span>
+        <span className="badge badge-neutral">Server-selected provider</span>
       </div>
 
       {!canManage ? (

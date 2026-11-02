@@ -265,7 +265,9 @@ export function AuthForm({ mode }: { mode: AuthMode }) {
 
         <p className="mt-5 text-center text-xs leading-5 text-ink-faint">
           Sessions are stored in HTTP-only cookies. Reply generation remains a
-          mock demonstration and never sends customer messages.
+          mock demonstration. Outbound messages require human approval; Meta
+          sending is disabled by default and restricted to configured test
+          recipients.
         </p>
       </div>
     </main>

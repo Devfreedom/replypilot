@@ -777,7 +777,6 @@ export async function processOutboundDeliveryEvent(
         INSERT INTO whatsapp_delivery_events (
           event_key,
           workspace_id,
-          outbound_message_id,
           provider_message_id,
           phone_number_id,
           provider_status,

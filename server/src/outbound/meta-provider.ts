@@ -14,8 +14,8 @@
  *    Stale sending rows therefore go to manual_review rather than auto-retry.
  *  - Workspace, sender, and recipient restrictions are enforced before the
  *    HTTP request is made.
- *  - The service window and suppression checks happen in the caller (worker)
- *    before the provider is invoked.
+ *  - The worker gates queue eligibility and this adapter rechecks the service
+ *    window and suppression immediately before the provider request.
  *
  * Response mapping:
  *  - HTTP 200 with a valid wamid → success
