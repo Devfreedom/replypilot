@@ -193,6 +193,21 @@ function MessageBubble({ message }: { message: WhatsAppMessage }) {
         >
           {formatMessageTime(message.providerTimestamp)}
         </time>
+        {outboundStatus ? (
+          <p
+            title={
+              message.outboundStatus
+                ? OUTBOUND_STATUS_DESCRIPTIONS[message.outboundStatus]
+                : undefined
+            }
+            className={`mt-0.5 text-right text-[11px] font-medium ${
+              outbound ? "opacity-90" : "text-ink-soft"
+            }`}
+          >
+            {outboundStatus}
+            {message.failureReason ? ` · ${message.failureReason}` : ""}
+          </p>
+        ) : null}
       </article>
     </div>
   );
