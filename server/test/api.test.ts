@@ -5007,7 +5007,13 @@ test("WhatsApp webhook ignores status and unrelated changes", async () => {
                 display_phone_number: "15550783881",
                 phone_number_id: TEST_WHATSAPP_PHONE_NUMBER_ID,
               },
-              statuses: [{ id: "wamid.status", status: "delivered" }],
+              statuses: [
+                {
+                  id: "wamid.status",
+                  status: "delivered",
+                  timestamp: "1760000000",
+                },
+              ],
             },
           },
           {

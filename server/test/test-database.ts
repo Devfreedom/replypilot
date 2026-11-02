@@ -95,6 +95,7 @@ export async function resetTestData(pool: Pool): Promise<void> {
   await pool.query(
     `
       TRUNCATE TABLE
+        whatsapp_delivery_events,
         outbound_messages,
         whatsapp_messages,
         whatsapp_conversations,

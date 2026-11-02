@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import {
   DEFAULT_OUTBOUND_MAX_ATTEMPTS,
@@ -9,6 +10,7 @@ import type {
   OutboundMessageRecord,
   OutboundMessageRow,
 } from "./types.js";
+import type { DeliveryStatusEvent } from "../whatsapp/types.js";
 
 const OUTBOUND_MESSAGE_COLUMNS = `
   id,
@@ -352,8 +354,19 @@ export async function cancelUnauthorizedQueuedOutbound(
     `
       UPDATE outbound_messages AS message
       SET status = 'cancelled',
-          failure_reason =
-            'Draft content, approval, or active conversation is no longer valid.',
+          failure_reason = CASE
+            WHEN EXISTS (
+              SELECT 1
+              FROM whatsapp_conversations AS conversation
+              JOIN customer_suppressions AS suppression
+                ON suppression.customer_id = conversation.customer_id
+               AND suppression.workspace_id = conversation.workspace_id
+              WHERE conversation.id = message.conversation_id
+                AND conversation.workspace_id = message.workspace_id
+            )
+              THEN 'Customer is suppressed and cannot receive outbound messages.'
+            ELSE 'Draft content, approval, or active conversation is no longer valid.'
+          END,
           next_attempt_at = NULL,
           updated_at = now()
       WHERE message.status = 'queued'
@@ -370,7 +383,17 @@ export async function cancelUnauthorizedQueuedOutbound(
               AND draft.draft_reply = message.content
               AND conversation.status IN ('open', 'closed')
           )
+          OR EXISTS (
+            SELECT 1
+            FROM whatsapp_conversations AS conversation
+            JOIN customer_suppressions AS suppression
+              ON suppression.customer_id = conversation.customer_id
+             AND suppression.workspace_id = conversation.workspace_id
+            WHERE conversation.id = message.conversation_id
+              AND conversation.workspace_id = message.workspace_id
+          )
         )
+      RETURNING message.id
     `,
   );
 
@@ -413,6 +436,12 @@ export async function claimQueuedOutboundMessages(
                 AND draft.status = 'approved'
                 AND draft.draft_reply = message.content
                 AND conversation.status IN ('open', 'closed')
+                AND NOT EXISTS (
+                  SELECT 1
+                  FROM customer_suppressions AS suppression
+                  WHERE suppression.workspace_id = message.workspace_id
+                    AND suppression.customer_id = conversation.customer_id
+                )
             )
           ORDER BY message.queued_at ASC, message.id ASC
           FOR UPDATE SKIP LOCKED
@@ -499,6 +528,12 @@ export async function isOutboundClaimAuthorized(
         AND draft.status = 'approved'
         AND draft.draft_reply = message.content
         AND conversation.status IN ('open', 'closed')
+        AND NOT EXISTS (
+          SELECT 1
+          FROM customer_suppressions AS suppression
+          WHERE suppression.workspace_id = message.workspace_id
+            AND suppression.customer_id = conversation.customer_id
+        )
       LIMIT 1
     `,
     [row.id, row.attempts],
@@ -682,95 +717,360 @@ export async function getOutboundMessageByWamid(
   return row ? mapOutboundMessageRow(row) : null;
 }
 
+const DELIVERY_EVENT_FAILURE_LIMIT = 500;
+
+function boundedDeliveryReason(value: string | null): string | null {
+  if (!value) return null;
+  return [...value].slice(0, DELIVERY_EVENT_FAILURE_LIMIT).join("");
+}
+
+function deliveryEventKey(event: DeliveryStatusEvent): string {
+  return createHash("sha256")
+    .update(
+      JSON.stringify([
+        event.phoneNumberId,
+        event.providerMessageId,
+        event.status,
+        event.providerTimestamp.toISOString(),
+        event.errorDescription,
+      ]),
+    )
+    .digest("hex");
+}
+
+function deliveryStatusRank(status: string): number {
+  switch (status) {
+    case "sent":
+      return 1;
+    case "failed":
+      return 2;
+    case "delivered":
+      return 3;
+    case "read":
+      return 4;
+    default:
+      return 0;
+  }
+}
+
+export type DeliveryEventProcessingOutcome = "processed" | "ignored" | "duplicate";
+
 /**
- * Delivery-status event: "sent" acknowledgement from the Meta platform.
- * Only advances the status when the current state allows it (sent → sent is
- * idempotent, but cannot overwrite delivered or read).
+ * Inserts an auditable event and applies its state transition atomically.
+ * The event key is derived from the provider identity and timestamp, so a
+ * webhook redelivery cannot apply the same status twice.
  */
+export async function processOutboundDeliveryEvent(
+  pool: Pool,
+  workspaceId: string,
+  event: DeliveryStatusEvent,
+  failureReason: string | null,
+): Promise<DeliveryEventProcessingOutcome> {
+  const client = await pool.connect();
+  const eventKey = deliveryEventKey(event);
+  const boundedReason = boundedDeliveryReason(failureReason);
+
+  try {
+    await client.query("BEGIN");
+
+    const inserted = await client.query<{ id: string }>(
+      `
+        INSERT INTO whatsapp_delivery_events (
+          event_key,
+          workspace_id,
+          provider_message_id,
+          phone_number_id,
+          provider_status,
+          provider_timestamp,
+          processing_outcome
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, 'processing')
+        ON CONFLICT (workspace_id, event_key) DO NOTHING
+        RETURNING id
+      `,
+      [
+        eventKey,
+        workspaceId,
+        event.providerMessageId,
+        event.phoneNumberId,
+        event.status,
+        event.providerTimestamp,
+      ],
+    );
+
+    const insertedEvent = inserted.rows[0];
+    if (!insertedEvent) {
+      const existing = await client.query<{ processing_outcome: string }>(
+        `
+          SELECT processing_outcome
+          FROM whatsapp_delivery_events
+          WHERE workspace_id = $1
+            AND event_key = $2
+          FOR UPDATE
+        `,
+        [workspaceId, eventKey],
+      );
+      const outcome = existing.rows[0]?.processing_outcome;
+
+      if (outcome === "processed" || outcome === "ignored") {
+        await client.query("COMMIT");
+        return "duplicate";
+      }
+
+      await client.query(
+        `
+          UPDATE whatsapp_delivery_events
+          SET processing_outcome = 'processing',
+              processing_reason = NULL,
+              failure_reason = NULL
+          WHERE workspace_id = $1
+            AND event_key = $2
+        `,
+        [workspaceId, eventKey],
+      );
+    }
+
+    const outbound = await client.query<{
+      id: string;
+      status: string;
+      provider_status_at: Date | null;
+    }>(
+      `
+        SELECT id, status, provider_status_at
+        FROM outbound_messages
+        WHERE workspace_id = $1
+          AND provider_message_id = $2
+        FOR UPDATE
+      `,
+      [workspaceId, event.providerMessageId],
+    );
+    const message = outbound.rows[0];
+
+    if (!message) {
+      await client.query(
+        `
+          UPDATE whatsapp_delivery_events
+          SET processing_outcome = 'ignored',
+              processing_reason = 'No outbound message matches this wamid in the configured workspace.'
+          WHERE workspace_id = $1
+            AND event_key = $2
+        `,
+        [workspaceId, eventKey],
+      );
+      await client.query("COMMIT");
+      return "ignored";
+    }
+
+    await client.query(
+      `
+        UPDATE whatsapp_delivery_events
+        SET outbound_message_id = $3
+        WHERE workspace_id = $1
+          AND event_key = $2
+      `,
+      [workspaceId, eventKey, message.id],
+    );
+
+    const supportedRank = deliveryStatusRank(event.status);
+    if (supportedRank === 0) {
+      await client.query(
+        `
+          UPDATE whatsapp_delivery_events
+          SET processing_outcome = 'ignored',
+              processing_reason = 'Unsupported provider status.'
+          WHERE workspace_id = $1
+            AND event_key = $2
+        `,
+        [workspaceId, eventKey],
+      );
+      await client.query("COMMIT");
+      return "ignored";
+    }
+
+    const currentTimestamp = message.provider_status_at;
+    const isOlder =
+      currentTimestamp !== null &&
+      event.providerTimestamp.getTime() < currentTimestamp.getTime();
+    const isSameTimestamp =
+      currentTimestamp !== null &&
+      event.providerTimestamp.getTime() === currentTimestamp.getTime();
+    const currentRank = deliveryStatusRank(message.status);
+    const isTieRegression =
+      isSameTimestamp && supportedRank <= currentRank;
+    const isTerminalPositive =
+      (message.status === "read" && event.status !== "read") ||
+      (message.status === "delivered" &&
+        (event.status === "sent" || event.status === "failed"));
+    const isTerminalInternal =
+      message.status === "cancelled" || message.status === "manual_review";
+
+    if (
+      isOlder ||
+      isTieRegression ||
+      isTerminalPositive ||
+      isTerminalInternal
+    ) {
+      await client.query(
+        `
+          UPDATE whatsapp_delivery_events
+          SET processing_outcome = 'ignored',
+              processing_reason = 'Event is stale or cannot advance the current outbound status.'
+          WHERE workspace_id = $1
+            AND event_key = $2
+        `,
+        [workspaceId, eventKey],
+      );
+      await client.query("COMMIT");
+      return "ignored";
+    }
+
+    const nextFailureReason =
+      event.status === "failed"
+        ? (boundedReason ?? "Meta reported delivery failure.")
+        : null;
+    await client.query(
+      `
+        UPDATE outbound_messages
+        SET status = $3,
+            provider_status_at = $4,
+            sent_at = CASE
+              WHEN $3 = 'sent' THEN COALESCE(sent_at, $4)
+              ELSE sent_at
+            END,
+            delivered_at = CASE
+              WHEN $3 IN ('delivered', 'read') THEN COALESCE(delivered_at, $4)
+              ELSE delivered_at
+            END,
+            failure_reason = $5,
+            updated_at = now()
+        WHERE id = $1
+          AND workspace_id = $2
+      `,
+      [
+        message.id,
+        workspaceId,
+        event.status,
+        event.providerTimestamp,
+        nextFailureReason,
+      ],
+    );
+    await client.query(
+      `
+        UPDATE whatsapp_delivery_events
+        SET processing_outcome = 'processed'
+        WHERE workspace_id = $1
+          AND event_key = $2
+      `,
+      [workspaceId, eventKey],
+    );
+    await client.query("COMMIT");
+    return "processed";
+  } catch (error) {
+    try {
+      await client.query("ROLLBACK");
+    } catch {
+      // Preserve the original processing error.
+    }
+
+    const failure =
+      error instanceof Error ? error.message : "Unknown event-processing failure.";
+    await pool.query(
+      `
+        INSERT INTO whatsapp_delivery_events (
+          event_key,
+          workspace_id,
+          provider_message_id,
+          phone_number_id,
+          provider_status,
+          provider_timestamp,
+          processing_outcome,
+          failure_reason
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, 'failed', $7)
+        ON CONFLICT (workspace_id, event_key)
+        DO UPDATE SET
+          processing_outcome = 'failed',
+          failure_reason = EXCLUDED.failure_reason
+      `,
+      [
+        eventKey,
+        workspaceId,
+        event.providerMessageId,
+        event.phoneNumberId,
+        event.status,
+        event.providerTimestamp,
+        boundedDeliveryReason(failure),
+      ],
+    );
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+function directDeliveryEvent(
+  providerMessageId: string,
+  status: string,
+  providerTimestamp: Date,
+  errorDescription: string | null = null,
+): DeliveryStatusEvent {
+  return {
+    providerMessageId,
+    phoneNumberId: "00000",
+    status,
+    providerTimestamp,
+    errorDescription,
+  };
+}
+
 export async function markOutboundDeliveryEventSent(
   pool: Pool,
   workspaceId: string,
   providerMessageId: string,
   eventTimestamp: Date,
 ): Promise<boolean> {
-  const result = await pool.query(
-    `
-      UPDATE outbound_messages
-      SET status = 'sent',
-          sent_at = COALESCE(sent_at, $3),
-          updated_at = now()
-      WHERE workspace_id = $1
-        AND provider_message_id = $2
-        AND status IN ('sent', 'sending', 'queued')
-        AND status NOT IN ('delivered', 'read')
-    `,
-    [workspaceId, providerMessageId, eventTimestamp],
+  return (
+    (await processOutboundDeliveryEvent(
+      pool,
+      workspaceId,
+      directDeliveryEvent(providerMessageId, "sent", eventTimestamp),
+      null,
+    )) === "processed"
   );
-
-  return (result.rowCount ?? 0) > 0;
 }
 
-/**
- * Delivery-status event: customer device acknowledged receipt.
- * delivered cannot regress to sent. An already-read row is not downgraded.
- */
 export async function markOutboundDeliveryEventDelivered(
   pool: Pool,
   workspaceId: string,
   providerMessageId: string,
   eventTimestamp: Date,
 ): Promise<boolean> {
-  const result = await pool.query(
-    `
-      UPDATE outbound_messages
-      SET status = 'delivered',
-          delivered_at = COALESCE(delivered_at, $3),
-          updated_at = now()
-      WHERE workspace_id = $1
-        AND provider_message_id = $2
-        AND status NOT IN ('read', 'cancelled', 'failed', 'manual_review')
-    `,
-    [workspaceId, providerMessageId, eventTimestamp],
+  return (
+    (await processOutboundDeliveryEvent(
+      pool,
+      workspaceId,
+      directDeliveryEvent(providerMessageId, "delivered", eventTimestamp),
+      null,
+    )) === "processed"
   );
-
-  return (result.rowCount ?? 0) > 0;
 }
 
-/**
- * Delivery-status event: customer read the message.
- * read is the terminal positive state; it cannot be overwritten by delivered
- * or sent events. Sets delivered_at if not already set to preserve the audit
- * trail.
- */
 export async function markOutboundDeliveryEventRead(
   pool: Pool,
   workspaceId: string,
   providerMessageId: string,
   eventTimestamp: Date,
 ): Promise<boolean> {
-  const result = await pool.query(
-    `
-      UPDATE outbound_messages
-      SET status = 'read',
-          delivered_at = COALESCE(delivered_at, $3),
-          updated_at = now()
-      WHERE workspace_id = $1
-        AND provider_message_id = $2
-        AND status NOT IN ('read', 'cancelled', 'failed', 'manual_review')
-    `,
-    [workspaceId, providerMessageId, eventTimestamp],
+  return (
+    (await processOutboundDeliveryEvent(
+      pool,
+      workspaceId,
+      directDeliveryEvent(providerMessageId, "read", eventTimestamp),
+      null,
+    )) === "processed"
   );
-
-  return (result.rowCount ?? 0) > 0;
 }
 
-/**
- * Delivery-status event: Meta reports a permanent failure to deliver.
- * Only recorded when the message is in a state where failure is meaningful;
- * does not overwrite a delivered or read status. The raw error object is
- * passed as a bounded JSON string for audit purposes but must not include
- * sensitive provider data.
- */
 export async function markOutboundDeliveryEventFailed(
   pool: Pool,
   workspaceId: string,
@@ -778,20 +1078,17 @@ export async function markOutboundDeliveryEventFailed(
   eventTimestamp: Date,
   failureReason: string,
 ): Promise<boolean> {
-  const result = await pool.query(
-    `
-      UPDATE outbound_messages
-      SET status = 'failed',
-          failure_reason = $4,
-          updated_at = now()
-      WHERE workspace_id = $1
-        AND provider_message_id = $2
-        AND status NOT IN (
-          'delivered', 'read', 'cancelled', 'failed', 'manual_review'
-        )
-    `,
-    [workspaceId, providerMessageId, eventTimestamp, failureReason],
+  return (
+    (await processOutboundDeliveryEvent(
+      pool,
+      workspaceId,
+      directDeliveryEvent(
+        providerMessageId,
+        "failed",
+        eventTimestamp,
+        failureReason,
+      ),
+      failureReason,
+    )) === "processed"
   );
-
-  return (result.rowCount ?? 0) > 0;
 }

@@ -154,10 +154,19 @@ export class MetaWhatsAppCloudProvider implements OutboundMessageProvider {
 
   readonly #config: MetaOutboundConfig;
   readonly #pool: Pool;
+  readonly #fetch: typeof fetch;
+  readonly #timeoutMs: number;
 
-  constructor(config: MetaOutboundConfig, pool: Pool) {
+  constructor(
+    config: MetaOutboundConfig,
+    pool: Pool,
+    fetchImplementation: typeof fetch = globalThis.fetch,
+    timeoutMs = META_API_TIMEOUT_MS,
+  ) {
     this.#config = config;
     this.#pool = pool;
+    this.#fetch = fetchImplementation;
+    this.#timeoutMs = timeoutMs;
   }
 
   async send(
@@ -265,7 +274,7 @@ export class MetaWhatsAppCloudProvider implements OutboundMessageProvider {
     let response: Response;
 
     try {
-      response = await fetch(url, {
+      response = await this.#fetch(url, {
         method: "POST",
         headers: {
           // Token in Authorization header only — never in the URL or body.
@@ -273,7 +282,7 @@ export class MetaWhatsAppCloudProvider implements OutboundMessageProvider {
           "Content-Type": "application/json",
         },
         body,
-        signal: AbortSignal.timeout(META_API_TIMEOUT_MS),
+        signal: AbortSignal.timeout(this.#timeoutMs),
       });
     } catch (error) {
       // Network error, DNS failure, or timeout. The outcome is unknown.
