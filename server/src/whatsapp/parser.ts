@@ -248,3 +248,193 @@ export function parseWhatsAppWebhook(
 
   return messages;
 }
+
+import type { DeliveryStatusEvent } from "./types.js";
+
+const DELIVERY_STATUS_VALUES = ["sent", "delivered", "read", "failed"] as const;
+const WAMID_PATTERN = /^wamid\.[A-Za-z0-9+/=_-]{5,500}$/;
+const DELIVERY_STATUS_MAX_LENGTH = 64;
+
+function parseDeliveryTimestamp(value: unknown): Date {
+  // Delivery-status timestamps use the same Unix-seconds format as message
+  // timestamps. Reject non-string and non-numeric-string values.
+  if (typeof value !== "string" || !/^\d{1,12}$/.test(value)) {
+    throw new InvalidWhatsAppPayloadError(
+      "Invalid delivery-status event timestamp",
+    );
+  }
+
+  const seconds = Number(value);
+  const timestamp = new Date(seconds * 1_000);
+
+  if (!Number.isSafeInteger(seconds) || Number.isNaN(timestamp.getTime())) {
+    throw new InvalidWhatsAppPayloadError(
+      "Invalid delivery-status event timestamp",
+    );
+  }
+
+  return timestamp;
+}
+
+function parseDeliveryErrorDescription(error: unknown): string | null {
+  if (!isRecord(error)) {
+    return null;
+  }
+
+  const code = typeof error.code === "number" ? `code=${error.code}` : null;
+  const type = typeof error.type === "string" ? `type=${error.type}` : null;
+  const subcode =
+    typeof error.error_subcode === "number"
+      ? `subcode=${error.error_subcode}`
+      : null;
+
+  const parts = [code, subcode, type].filter(Boolean);
+  const description = parts.length > 0 ? parts.join(", ") : "unknown error";
+
+  // Bound to 200 characters; never include user data.
+  return description.slice(0, 200);
+}
+
+function parseDeliveryStatus(
+  value: unknown,
+  phoneNumberId: string,
+): DeliveryStatusEvent {
+  if (!isRecord(value)) {
+    throw new InvalidWhatsAppPayloadError(
+      "Invalid delivery-status object in statuses array",
+    );
+  }
+
+  const wamid =
+    typeof value.id === "string" &&
+    WAMID_PATTERN.test(value.id.trim()) &&
+    value.id.trim().length <= PROVIDER_MESSAGE_ID_MAX_LENGTH
+      ? value.id.trim()
+      : null;
+
+  if (!wamid) {
+    throw new InvalidWhatsAppPayloadError(
+      "Delivery-status event is missing a valid wamid",
+    );
+  }
+
+  const status =
+    typeof value.status === "string" &&
+    value.status.trim().length <= DELIVERY_STATUS_MAX_LENGTH
+      ? value.status.trim()
+      : null;
+
+  if (!status) {
+    throw new InvalidWhatsAppPayloadError(
+      "Delivery-status event is missing a valid status value",
+    );
+  }
+
+  const providerTimestamp = parseDeliveryTimestamp(value.timestamp);
+  const errorDescription =
+    status === "failed"
+      ? parseDeliveryErrorDescription(value.errors?.[0] ?? null)
+      : null;
+
+  return {
+    providerMessageId: wamid,
+    phoneNumberId,
+    status,
+    providerTimestamp,
+    errorDescription,
+  };
+}
+
+/**
+ * Extracts delivery-status events for the configured business phone number
+ * from the Meta webhook payload.
+ *
+ * Each change in the `messages` field may carry either an inbound `messages`
+ * array (handled by parseWhatsAppWebhook) or a `statuses` array for delivery
+ * events, or both. This function handles only the statuses array.
+ *
+ * Structurally invalid entries throw so the caller can return a non-200
+ * response and Meta can retry.
+ */
+export function parseWhatsAppDeliveryStatuses(
+  payload: unknown,
+  configuredPhoneNumberId: string,
+): DeliveryStatusEvent[] {
+  if (!isRecord(payload) || typeof payload.object !== "string") {
+    throw new InvalidWhatsAppPayloadError("Missing webhook object");
+  }
+
+  if (payload.object !== "whatsapp_business_account") {
+    return [];
+  }
+
+  if (!Array.isArray(payload.entry)) {
+    throw new InvalidWhatsAppPayloadError("Missing webhook entries");
+  }
+
+  const events: DeliveryStatusEvent[] = [];
+
+  for (const entry of payload.entry) {
+    if (!isRecord(entry) || !Array.isArray(entry.changes)) {
+      throw new InvalidWhatsAppPayloadError("Invalid webhook entry");
+    }
+
+    for (const change of entry.changes) {
+      if (!isRecord(change)) {
+        throw new InvalidWhatsAppPayloadError("Invalid webhook change");
+      }
+
+      if (change.field !== "messages") {
+        continue;
+      }
+
+      const changeValue = change.value;
+
+      if (!isRecord(changeValue)) {
+        throw new InvalidWhatsAppPayloadError("Missing change value");
+      }
+
+      if (
+        typeof changeValue.messaging_product === "string" &&
+        changeValue.messaging_product !== "whatsapp"
+      ) {
+        continue;
+      }
+
+      if (!("statuses" in changeValue)) {
+        continue;
+      }
+
+      if (!Array.isArray(changeValue.statuses)) {
+        throw new InvalidWhatsAppPayloadError("Invalid statuses array");
+      }
+
+      if (changeValue.statuses.length === 0) {
+        continue;
+      }
+
+      const metadata = changeValue.metadata;
+
+      if (
+        !isRecord(metadata) ||
+        typeof metadata.phone_number_id !== "string"
+      ) {
+        throw new InvalidWhatsAppPayloadError(
+          "Missing receiving phone-number ID in delivery-status change",
+        );
+      }
+
+      if (metadata.phone_number_id !== configuredPhoneNumberId) {
+        continue;
+      }
+
+      for (const statusEntry of changeValue.statuses) {
+        events.push(
+          parseDeliveryStatus(statusEntry, metadata.phone_number_id),
+        );
+      }
+    }
+  }
+
+  return events;
+}

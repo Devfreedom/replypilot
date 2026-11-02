@@ -1,6 +1,8 @@
 import { loadConfig } from "../config.js";
 import { createPool } from "../db/pool.js";
-import { MockOutboundMessageProvider } from "./provider.js";
+import { loadMetaOutboundConfig } from "./meta-config.js";
+import { MetaWhatsAppCloudProvider } from "./meta-provider.js";
+import { MockOutboundMessageProvider, type OutboundMessageProvider } from "./provider.js";
 import { runOutboundWorkerOnce } from "./worker.js";
 
 const DEFAULT_POLL_INTERVAL_MS = 2_000;
@@ -57,7 +59,30 @@ async function main(): Promise<void> {
     DEFAULT_STALE_AFTER_MS,
   );
   const pool = createPool(config.databaseUrl);
-  const provider = new MockOutboundMessageProvider();
+
+  // Load Meta outbound configuration. Fails closed when META_OUTBOUND_ENABLED=true
+  // but required variables are missing or invalid.
+  const metaConfig = loadMetaOutboundConfig();
+
+  let provider: OutboundMessageProvider;
+  let providerLabel: string;
+
+  if (metaConfig) {
+    provider = new MetaWhatsAppCloudProvider(metaConfig, pool);
+    // Never log the access token or any credential. Only log the provider name
+    // and sender phone-number ID (non-secret) for operational visibility.
+    providerLabel = `whatsapp (sender=${metaConfig.senderPhoneNumberId}, workspace=${metaConfig.testWorkspaceId})`;
+    log("outbound_worker_provider_meta", {
+      senderPhoneNumberId: metaConfig.senderPhoneNumberId,
+      testWorkspaceId: metaConfig.testWorkspaceId,
+      graphApiVersion: metaConfig.graphApiVersion,
+      allowedRecipients: metaConfig.allowedRecipients.size,
+    });
+  } else {
+    provider = new MockOutboundMessageProvider();
+    providerLabel = "mock";
+  }
+
   let stopping = false;
 
   function requestStop(signal: string): void {
@@ -76,7 +101,7 @@ async function main(): Promise<void> {
     pollIntervalMs,
     batchSize,
     staleAfterMs,
-    provider: "mock",
+    provider: providerLabel,
   });
 
   try {
