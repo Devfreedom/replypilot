@@ -323,6 +323,41 @@ export async function listOutboundMessages(
 }
 
 /**
+ * Cancels queued work whose draft is no longer approved or whose conversation
+ * is no longer active. This is the deterministic authorization gate before the
+ * worker claims anything, and it prevents an edited or revoked draft from being
+ * sent from an old snapshot.
+ */
+export async function cancelUnauthorizedQueuedOutbound(
+  pool: Pool,
+): Promise<number> {
+  const result = await pool.query(
+    `
+      UPDATE outbound_messages AS message
+      SET status = 'cancelled',
+          failure_reason =
+            'Draft approval or active conversation is no longer valid.',
+          next_attempt_at = NULL,
+          updated_at = now()
+      WHERE message.status = 'queued'
+        AND NOT EXISTS (
+          SELECT 1
+          FROM reply_drafts AS draft
+          JOIN whatsapp_conversations AS conversation
+            ON conversation.id = message.conversation_id
+           AND conversation.workspace_id = message.workspace_id
+          WHERE draft.id = message.reply_draft_id
+            AND draft.workspace_id = message.workspace_id
+            AND draft.status = 'approved'
+            AND conversation.status IN ('open', 'closed')
+        )
+    `,
+  );
+
+  return result.rowCount ?? 0;
+}
+
+/**
  * Claims a bounded batch with SKIP LOCKED. The returned attempts value is the
  * claim generation: completion updates require the same attempts value, so a
  * stale worker cannot overwrite a newer claim after recovery.
@@ -339,11 +374,22 @@ export async function claimQueuedOutboundMessages(
     const result = await client.query<OutboundMessageRow>(
       `
         WITH claimed AS (
-          SELECT id
-          FROM outbound_messages
-          WHERE status = 'queued'
-            AND (next_attempt_at IS NULL OR next_attempt_at <= now())
-          ORDER BY queued_at ASC, id ASC
+          SELECT message.id
+          FROM outbound_messages AS message
+          WHERE message.status = 'queued'
+            AND (message.next_attempt_at IS NULL OR message.next_attempt_at <= now())
+            AND EXISTS (
+              SELECT 1
+              FROM reply_drafts AS draft
+              JOIN whatsapp_conversations AS conversation
+                ON conversation.id = message.conversation_id
+               AND conversation.workspace_id = message.workspace_id
+              WHERE draft.id = message.reply_draft_id
+                AND draft.workspace_id = message.workspace_id
+                AND draft.status = 'approved'
+                AND conversation.status IN ('open', 'closed')
+            )
+          ORDER BY message.queued_at ASC, message.id ASC
           FOR UPDATE SKIP LOCKED
           LIMIT $1
         )
@@ -371,6 +417,60 @@ export async function claimQueuedOutboundMessages(
   } finally {
     client.release();
   }
+}
+
+/**
+ * Re-checks authorization after the claim commit. A draft can be edited while
+ * the worker is between claim and provider call; in that window the claim must
+ * be cancelled rather than sending content the owner no longer approved.
+ */
+export async function isOutboundClaimAuthorized(
+  pool: Pool,
+  row: OutboundMessageRow,
+): Promise<boolean> {
+  const result = await pool.query(
+    `
+      SELECT 1
+      FROM outbound_messages AS message
+      JOIN reply_drafts AS draft
+        ON draft.id = message.reply_draft_id
+       AND draft.workspace_id = message.workspace_id
+      JOIN whatsapp_conversations AS conversation
+        ON conversation.id = message.conversation_id
+       AND conversation.workspace_id = message.workspace_id
+      WHERE message.id = $1
+        AND message.status = 'sending'
+        AND message.attempts = $2
+        AND draft.status = 'approved'
+        AND conversation.status IN ('open', 'closed')
+      LIMIT 1
+    `,
+    [row.id, row.attempts],
+  );
+
+  return result.rows.length > 0;
+}
+
+export async function cancelOutboundClaim(
+  pool: Pool,
+  row: OutboundMessageRow,
+): Promise<boolean> {
+  const result = await pool.query(
+    `
+      UPDATE outbound_messages
+      SET status = 'cancelled',
+          failure_reason =
+            'Draft approval or active conversation is no longer valid.',
+          next_attempt_at = NULL,
+          updated_at = now()
+      WHERE id = $1
+        AND status = 'sending'
+        AND attempts = $2
+    `,
+    [row.id, row.attempts],
+  );
+
+  return (result.rowCount ?? 0) > 0;
 }
 
 export async function markOutboundSent(

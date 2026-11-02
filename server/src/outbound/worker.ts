@@ -4,7 +4,10 @@ import {
   type OutboundMessageProvider,
 } from "./provider.js";
 import {
+  cancelOutboundClaim,
+  cancelUnauthorizedQueuedOutbound,
   claimQueuedOutboundMessages,
+  isOutboundClaimAuthorized,
   markOutboundFailed,
   markOutboundSent,
   recoverStaleSending,
@@ -23,6 +26,7 @@ export type OutboundWorkerOptions = Readonly<{
 
 export type OutboundWorkerResult = Readonly<{
   recovered: number;
+  cancelled: number;
   claimed: number;
   sent: number;
   retried: number;
@@ -47,14 +51,25 @@ export async function runOutboundWorkerOnce(
     options.staleAfterMs ?? DEFAULT_WORKER_STALE_AFTER_MS;
 
   const recovered = await recoverStaleSending(pool, staleAfterMs);
+  const cancelledBeforeClaim = await cancelUnauthorizedQueuedOutbound(pool);
   const claimed = await claimQueuedOutboundMessages(pool, batchSize);
 
+  let cancelled = cancelledBeforeClaim;
   let sent = 0;
   let retried = 0;
   let failed = 0;
   let skipped = 0;
 
   for (const row of claimed) {
+    if (!(await isOutboundClaimAuthorized(pool, row))) {
+      if (await cancelOutboundClaim(pool, row)) {
+        cancelled += 1;
+      } else {
+        skipped += 1;
+      }
+      continue;
+    }
+
     try {
       const result = await provider.send({
         conversationId: row.conversation_id,
@@ -103,6 +118,7 @@ export async function runOutboundWorkerOnce(
 
   return {
     recovered,
+    cancelled,
     claimed: claimed.length,
     sent,
     retried,

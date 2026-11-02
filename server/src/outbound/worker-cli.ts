@@ -89,6 +89,7 @@ async function main(): Promise<void> {
 
         if (
           result.recovered > 0 ||
+          result.cancelled > 0 ||
           result.claimed > 0 ||
           result.sent > 0 ||
           result.retried > 0 ||
