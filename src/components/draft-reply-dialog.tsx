@@ -2,13 +2,28 @@
 
 import { useEffect, useRef, useState } from "react";
 import {
+  parseReplyDraftApprovalResponse,
   parseReplyDraftsResponse,
   parseSavedReplyDraftResponse,
+  parseSendReplyDraftResponse,
   type Lead,
   type ReplyDraftSource,
   type ReplyDraft,
   type SavedReplyDraft,
 } from "@/lib/leads";
+import {
+  APPROVAL_SEND_POLICY_LABELS,
+  OUTBOUND_STATUS_DESCRIPTIONS,
+  OUTBOUND_STATUS_LABELS,
+  parseMessagingSettingsResponse,
+  type ApprovalSendPolicy,
+  type OutboundMessage,
+} from "@/lib/messaging";
+import {
+  conversationDisplayName,
+  parseConversationsResponse,
+  type WhatsAppConversation,
+} from "@/lib/whatsapp";
 
 async function readJson(response: Response): Promise<unknown> {
   try {
@@ -59,6 +74,8 @@ const sourceTypeLabels: Record<ReplyDraftSource["type"], string> = {
   faq: "FAQ",
   policy: "Policy",
 };
+
+type SendPolicyChoice = "default" | ApprovalSendPolicy;
 
 function StatusBadge({ status }: { status: SavedReplyDraft["status"] }) {
   const approved = status === "approved";
@@ -145,13 +162,26 @@ export function DraftReplyDialog({
   const [editedReply, setEditedReply] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [pendingAction, setPendingAction] = useState<
-    "save" | "approve" | "unapprove" | "regenerate" | null
+    "save" | "approve" | "unapprove" | "regenerate" | "send" | null
   >(null);
   const [error, setError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [validationError, setValidationError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [copyMessage, setCopyMessage] = useState<string | null>(null);
+  const [defaultApprovalSendPolicy, setDefaultApprovalSendPolicy] =
+    useState<ApprovalSendPolicy>("approve_only");
+  const [sendPolicyChoice, setSendPolicyChoice] =
+    useState<SendPolicyChoice>("default");
+  const [conversations, setConversations] = useState<WhatsAppConversation[]>(
+    [],
+  );
+  const [selectedConversationId, setSelectedConversationId] = useState("");
+  const [approvalContextError, setApprovalContextError] = useState<
+    string | null
+  >(null);
+  const [outboundMessage, setOutboundMessage] =
+    useState<OutboundMessage | null>(null);
 
   const selectedDraft =
     drafts.find((draft) => draft.id === selectedDraftId) ?? null;
@@ -159,6 +189,18 @@ export function DraftReplyDialog({
     ? editedReply !== selectedDraft.draftReply
     : false;
   const isBusy = pendingAction !== null;
+  const effectiveSendPolicy: ApprovalSendPolicy =
+    sendPolicyChoice === "default"
+      ? defaultApprovalSendPolicy
+      : sendPolicyChoice;
+  const eligibleConversations = lead
+    ? conversations.filter(
+        (conversation) =>
+          conversation.leadId === lead.id &&
+          (conversation.status === "open" ||
+            conversation.status === "closed"),
+      )
+    : [];
 
   function replaceDraft(nextDraft: SavedReplyDraft) {
     setDrafts((current) => {
@@ -183,6 +225,74 @@ export function DraftReplyDialog({
     setValidationError(null);
     setNotice(null);
     setCopyMessage(null);
+  }
+
+  async function loadApprovalContext(selectedLead: Lead) {
+    setApprovalContextError(null);
+
+    try {
+      const [settingsResponse, openResponse, closedResponse] =
+        await Promise.all([
+          fetch("/api/settings/messaging"),
+          fetch("/api/conversations?status=open&limit=100"),
+          fetch("/api/conversations?status=closed&limit=100"),
+        ]);
+      const [settingsData, openData, closedData] = await Promise.all([
+        readJson(settingsResponse),
+        readJson(openResponse),
+        readJson(closedResponse),
+      ]);
+
+      if (settingsResponse.ok) {
+        const settings = parseMessagingSettingsResponse(settingsData);
+
+        if (settings) {
+          setDefaultApprovalSendPolicy(settings.defaultApprovalSendPolicy);
+        }
+      }
+
+      if (!openResponse.ok || !closedResponse.ok) {
+        setApprovalContextError(
+          errorMessage(
+            openData,
+            "Unable to load WhatsApp conversations for this lead.",
+          ),
+        );
+        return;
+      }
+
+      const open = parseConversationsResponse(openData);
+      const closed = parseConversationsResponse(closedData);
+
+      if (!open || !closed) {
+        setApprovalContextError(
+          "The conversation service returned an unexpected response.",
+        );
+        return;
+      }
+
+      const byId = new Map<string, WhatsAppConversation>();
+
+      for (const conversation of [...open.conversations, ...closed.conversations]) {
+        byId.set(conversation.id, conversation);
+      }
+
+      const eligible = [...byId.values()].filter(
+        (conversation) =>
+          conversation.leadId === selectedLead.id &&
+          (conversation.status === "open" ||
+            conversation.status === "closed"),
+      );
+
+      setConversations(eligible);
+      setSelectedConversationId(
+        eligible.length === 1 ? eligible[0].id : "",
+      );
+    } catch {
+      setApprovalContextError(
+        "Unable to load approval settings and conversations.",
+      );
+    }
   }
 
   async function loadDrafts(selectedLead: Lead) {
@@ -274,7 +384,11 @@ export function DraftReplyDialog({
 
       if (loadedLeadIdRef.current !== lead.id) {
         loadedLeadIdRef.current = lead.id;
+        setSendPolicyChoice("default");
+        setSelectedConversationId("");
+        setOutboundMessage(null);
         void loadDrafts(lead);
+        void loadApprovalContext(lead);
       }
     } else {
       requestIdRef.current += 1;
