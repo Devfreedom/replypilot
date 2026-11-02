@@ -17,6 +17,7 @@ import {
   OUTBOUND_STATUS_DESCRIPTIONS,
   OUTBOUND_STATUS_LABELS,
   parseMessagingSettingsResponse,
+  sendPolicyChoiceForDraftSelection,
   type ApprovalSendPolicy,
   type OutboundMessage,
 } from "@/lib/messaging";
@@ -207,6 +208,13 @@ export function DraftReplyDialog({
     : [];
 
   function replaceDraft(nextDraft: SavedReplyDraft) {
+    setSendPolicyChoice((choice) =>
+      sendPolicyChoiceForDraftSelection(
+        selectedDraftId,
+        nextDraft.id,
+        choice,
+      ),
+    );
     setDrafts((current) => {
       const exists = current.some((draft) => draft.id === nextDraft.id);
 
@@ -223,6 +231,13 @@ export function DraftReplyDialog({
   }
 
   function selectDraft(draft: SavedReplyDraft) {
+    setSendPolicyChoice((choice) =>
+      sendPolicyChoiceForDraftSelection(
+        selectedDraftId,
+        draft.id,
+        choice,
+      ),
+    );
     setSelectedDraftId(draft.id);
     setEditedReply(draft.draftReply);
     setActionError(null);

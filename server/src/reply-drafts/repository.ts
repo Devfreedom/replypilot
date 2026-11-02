@@ -1,4 +1,4 @@
-import type { Pool } from "pg";
+import type { Pool, PoolClient, QueryResult } from "pg";
 import type { ReplyDraft } from "../ai/reply-draft.js";
 import {
   missingInformationSchema,
@@ -8,6 +8,11 @@ import type {
   ReplyDraftRow,
   SavedReplyDraft,
 } from "./types.js";
+
+export type ReplyDraftMutationResult =
+  | Readonly<{ kind: "updated"; draft: SavedReplyDraft }>
+  | Readonly<{ kind: "not-found" }>
+  | Readonly<{ kind: "send-in-progress" }>;
 
 export const REPLY_DRAFT_COLUMNS = `
   id,
@@ -154,10 +159,10 @@ export async function replaceGeneratedReplyDraft(
   leadId: string,
   draftId: string,
   draft: ReplyDraft,
-): Promise<SavedReplyDraft | null> {
-  const result = await pool.query<ReplyDraftRow>(
-    `
-      WITH updated_draft AS (
+): Promise<ReplyDraftMutationResult> {
+  return mutateReplyDraft(pool, workspaceId, leadId, draftId, async (client) =>
+    client.query<ReplyDraftRow>(
+      `
         UPDATE reply_drafts
         SET intent = $4,
             summary = $5,
@@ -174,38 +179,21 @@ export async function replaceGeneratedReplyDraft(
             updated_at = now()
         WHERE workspace_id = $1 AND id = $2 AND lead_id = $3
         RETURNING ${REPLY_DRAFT_COLUMNS}
-      ),
-      cancelled_outbound AS (
-        UPDATE outbound_messages
-        SET status = 'cancelled',
-            failure_reason =
-              'Draft content or approval changed before the message was sent.',
-            next_attempt_at = NULL,
-            updated_at = now()
-        WHERE workspace_id = $1
-          AND reply_draft_id = $2
-          AND status = 'queued'
-          AND EXISTS (SELECT 1 FROM updated_draft)
-      )
-      SELECT ${REPLY_DRAFT_COLUMNS}
-      FROM updated_draft
-    `,
-    [
-      workspaceId,
-      draftId,
-      leadId,
-      draft.intent,
-      draft.summary,
-      JSON.stringify(draft.missingInformation),
-      draft.draftReply,
-      draft.provider,
-      draft.isDemo,
-      JSON.stringify(draft.sources),
-    ],
+      `,
+      [
+        workspaceId,
+        draftId,
+        leadId,
+        draft.intent,
+        draft.summary,
+        JSON.stringify(draft.missingInformation),
+        draft.draftReply,
+        draft.provider,
+        draft.isDemo,
+        JSON.stringify(draft.sources),
+      ],
+    ),
   );
-
-  const row = result.rows[0];
-  return row ? mapReplyDraftRow(row) : null;
 }
 
 export async function updateReplyDraftText(
@@ -214,10 +202,10 @@ export async function updateReplyDraftText(
   leadId: string,
   draftId: string,
   draftReply: string,
-): Promise<SavedReplyDraft | null> {
-  const result = await pool.query<ReplyDraftRow>(
-    `
-      WITH updated_draft AS (
+): Promise<ReplyDraftMutationResult> {
+  return mutateReplyDraft(pool, workspaceId, leadId, draftId, (client) =>
+    client.query<ReplyDraftRow>(
+      `
         UPDATE reply_drafts
         SET draft_reply = $4,
             status = 'draft',
@@ -228,27 +216,10 @@ export async function updateReplyDraftText(
             updated_at = now()
         WHERE workspace_id = $1 AND id = $2 AND lead_id = $3
         RETURNING ${REPLY_DRAFT_COLUMNS}
-      ),
-      cancelled_outbound AS (
-        UPDATE outbound_messages
-        SET status = 'cancelled',
-            failure_reason =
-              'Draft content or approval changed before the message was sent.',
-            next_attempt_at = NULL,
-            updated_at = now()
-        WHERE workspace_id = $1
-          AND reply_draft_id = $2
-          AND status = 'queued'
-          AND EXISTS (SELECT 1 FROM updated_draft)
-      )
-      SELECT ${REPLY_DRAFT_COLUMNS}
-      FROM updated_draft
-    `,
-    [workspaceId, draftId, leadId, draftReply],
+      `,
+      [workspaceId, draftId, leadId, draftReply],
+    ),
   );
-
-  const row = result.rows[0];
-  return row ? mapReplyDraftRow(row) : null;
 }
 
 export async function returnReplyDraftToDraft(
@@ -256,10 +227,10 @@ export async function returnReplyDraftToDraft(
   workspaceId: string,
   leadId: string,
   draftId: string,
-): Promise<SavedReplyDraft | null> {
-  const result = await pool.query<ReplyDraftRow>(
-    `
-      WITH updated_draft AS (
+): Promise<ReplyDraftMutationResult> {
+  return mutateReplyDraft(pool, workspaceId, leadId, draftId, (client) =>
+    client.query<ReplyDraftRow>(
+      `
         UPDATE reply_drafts
         SET status = 'draft',
             approved_at = NULL,
@@ -269,8 +240,68 @@ export async function returnReplyDraftToDraft(
             updated_at = now()
         WHERE workspace_id = $1 AND id = $2 AND lead_id = $3
         RETURNING ${REPLY_DRAFT_COLUMNS}
-      ),
-      cancelled_outbound AS (
+      `,
+      [workspaceId, draftId, leadId],
+    ),
+  );
+}
+
+async function mutateReplyDraft(
+  pool: Pool,
+  workspaceId: string,
+  leadId: string,
+  draftId: string,
+  mutation: (
+    client: PoolClient,
+  ) => Promise<QueryResult<ReplyDraftRow>>,
+): Promise<ReplyDraftMutationResult> {
+  const client = await pool.connect();
+
+  try {
+    await client.query("BEGIN");
+
+    const draftLock = await client.query(
+      `
+        SELECT id
+        FROM reply_drafts
+        WHERE workspace_id = $1 AND lead_id = $2 AND id = $3
+        FOR UPDATE
+      `,
+      [workspaceId, leadId, draftId],
+    );
+
+    if (draftLock.rows.length === 0) {
+      await client.query("ROLLBACK");
+      return { kind: "not-found" };
+    }
+
+    const sendingLock = await client.query(
+      `
+        SELECT id
+        FROM outbound_messages
+        WHERE workspace_id = $1
+          AND reply_draft_id = $2
+          AND status = 'sending'
+        FOR UPDATE
+      `,
+      [workspaceId, draftId],
+    );
+
+    if (sendingLock.rows.length > 0) {
+      await client.query("ROLLBACK");
+      return { kind: "send-in-progress" };
+    }
+
+    const updated = await mutation(client);
+    const row = updated.rows[0];
+
+    if (!row) {
+      await client.query("ROLLBACK");
+      return { kind: "not-found" };
+    }
+
+    await client.query(
+      `
         UPDATE outbound_messages
         SET status = 'cancelled',
             failure_reason =
@@ -280,14 +311,20 @@ export async function returnReplyDraftToDraft(
         WHERE workspace_id = $1
           AND reply_draft_id = $2
           AND status = 'queued'
-          AND EXISTS (SELECT 1 FROM updated_draft)
-      )
-      SELECT ${REPLY_DRAFT_COLUMNS}
-      FROM updated_draft
-    `,
-    [workspaceId, draftId, leadId],
-  );
+      `,
+      [workspaceId, draftId],
+    );
 
-  const row = result.rows[0];
-  return row ? mapReplyDraftRow(row) : null;
+    await client.query("COMMIT");
+    return { kind: "updated", draft: mapReplyDraftRow(row) };
+  } catch (error) {
+    try {
+      await client.query("ROLLBACK");
+    } catch {
+      // Preserve the original failure.
+    }
+    throw error;
+  } finally {
+    client.release();
+  }
 }
