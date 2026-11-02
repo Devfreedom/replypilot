@@ -12,6 +12,7 @@ import type {
 
 const OUTBOUND_MESSAGE_COLUMNS = `
   id,
+  workspace_id,
   conversation_id,
   reply_draft_id,
   provider,
@@ -27,11 +28,13 @@ const OUTBOUND_MESSAGE_COLUMNS = `
   sent_at,
   delivered_at,
   created_at,
-  updated_at
+  updated_at,
+  NULL::text AS customer_phone_e164
 `;
 
 const OUTBOUND_MESSAGE_RETURNING_COLUMNS = `
   message.id,
+  message.workspace_id,
   message.conversation_id,
   message.reply_draft_id,
   message.provider,
@@ -47,11 +50,13 @@ const OUTBOUND_MESSAGE_RETURNING_COLUMNS = `
   message.sent_at,
   message.delivered_at,
   message.created_at,
-  message.updated_at
+  message.updated_at,
+  NULL::text AS customer_phone_e164
 `;
 
 const OUTBOUND_MESSAGE_SELECT_COLUMNS = `
   message.id,
+  message.workspace_id,
   message.conversation_id,
   message.reply_draft_id,
   message.provider,
@@ -67,7 +72,8 @@ const OUTBOUND_MESSAGE_SELECT_COLUMNS = `
   message.sent_at,
   message.delivered_at,
   message.created_at,
-  message.updated_at
+  message.updated_at,
+  customer.phone_e164 AS customer_phone_e164
 `;
 
 function iso(value: Date | null): string | null {
@@ -398,6 +404,8 @@ export async function cancelUnauthorizedQueuedOutbound(
  * Claims a bounded batch with SKIP LOCKED. The returned attempts value is the
  * claim generation: completion updates require the same attempts value, so a
  * stale worker cannot overwrite a newer claim after recovery.
+ * The customer's E.164 phone number is resolved here so the provider receives
+ * it without an additional round-trip.
  */
 export async function claimQueuedOutboundMessages(
   pool: Pool,
@@ -439,8 +447,33 @@ export async function claimQueuedOutboundMessages(
             attempts = message.attempts + 1,
             updated_at = now()
         FROM claimed
+        JOIN whatsapp_conversations AS conv
+          ON conv.id = message.conversation_id
+         AND conv.workspace_id = message.workspace_id
+        JOIN customers AS cust
+          ON cust.id = conv.customer_id
+         AND cust.workspace_id = conv.workspace_id
         WHERE message.id = claimed.id
-        RETURNING ${OUTBOUND_MESSAGE_RETURNING_COLUMNS}
+        RETURNING
+          message.id,
+          message.workspace_id,
+          message.conversation_id,
+          message.reply_draft_id,
+          message.provider,
+          message.provider_message_id,
+          message.content,
+          message.status,
+          message.idempotency_key,
+          message.failure_reason,
+          message.attempts,
+          message.max_attempts,
+          message.queued_at,
+          message.started_at,
+          message.sent_at,
+          message.delivered_at,
+          message.created_at,
+          message.updated_at,
+          cust.phone_e164 AS customer_phone_e164
       `,
       [batchSize, providerName],
     );
