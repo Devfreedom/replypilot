@@ -1,5 +1,6 @@
 import type { Pool } from "pg";
 import {
+  OutboundProviderAmbiguousError,
   OutboundProviderError,
   type OutboundMessageProvider,
 } from "./provider.js";
@@ -9,6 +10,7 @@ import {
   claimQueuedOutboundMessages,
   isOutboundClaimAuthorized,
   markOutboundFailed,
+  markOutboundManualReview,
   markOutboundSent,
   recoverStaleSending,
 } from "./repository.js";
@@ -31,13 +33,16 @@ export type OutboundWorkerResult = Readonly<{
   sent: number;
   retried: number;
   failed: number;
+  manualReview: number;
   skipped: number;
 }>;
 
 /**
  * One bounded worker tick. Claims are committed before the provider call, so
- * the provider is never inside a database transaction. Completion updates are
- * conditional on the claim generation and status, making stale workers safe.
+ * the provider is never inside a database transaction. Draft mutations reject
+ * while a row is sending, so the final authorization check reserves the
+ * approved snapshot until the provider call completes. Provider idempotency
+ * controls whether an unknown outcome can be retried after worker recovery.
  */
 export async function runOutboundWorkerOnce(
   pool: Pool,
@@ -50,7 +55,12 @@ export async function runOutboundWorkerOnce(
   const staleAfterMs =
     options.staleAfterMs ?? DEFAULT_WORKER_STALE_AFTER_MS;
 
-  const recovered = await recoverStaleSending(pool, staleAfterMs);
+  const recovered = await recoverStaleSending(
+    pool,
+    staleAfterMs,
+    provider.name,
+    provider.idempotency,
+  );
   const cancelledBeforeClaim = await cancelUnauthorizedQueuedOutbound(pool);
   const claimed = await claimQueuedOutboundMessages(pool, batchSize);
 
@@ -58,6 +68,7 @@ export async function runOutboundWorkerOnce(
   let sent = 0;
   let retried = 0;
   let failed = 0;
+  let manualReview = 0;
   let skipped = 0;
 
   for (const row of claimed) {
@@ -89,25 +100,32 @@ export async function runOutboundWorkerOnce(
         skipped += 1;
       }
     } catch (error) {
+      const ambiguous =
+        error instanceof OutboundProviderAmbiguousError ||
+        !(error instanceof OutboundProviderError);
       const failureReason =
-        error instanceof OutboundProviderError
+        error instanceof Error
           ? error.message
-          : "Outbound provider failed.";
+          : "Outbound provider returned an unknown failure.";
 
       const retryDelayMs = Math.min(
         baseRetryDelayMs * 2 ** Math.max(0, row.attempts - 1),
         MAX_RETRY_DELAY_MS,
       );
 
-      const updated = await markOutboundFailed(
-        pool,
-        row,
-        failureReason,
-        retryDelayMs,
-      );
+      const updated =
+        ambiguous && provider.idempotency !== "guaranteed"
+          ? await markOutboundManualReview(
+              pool,
+              row,
+              `Provider outcome is ambiguous: ${failureReason} Reconcile with the provider before any further send.`,
+            )
+          : await markOutboundFailed(pool, row, failureReason, retryDelayMs);
 
       if (!updated) {
         skipped += 1;
+      } else if (updated.status === "manual_review") {
+        manualReview += 1;
       } else if (updated.status === "failed") {
         failed += 1;
       } else {
@@ -123,6 +141,7 @@ export async function runOutboundWorkerOnce(
     sent,
     retried,
     failed,
+    manualReview,
     skipped,
   };
 }
