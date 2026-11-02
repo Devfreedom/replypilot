@@ -113,7 +113,9 @@ function mapOutboundMessageHistoryRow(
       status: row.conversation_status,
     },
     canRetry:
-      row.status === "failed" && row.reply_draft_status === "approved",
+      row.status === "failed" &&
+      row.reply_draft_status === "approved" &&
+      row.content === row.reply_draft_content,
   };
 }
 
@@ -312,7 +314,8 @@ export async function listOutboundMessages(
           AS customer_display_name,
         customer.phone_e164 AS customer_phone_e164,
         customer.provider_contact_id AS customer_provider_contact_id,
-        draft.status AS reply_draft_status
+        draft.status AS reply_draft_status,
+        draft.draft_reply AS reply_draft_content
       FROM outbound_messages AS message
       JOIN whatsapp_conversations AS conversation
         ON conversation.id = message.conversation_id
@@ -360,16 +363,26 @@ export async function cancelUnauthorizedQueuedOutbound(
           next_attempt_at = NULL,
           updated_at = now()
       WHERE message.status = 'queued'
-        AND NOT EXISTS (
-          SELECT 1
-          FROM reply_drafts AS draft
-          JOIN whatsapp_conversations AS conversation
-            ON conversation.id = message.conversation_id
-           AND conversation.workspace_id = message.workspace_id
-          WHERE draft.id = message.reply_draft_id
-            AND draft.workspace_id = message.workspace_id
-            AND draft.status = 'approved'
-            AND conversation.status IN ('open', 'closed')
+        AND (
+          NOT EXISTS (
+            SELECT 1
+            FROM reply_drafts AS draft
+            JOIN whatsapp_conversations AS conversation
+              ON conversation.id = message.conversation_id
+             AND conversation.workspace_id = message.workspace_id
+            WHERE draft.id = message.reply_draft_id
+              AND draft.workspace_id = message.workspace_id
+              AND draft.status = 'approved'
+              AND draft.draft_reply = message.content
+              AND conversation.status IN ('open', 'closed')
+          )
+          OR EXISTS (
+            SELECT 1
+            FROM reply_drafts AS draft
+            WHERE draft.id = message.reply_draft_id
+              AND draft.workspace_id = message.workspace_id
+              AND draft.draft_reply IS DISTINCT FROM message.content
+          )
         )
     `,
   );
@@ -407,6 +420,7 @@ export async function claimQueuedOutboundMessages(
               WHERE draft.id = message.reply_draft_id
                 AND draft.workspace_id = message.workspace_id
                 AND draft.status = 'approved'
+                AND draft.draft_reply = message.content
                 AND conversation.status IN ('open', 'closed')
             )
           ORDER BY message.queued_at ASC, message.id ASC
@@ -462,6 +476,7 @@ export async function isOutboundClaimAuthorized(
         AND message.status = 'sending'
         AND message.attempts = $2
         AND draft.status = 'approved'
+        AND draft.draft_reply = message.content
         AND conversation.status IN ('open', 'closed')
       LIMIT 1
     `,

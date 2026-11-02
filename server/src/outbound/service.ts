@@ -20,6 +20,7 @@ export type QueueManualSendResult =
   | Readonly<{ kind: "not-found" }>
   | Readonly<{ kind: "not-approved" }>
   | Readonly<{ kind: "not-retryable" }>
+  | Readonly<{ kind: "content-changed" }>
   | Readonly<{ kind: "conversation-required" }>
   | Readonly<{ kind: "conversation-ambiguous" }>
   | Readonly<{ kind: "conversation-not-found" }>;
@@ -62,6 +63,23 @@ export async function queueManualSend(
     if (draft.status !== "approved") {
       await client.query("ROLLBACK");
       return { kind: "not-approved" };
+    }
+
+    const existingOutbound = await getOutboundMessageForDraft(
+      client,
+      input.workspaceId,
+      input.draftId,
+    );
+
+    // Never retry a historical snapshot against different approved text. The
+    // one-outbound-per-draft constraint means the owner must start a new draft
+    // for revised content rather than silently sending stale content.
+    if (
+      existingOutbound &&
+      existingOutbound.content !== draft.draft_reply
+    ) {
+      await client.query("ROLLBACK");
+      return { kind: "content-changed" };
     }
 
     const conversation = await resolveConversationForLead(client, {

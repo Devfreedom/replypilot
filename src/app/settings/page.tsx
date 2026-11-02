@@ -7,10 +7,10 @@ export default function SettingsPage() {
   return (
     <ProtectedApp>
       <AppShell active="settings" title="Business settings">
-        <div className="space-y-6">
+        <div className="mx-auto max-w-5xl px-4 pt-8 sm:px-6 lg:px-8">
           <MessagingSettings />
-          <BusinessSettings />
         </div>
+        <BusinessSettings />
       </AppShell>
     </ProtectedApp>
   );

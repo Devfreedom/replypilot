@@ -64,5 +64,6 @@ export type OutboundMessageHistoryRow = Readonly<
     customer_phone_e164: string | null;
     customer_provider_contact_id: string | null;
     reply_draft_status: string;
+    reply_draft_content: string;
   }
 >;

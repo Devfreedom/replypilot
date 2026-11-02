@@ -140,7 +140,10 @@ export function MessagingSettings() {
   }
 
   return (
-    <section className="card p-5 sm:p-6" aria-labelledby="messaging-settings">
+    <section
+      className="card mx-auto max-w-5xl p-5 sm:p-6"
+      aria-labelledby="messaging-settings"
+    >
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <h2

@@ -107,6 +107,14 @@ export function createReplyDraftsRouter({
       return;
     }
 
+    if (result.kind === "content-changed") {
+      response.status(409).json({
+        error:
+          "The draft content changed after this outbound message was created. Start a new draft to send the revised reply.",
+      });
+      return;
+    }
+
     response.status(200).json({ outboundMessage: result.outboundMessage });
   });
 
