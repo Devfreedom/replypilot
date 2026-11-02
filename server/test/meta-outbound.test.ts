@@ -1319,6 +1319,10 @@ test("26. Event processing remains workspace-isolated", async () => {
   const { conversationId } = await createTestCustomerAndConversation();
   const wamid = `wamid.workspace-iso-${randomUUID()}`;
   await insertTestOutboundRow({ conversationId, providerMessageId: wamid });
+  await pool.query(
+    "INSERT INTO workspaces (id, name) VALUES ($1, 'Other Test Workspace') ON CONFLICT (id) DO NOTHING",
+    [OTHER_WORKSPACE_ID],
+  );
 
   // Process the event for the WRONG workspace.
   const wrongWorkspaceResult = await processDeliveryStatusEvents(

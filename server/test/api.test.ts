@@ -5097,52 +5097,55 @@ test("WhatsApp webhook audits unknown statuses and ignores unrelated changes", a
 
 test("signed delivery webhook durably deduplicates, audits, and orders status events", async () => {
   const app = await startWhatsAppServer();
-  const createOutbound = async (label: string) => {
-    const { lead, conversationId } = await createLeadWithConversation(
-      { name: label },
-      {
-        senderWaId: label === "Delivery second" ? "2348031234567" : undefined,
-        senderPhoneNumber:
-          label === "Delivery second" ? "2348031234567" : undefined,
-      },
-    );
-    const draft = await createSavedDraftPayload(lead.id);
-    const approval = await approveSavedDraft(lead.id, draft.id, {
-      status: "approved",
-      sendPolicy: "approve_and_send",
-      conversationId,
-    });
-    assert.equal(approval.status, 200);
-    const outbound = (
-      await readJson<ReplyDraftApprovalPayload>(approval)
-    ).outboundMessage;
-    assert.ok(outbound);
-    return outbound;
-  };
-  const first = await createOutbound("Delivery first");
-  const second = await createOutbound("Delivery second");
-  const firstWamid = `wamid.delivery-${randomUUID()}`;
-  const secondWamid = `wamid.failed-${randomUUID()}`;
-  await pool.query(
-    `
-      UPDATE outbound_messages
-      SET status = 'sent', provider_message_id = $2, sent_at = now()
-      WHERE id = $1
-    `,
-    [first.id, firstWamid],
-  );
-  await pool.query(
-    `
-      UPDATE outbound_messages
-      SET status = 'sent', provider_message_id = $2, sent_at = now()
-      WHERE id = $1
-    `,
-    [second.id, secondWamid],
-  );
-
-  const t1 = "1760001000";
-  const t2 = "1760001002";
   try {
+    const createOutbound = async (label: string) => {
+      const identityOverrides =
+        label === "Delivery second"
+          ? {
+              senderWaId: "2348031234567",
+              senderPhoneNumber: "2348031234567",
+            }
+          : {};
+      const { lead, conversationId } = await createLeadWithConversation(
+        { name: label },
+        identityOverrides,
+      );
+      const draft = await createSavedDraftPayload(lead.id);
+      const approval = await approveSavedDraft(lead.id, draft.id, {
+        status: "approved",
+        sendPolicy: "approve_and_send",
+        conversationId,
+      });
+      assert.equal(approval.status, 200);
+      const outbound = (
+        await readJson<ReplyDraftApprovalPayload>(approval)
+      ).outboundMessage;
+      assert.ok(outbound);
+      return outbound;
+    };
+    const first = await createOutbound("Delivery first");
+    const second = await createOutbound("Delivery second");
+    const firstWamid = `wamid.delivery-${randomUUID()}`;
+    const secondWamid = `wamid.failed-${randomUUID()}`;
+    await pool.query(
+      `
+        UPDATE outbound_messages
+        SET status = 'sent', provider_message_id = $2, sent_at = now()
+        WHERE id = $1
+      `,
+      [first.id, firstWamid],
+    );
+    await pool.query(
+      `
+        UPDATE outbound_messages
+        SET status = 'sent', provider_message_id = $2, sent_at = now()
+        WHERE id = $1
+      `,
+      [second.id, secondWamid],
+    );
+
+    const t1 = "1760001000";
+    const t2 = "1760001002";
     const ordered = await postWhatsApp(
       app,
       whatsappDeliveryEnvelope([
