@@ -1,4 +1,5 @@
 import type { Pool, PoolClient } from "pg";
+import type { OutboundMessageStatus } from "../messaging/types.js";
 import { encodeMessageCursor, type MessageCursor } from "./cursor.js";
 import { normalizeWhatsAppPhoneE164 } from "./phone.js";
 import type {
@@ -22,6 +23,8 @@ type ConversationRow = Readonly<{
   last_message_preview: string | null;
   last_message_type: string | null;
   last_message_status: WhatsAppMessageProcessingStatus | null;
+  last_message_direction: "inbound" | "outbound" | null;
+  last_message_outbound_status: OutboundMessageStatus | null;
   created_at: Date;
   updated_at: Date;
 }>;
@@ -33,7 +36,9 @@ type MessageRow = Readonly<{
   message_type: string;
   text_content: string | null;
   provider_timestamp: Date;
-  processing_status: WhatsAppMessageProcessingStatus;
+  processing_status: WhatsAppMessageProcessingStatus | null;
+  outbound_status: OutboundMessageStatus | null;
+  outbound_failure_reason: string | null;
   created_at: Date;
 }>;
 
@@ -58,6 +63,8 @@ type ConversationSummaryRow = Readonly<{
   last_message_preview: string | null;
   last_message_type: string | null;
   last_message_status: WhatsAppMessageProcessingStatus | null;
+  last_message_direction: "inbound" | "outbound" | null;
+  last_message_outbound_status: OutboundMessageStatus | null;
   created_at: Date;
   updated_at: Date;
 }>;
@@ -73,6 +80,8 @@ const CONVERSATION_SELECT = `
     left(latest.text_content, 160) AS last_message_preview,
     latest.message_type AS last_message_type,
     latest.processing_status AS last_message_status,
+    latest.direction AS last_message_direction,
+    latest.outbound_status AS last_message_outbound_status,
     conversation.created_at,
     conversation.updated_at
   FROM whatsapp_conversations AS conversation
@@ -81,8 +90,10 @@ const CONVERSATION_SELECT = `
       message.provider_timestamp,
       message.text_content,
       message.message_type,
-      message.processing_status
-    FROM whatsapp_messages AS message
+      message.processing_status,
+      message.direction,
+      message.outbound_status
+    FROM conversation_thread_messages AS message
     WHERE message.workspace_id = conversation.workspace_id
       AND message.conversation_id = conversation.id
     ORDER BY message.provider_timestamp DESC, message.created_at DESC, message.id DESC
@@ -106,6 +117,8 @@ const CONVERSATION_SUMMARY_SELECT = `
     left(latest.text_content, 160) AS last_message_preview,
     latest.message_type AS last_message_type,
     latest.processing_status AS last_message_status,
+    latest.direction AS last_message_direction,
+    latest.outbound_status AS last_message_outbound_status,
     conversation.created_at,
     conversation.updated_at
   FROM whatsapp_conversations AS conversation
@@ -117,8 +130,10 @@ const CONVERSATION_SUMMARY_SELECT = `
       message.provider_timestamp,
       message.text_content,
       message.message_type,
-      message.processing_status
-    FROM whatsapp_messages AS message
+      message.processing_status,
+      message.direction,
+      message.outbound_status
+    FROM conversation_thread_messages AS message
     WHERE message.workspace_id = conversation.workspace_id
       AND message.conversation_id = conversation.id
     ORDER BY message.provider_timestamp DESC, message.created_at DESC, message.id DESC
@@ -139,6 +154,8 @@ function mapConversationRow(row: ConversationRow): WhatsAppConversation {
     lastMessagePreview: row.last_message_preview,
     lastMessageType: row.last_message_type,
     lastMessageStatus: row.last_message_status,
+    lastMessageDirection: row.last_message_direction,
+    lastMessageOutboundStatus: row.last_message_outbound_status,
     createdAt: row.created_at.toISOString(),
     updatedAt: row.updated_at.toISOString(),
   };
@@ -153,6 +170,8 @@ function mapMessageRow(row: MessageRow): WhatsAppMessage {
     text: row.text_content,
     providerTimestamp: row.provider_timestamp.toISOString(),
     processingStatus: row.processing_status,
+    outboundStatus: row.outbound_status,
+    failureReason: row.outbound_failure_reason,
     createdAt: row.created_at.toISOString(),
   };
 }
@@ -179,6 +198,8 @@ function mapConversationSummaryRow(
     lastMessagePreview: row.last_message_preview,
     lastMessageType: row.last_message_type,
     lastMessageStatus: row.last_message_status,
+    lastMessageDirection: row.last_message_direction,
+    lastMessageOutboundStatus: row.last_message_outbound_status,
     createdAt: row.created_at.toISOString(),
     updatedAt: row.updated_at.toISOString(),
   };
@@ -701,8 +722,10 @@ export async function listMessagesForConversation(
         text_content,
         provider_timestamp,
         processing_status,
+        outbound_status,
+        outbound_failure_reason,
         created_at
-      FROM whatsapp_messages
+      FROM conversation_thread_messages
       WHERE workspace_id = $1
         AND conversation_id = $2
       ORDER BY provider_timestamp ASC, created_at ASC, id ASC
@@ -794,8 +817,10 @@ export async function listMessagesForConversationPage(
         text_content,
         provider_timestamp,
         processing_status,
+        outbound_status,
+        outbound_failure_reason,
         created_at
-      FROM whatsapp_messages
+      FROM conversation_thread_messages
       WHERE workspace_id = $1
         AND conversation_id = $2
       ORDER BY provider_timestamp ASC, created_at ASC, id ASC
@@ -845,7 +870,7 @@ async function cursorBelongsToConversation(
   const result = await pool.query(
     `
       SELECT 1
-      FROM whatsapp_messages
+      FROM conversation_thread_messages
       WHERE workspace_id = $1
         AND conversation_id = $2
         AND provider_timestamp = (
@@ -932,12 +957,14 @@ export async function listMessagesForConversationCursor(
         text_content,
         provider_timestamp,
         processing_status,
+        outbound_status,
+        outbound_failure_reason,
         created_at,
         (extract(epoch FROM provider_timestamp) * 1000000)::bigint::text
           AS provider_timestamp_us,
         (extract(epoch FROM created_at) * 1000000)::bigint::text
           AS created_at_us
-      FROM whatsapp_messages
+      FROM conversation_thread_messages
       WHERE workspace_id = $1
         AND conversation_id = $2
         ${cursorFilter}

@@ -13,6 +13,9 @@ import {
 } from "./auth/config.js";
 import { createBusinessRouter } from "./business/routes.js";
 import { createLeadsRouter } from "./leads/routes.js";
+import { createOutboundMessagesRouter } from "./outbound/routes.js";
+import { createReplyDraftsRouter } from "./reply-drafts/routes.js";
+import { createSettingsRouter } from "./settings/messaging-routes.js";
 import { createConversationsRouter } from "./whatsapp/conversation-routes.js";
 import { createWhatsAppInboxRouter } from "./whatsapp/inbox-routes.js";
 import type { WhatsAppIntegrationConfig } from "./whatsapp/types.js";
@@ -81,6 +84,12 @@ export function createApp({
     createLeadsRouter({ pool, auth, replyDraftProvider }),
   );
   app.use("/api/business", createBusinessRouter({ pool, auth }));
+  app.use("/api/settings", createSettingsRouter({ pool, auth }));
+  app.use("/api/reply-drafts", createReplyDraftsRouter({ pool, auth }));
+  app.use(
+    "/api/outbound-messages",
+    createOutboundMessagesRouter({ pool, auth }),
+  );
   app.use("/api/whatsapp", createWhatsAppInboxRouter({ pool, auth }));
   app.use("/api/conversations", createConversationsRouter({ pool, auth }));
 

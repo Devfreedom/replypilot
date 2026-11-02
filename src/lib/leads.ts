@@ -1,4 +1,9 @@
 import { z } from "zod";
+import {
+  APPROVAL_SEND_POLICIES,
+  outboundMessageSchema,
+  type OutboundMessage,
+} from "./messaging";
 
 export const LEAD_STATUSES = [
   "New",
@@ -53,12 +58,17 @@ const replyDraftSchema = z.object({
   isDemo: z.literal(true),
 });
 
+const approvalSendPolicySchema = z.enum(APPROVAL_SEND_POLICIES);
+
 const savedReplyDraftSchema = replyDraftSchema.extend({
   id: z.uuid(),
   leadId: z.uuid(),
   status: z.enum(REPLY_DRAFT_REVIEW_STATUSES),
   sources: z.array(replyDraftSourceSchema),
   approvedAt: z.iso.datetime({ offset: true }).nullable(),
+  approvedBy: z.uuid().nullable(),
+  sendPolicyOverride: approvalSendPolicySchema.nullable(),
+  approvalSendPolicy: approvalSendPolicySchema.nullable(),
   createdAt: z.iso.datetime({ offset: true }),
   updatedAt: z.iso.datetime({ offset: true }),
 });
@@ -66,6 +76,13 @@ const savedReplyDraftSchema = replyDraftSchema.extend({
 const replyDraftResponseSchema = z.object({ draft: savedReplyDraftSchema });
 const replyDraftsResponseSchema = z.object({
   drafts: z.array(savedReplyDraftSchema),
+});
+const approvalResponseSchema = z.object({
+  draft: savedReplyDraftSchema,
+  outboundMessage: outboundMessageSchema.nullable(),
+});
+const sendResponseSchema = z.object({
+  outboundMessage: outboundMessageSchema,
 });
 
 export type LeadStatus = (typeof LEAD_STATUSES)[number];
@@ -122,6 +139,25 @@ export function parseReplyDraftsResponse(
 ): SavedReplyDraft[] | null {
   const parsed = replyDraftsResponseSchema.safeParse(data);
   return parsed.success ? parsed.data.drafts : null;
+}
+
+export type ReplyDraftApprovalResult = Readonly<{
+  draft: SavedReplyDraft;
+  outboundMessage: OutboundMessage | null;
+}>;
+
+export function parseReplyDraftApprovalResponse(
+  data: unknown,
+): ReplyDraftApprovalResult | null {
+  const parsed = approvalResponseSchema.safeParse(data);
+  return parsed.success ? parsed.data : null;
+}
+
+export function parseSendReplyDraftResponse(
+  data: unknown,
+): OutboundMessage | null {
+  const parsed = sendResponseSchema.safeParse(data);
+  return parsed.success ? parsed.data.outboundMessage : null;
 }
 
 export function isFollowUpDue(lead: Lead, now = Date.now()): boolean {

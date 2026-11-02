@@ -24,6 +24,7 @@ import {
   mergeConversations,
   mergeMessages,
   messageDayKey,
+  outboundMessageStatusLabel,
   parseConversationMessagesResponse,
   parseConversationsResponse,
   type ConversationFilter,
@@ -31,6 +32,7 @@ import {
   type WhatsAppConversation,
   type WhatsAppMessage,
 } from "@/lib/whatsapp";
+import { OUTBOUND_STATUS_DESCRIPTIONS } from "@/lib/messaging";
 
 const CONVERSATION_PAGE_SIZE = 30;
 const MESSAGE_PAGE_SIZE = 30;
@@ -144,6 +146,11 @@ function DayDivider({ value }: { value: string }) {
 function MessageBubble({ message }: { message: WhatsAppMessage }) {
   const outbound = message.direction === "outbound";
   const unsupported = message.processingStatus === "unsupported";
+  const outboundStatus = outbound
+    ? outboundMessageStatusLabel(message.outboundStatus)
+    : null;
+  const outboundFailed = outbound && message.outboundStatus === "failed";
+  const outboundCancelled = outbound && message.outboundStatus === "cancelled";
 
   return (
     <div className={`flex ${outbound ? "justify-end" : "justify-start"}`}>
@@ -151,9 +158,13 @@ function MessageBubble({ message }: { message: WhatsAppMessage }) {
         className={`max-w-[85%] rounded-2xl px-4 py-2.5 shadow-sm ring-1 sm:max-w-[75%] ${
           unsupported
             ? "bg-warning-soft text-warning-ink ring-[color-mix(in_oklab,var(--rp-warning)_25%,transparent)]"
-            : outbound
-              ? "bg-accent text-on-accent ring-transparent"
-              : "bg-raised text-ink ring-line"
+            : outboundFailed
+              ? "bg-danger-soft text-danger-ink ring-[color-mix(in_oklab,var(--rp-danger)_25%,transparent)]"
+              : outboundCancelled
+                ? "bg-warning-soft text-warning-ink ring-[color-mix(in_oklab,var(--rp-warning)_25%,transparent)]"
+                : outbound
+                  ? "bg-accent text-on-accent ring-transparent"
+                  : "bg-raised text-ink ring-line"
         }`}
       >
         <span className="sr-only">
@@ -182,6 +193,21 @@ function MessageBubble({ message }: { message: WhatsAppMessage }) {
         >
           {formatMessageTime(message.providerTimestamp)}
         </time>
+        {outboundStatus ? (
+          <p
+            title={
+              message.outboundStatus
+                ? OUTBOUND_STATUS_DESCRIPTIONS[message.outboundStatus]
+                : undefined
+            }
+            className={`mt-0.5 text-right text-[11px] font-medium ${
+              outbound ? "opacity-90" : "text-ink-soft"
+            }`}
+          >
+            {outboundStatus}
+            {message.failureReason ? ` · ${message.failureReason}` : ""}
+          </p>
+        ) : null}
       </article>
     </div>
   );
@@ -559,8 +585,9 @@ function ConversationThread({
       </div>
 
       <p className="border-t border-line px-4 py-2.5 text-[11px] text-ink-faint sm:px-5">
-        Inbound-only view. Reply drafting and WhatsApp sending are not connected
-        to this inbox.
+        Inbound messages come from the WhatsApp webhook. Outbound entries
+        reflect ReplyPilot&apos;s mock queue only; they are not real WhatsApp
+        deliveries.
       </p>
     </>
   );
@@ -771,9 +798,10 @@ export function WhatsAppInbox() {
 
       <div className="mt-4 space-y-3">
         <Alert tone="info">
-          <span className="font-semibold">Inbound-only inbox.</span> Messages
-          delivered to your connected WhatsApp number appear here. Outbound
-          replies, templates, and AI drafting are not connected yet.
+          <span className="font-semibold">Inbound WhatsApp integration.</span>{" "}
+          Inbound webhook messages appear here. ReplyPilot&apos;s separate
+          outbound queue uses a mock provider; no real WhatsApp sending,
+          templates, or automatic replies are connected.
         </Alert>
 
         {sessionExpired ? (

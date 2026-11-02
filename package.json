@@ -10,6 +10,8 @@
     "dev:api": "node --env-file-if-exists=.env --import tsx --watch server/src/index.ts",
     "build:api": "tsc -p server/tsconfig.json",
     "start:api": "node --env-file-if-exists=.env server/dist/index.js",
+    "worker:outbound": "node --env-file-if-exists=.env --import tsx server/src/outbound/worker-cli.ts",
+    "start:worker": "node --env-file-if-exists=.env server/dist/outbound/worker-cli.js",
     "typecheck:api": "tsc -p server/tsconfig.test.json",
     "test:api": "node --env-file-if-exists=.env --import tsx --test server/test/*.test.ts",
     "test:web": "node --import tsx --test src/lib/*.test.ts",

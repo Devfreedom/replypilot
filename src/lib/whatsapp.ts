@@ -1,6 +1,12 @@
 import { z } from "zod";
+import {
+  OUTBOUND_MESSAGE_STATUSES,
+  OUTBOUND_STATUS_LABELS,
+  type OutboundMessageStatus,
+} from "./messaging";
 
 const processingStatusSchema = z.enum(["stored", "unsupported"]);
+const outboundStatusSchema = z.enum(OUTBOUND_MESSAGE_STATUSES);
 
 export const CONVERSATION_STATUSES = ["open", "closed", "archived"] as const;
 export type ConversationStatus = (typeof CONVERSATION_STATUSES)[number];
@@ -38,6 +44,8 @@ const conversationSchema = z.object({
   lastMessagePreview: z.string().nullable(),
   lastMessageType: z.string().nullable(),
   lastMessageStatus: processingStatusSchema.nullable(),
+  lastMessageDirection: z.enum(["inbound", "outbound"]).nullable(),
+  lastMessageOutboundStatus: outboundStatusSchema.nullable(),
   createdAt: z.iso.datetime({ offset: true }),
   updatedAt: z.iso.datetime({ offset: true }),
 });
@@ -49,7 +57,9 @@ const messageSchema = z.object({
   messageType: z.string(),
   text: z.string().nullable(),
   providerTimestamp: z.iso.datetime({ offset: true }),
-  processingStatus: processingStatusSchema,
+  processingStatus: processingStatusSchema.nullable(),
+  outboundStatus: outboundStatusSchema.nullable(),
+  failureReason: z.string().nullable(),
   createdAt: z.iso.datetime({ offset: true }),
 });
 
@@ -204,6 +214,12 @@ export function conversationInitials(
   return digits.slice(-2) || "#";
 }
 
+export function outboundMessageStatusLabel(
+  status: OutboundMessageStatus | null,
+): string | null {
+  return status ? OUTBOUND_STATUS_LABELS[status] : null;
+}
+
 export function conversationPreview(
   conversation: WhatsAppConversation,
 ): string {
@@ -215,7 +231,18 @@ export function conversationPreview(
     return `Unsupported ${conversation.lastMessageType} message`;
   }
 
-  return conversation.lastMessagePreview?.trim() || "Message content unavailable";
+  const preview =
+    conversation.lastMessagePreview?.trim() || "Message content unavailable";
+
+  if (conversation.lastMessageDirection !== "outbound") {
+    return preview;
+  }
+
+  const status = outboundMessageStatusLabel(
+    conversation.lastMessageOutboundStatus,
+  );
+
+  return status ? `${status}: ${preview}` : `You: ${preview}`;
 }
 
 export function mergeConversations(

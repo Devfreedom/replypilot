@@ -6,7 +6,11 @@ import { useAuth } from "./auth-provider";
 import { ThemeSelect } from "./theme";
 import { dashboardViewHref, type View } from "@/lib/leads";
 
-export type ShellActiveKey = "dashboard" | "whatsapp" | "settings";
+export type ShellActiveKey =
+  | "dashboard"
+  | "whatsapp"
+  | "outbound"
+  | "settings";
 
 const ACCOUNT_NAV_ITEMS: {
   key: Exclude<ShellActiveKey, "dashboard">;
@@ -20,6 +24,14 @@ const ACCOUNT_NAV_ITEMS: {
     href: "/whatsapp",
     icon: (
       <NavIcon path="M21 11.5a8.4 8.4 0 0 1-9 8.4 8.9 8.9 0 0 1-4.1-1L3 20l1.2-4.7A8.4 8.4 0 1 1 21 11.5z" />
+    ),
+  },
+  {
+    key: "outbound",
+    label: "Outbound messages",
+    href: "/outbound",
+    icon: (
+      <NavIcon path="M22 2 11 13M22 2l-7 20-4-9-9-4 20-7z" />
     ),
   },
   {

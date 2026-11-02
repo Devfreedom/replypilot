@@ -2,13 +2,30 @@
 
 import { useEffect, useRef, useState } from "react";
 import {
+  parseReplyDraftApprovalResponse,
   parseReplyDraftsResponse,
   parseSavedReplyDraftResponse,
+  parseSendReplyDraftResponse,
   type Lead,
   type ReplyDraftSource,
   type ReplyDraft,
   type SavedReplyDraft,
 } from "@/lib/leads";
+import {
+  APPROVAL_SEND_POLICIES,
+  APPROVAL_SEND_POLICY_LABELS,
+  OUTBOUND_STATUS_DESCRIPTIONS,
+  OUTBOUND_STATUS_LABELS,
+  parseMessagingSettingsResponse,
+  sendPolicyChoiceForDraftSelection,
+  type ApprovalSendPolicy,
+  type OutboundMessage,
+} from "@/lib/messaging";
+import {
+  conversationDisplayName,
+  parseConversationsResponse,
+  type WhatsAppConversation,
+} from "@/lib/whatsapp";
 
 async function readJson(response: Response): Promise<unknown> {
   try {
@@ -59,6 +76,11 @@ const sourceTypeLabels: Record<ReplyDraftSource["type"], string> = {
   faq: "FAQ",
   policy: "Policy",
 };
+
+type SendPolicyChoice = "default" | ApprovalSendPolicy;
+
+const inputClass = "input mt-1";
+const labelClass = "field-label";
 
 function StatusBadge({ status }: { status: SavedReplyDraft["status"] }) {
   const approved = status === "approved";
@@ -145,13 +167,26 @@ export function DraftReplyDialog({
   const [editedReply, setEditedReply] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [pendingAction, setPendingAction] = useState<
-    "save" | "approve" | "unapprove" | "regenerate" | null
+    "save" | "approve" | "unapprove" | "regenerate" | "new" | "send" | null
   >(null);
   const [error, setError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [validationError, setValidationError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [copyMessage, setCopyMessage] = useState<string | null>(null);
+  const [defaultApprovalSendPolicy, setDefaultApprovalSendPolicy] =
+    useState<ApprovalSendPolicy>("approve_only");
+  const [sendPolicyChoice, setSendPolicyChoice] =
+    useState<SendPolicyChoice>("default");
+  const [conversations, setConversations] = useState<WhatsAppConversation[]>(
+    [],
+  );
+  const [selectedConversationId, setSelectedConversationId] = useState("");
+  const [approvalContextError, setApprovalContextError] = useState<
+    string | null
+  >(null);
+  const [outboundMessage, setOutboundMessage] =
+    useState<OutboundMessage | null>(null);
 
   const selectedDraft =
     drafts.find((draft) => draft.id === selectedDraftId) ?? null;
@@ -159,8 +194,27 @@ export function DraftReplyDialog({
     ? editedReply !== selectedDraft.draftReply
     : false;
   const isBusy = pendingAction !== null;
+  const effectiveSendPolicy: ApprovalSendPolicy =
+    sendPolicyChoice === "default"
+      ? defaultApprovalSendPolicy
+      : sendPolicyChoice;
+  const eligibleConversations = lead
+    ? conversations.filter(
+        (conversation) =>
+          conversation.leadId === lead.id &&
+          (conversation.status === "open" ||
+            conversation.status === "closed"),
+      )
+    : [];
 
   function replaceDraft(nextDraft: SavedReplyDraft) {
+    setSendPolicyChoice((choice) =>
+      sendPolicyChoiceForDraftSelection(
+        selectedDraftId,
+        nextDraft.id,
+        choice,
+      ),
+    );
     setDrafts((current) => {
       const exists = current.some((draft) => draft.id === nextDraft.id);
 
@@ -177,12 +231,88 @@ export function DraftReplyDialog({
   }
 
   function selectDraft(draft: SavedReplyDraft) {
+    setSendPolicyChoice((choice) =>
+      sendPolicyChoiceForDraftSelection(
+        selectedDraftId,
+        draft.id,
+        choice,
+      ),
+    );
     setSelectedDraftId(draft.id);
     setEditedReply(draft.draftReply);
     setActionError(null);
     setValidationError(null);
     setNotice(null);
     setCopyMessage(null);
+    setOutboundMessage(null);
+  }
+
+  async function loadApprovalContext(selectedLead: Lead) {
+    setApprovalContextError(null);
+
+    try {
+      const [settingsResponse, openResponse, closedResponse] =
+        await Promise.all([
+          fetch("/api/settings/messaging"),
+          fetch("/api/conversations?status=open&limit=100"),
+          fetch("/api/conversations?status=closed&limit=100"),
+        ]);
+      const [settingsData, openData, closedData] = await Promise.all([
+        readJson(settingsResponse),
+        readJson(openResponse),
+        readJson(closedResponse),
+      ]);
+
+      if (settingsResponse.ok) {
+        const settings = parseMessagingSettingsResponse(settingsData);
+
+        if (settings) {
+          setDefaultApprovalSendPolicy(settings.defaultApprovalSendPolicy);
+        }
+      }
+
+      if (!openResponse.ok || !closedResponse.ok) {
+        setApprovalContextError(
+          errorMessage(
+            openData,
+            "Unable to load WhatsApp conversations for this lead.",
+          ),
+        );
+        return;
+      }
+
+      const open = parseConversationsResponse(openData);
+      const closed = parseConversationsResponse(closedData);
+
+      if (!open || !closed) {
+        setApprovalContextError(
+          "The conversation service returned an unexpected response.",
+        );
+        return;
+      }
+
+      const byId = new Map<string, WhatsAppConversation>();
+
+      for (const conversation of [...open.conversations, ...closed.conversations]) {
+        byId.set(conversation.id, conversation);
+      }
+
+      const eligible = [...byId.values()].filter(
+        (conversation) =>
+          conversation.leadId === selectedLead.id &&
+          (conversation.status === "open" ||
+            conversation.status === "closed"),
+      );
+
+      setConversations(eligible);
+      setSelectedConversationId(
+        eligible.length === 1 ? eligible[0].id : "",
+      );
+    } catch {
+      setApprovalContextError(
+        "Unable to load approval settings and conversations.",
+      );
+    }
   }
 
   async function loadDrafts(selectedLead: Lead) {
@@ -274,7 +404,11 @@ export function DraftReplyDialog({
 
       if (loadedLeadIdRef.current !== lead.id) {
         loadedLeadIdRef.current = lead.id;
+        setSendPolicyChoice("default");
+        setSelectedConversationId("");
+        setOutboundMessage(null);
         void loadDrafts(lead);
+        void loadApprovalContext(lead);
       }
     } else {
       requestIdRef.current += 1;
@@ -339,6 +473,25 @@ export function DraftReplyDialog({
   async function updateStatus(status: "draft" | "approved") {
     if (!lead || !selectedDraft) return;
 
+    if (status === "approved" && effectiveSendPolicy === "approve_and_send") {
+      if (eligibleConversations.length === 0) {
+        setActionError(
+          "This lead has no active WhatsApp conversation. Link a conversation before using approve and send.",
+        );
+        return;
+      }
+
+      if (
+        eligibleConversations.length > 1 &&
+        selectedConversationId === ""
+      ) {
+        setValidationError(
+          "Choose which WhatsApp conversation should receive this reply.",
+        );
+        return;
+      }
+    }
+
     setPendingAction(status === "approved" ? "approve" : "unapprove");
     setActionError(null);
     setValidationError(null);
@@ -346,12 +499,28 @@ export function DraftReplyDialog({
     setCopyMessage(null);
 
     try {
+      const body: {
+        status: "draft" | "approved";
+        sendPolicy?: ApprovalSendPolicy;
+        conversationId?: string;
+      } = { status };
+
+      if (status === "approved") {
+        if (sendPolicyChoice !== "default") {
+          body.sendPolicy = sendPolicyChoice;
+        }
+
+        if (selectedConversationId) {
+          body.conversationId = selectedConversationId;
+        }
+      }
+
       const response = await fetch(
         `/api/leads/${lead.id}/reply-drafts/${selectedDraft.id}`,
         {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ status }),
+          body: JSON.stringify(body),
         },
       );
       const data = await readJson(response);
@@ -367,6 +536,25 @@ export function DraftReplyDialog({
         );
       }
 
+      if (status === "approved") {
+        const result = parseReplyDraftApprovalResponse(data);
+
+        if (!result) {
+          throw new Error(
+            "The draft service returned an unexpected response.",
+          );
+        }
+
+        replaceDraft(result.draft);
+        setOutboundMessage(result.outboundMessage);
+        setNotice(
+          result.outboundMessage
+            ? `Draft approved and ${OUTBOUND_STATUS_LABELS[result.outboundMessage.status].toLowerCase()} for the mock worker. Provider acceptance is not delivery.`
+            : "Draft marked approved for review. No customer message has been sent.",
+        );
+        return;
+      }
+
       const updatedDraft = parseSavedReplyDraftResponse(data);
 
       if (!updatedDraft) {
@@ -374,16 +562,127 @@ export function DraftReplyDialog({
       }
 
       replaceDraft(updatedDraft);
+      setOutboundMessage(null);
       setNotice(
-        status === "approved"
-          ? "Draft marked approved for review. This is a review status only; no customer message has been sent."
-          : "Draft returned to draft status. Review the text and approve it when ready.",
+        "Draft returned to draft status. Review the text and approve it when ready.",
       );
     } catch (requestError) {
       setActionError(
         requestError instanceof Error
           ? requestError.message
           : "Unable to update the draft status.",
+      );
+    } finally {
+      setPendingAction(null);
+    }
+  }
+
+  async function queueApprovedSend() {
+    if (!lead || !selectedDraft) return;
+
+    if (eligibleConversations.length === 0) {
+      setActionError(
+        "This lead has no active WhatsApp conversation. Link a conversation before sending.",
+      );
+      return;
+    }
+
+    if (eligibleConversations.length > 1 && selectedConversationId === "") {
+      setValidationError(
+        "Choose which WhatsApp conversation should receive this reply.",
+      );
+      return;
+    }
+
+    setPendingAction("send");
+    setActionError(null);
+    setValidationError(null);
+    setNotice(null);
+    setCopyMessage(null);
+
+    try {
+      const body: { conversationId?: string } = {};
+
+      if (selectedConversationId) {
+        body.conversationId = selectedConversationId;
+      }
+
+      const response = await fetch(
+        `/api/reply-drafts/${selectedDraft.id}/send`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        },
+      );
+      const data = await readJson(response);
+
+      if (!response.ok) {
+        throw new Error(
+          errorMessage(data, "Unable to queue the approved reply."),
+        );
+      }
+
+      const queued = parseSendReplyDraftResponse(data);
+
+      if (!queued) {
+        throw new Error("The draft service returned an unexpected response.");
+      }
+
+      setOutboundMessage(queued);
+      setNotice(
+        `Approved reply ${OUTBOUND_STATUS_LABELS[queued.status].toLowerCase()} for the mock worker. Provider acceptance is not delivery.`,
+      );
+    } catch (requestError) {
+      setActionError(
+        requestError instanceof Error
+          ? requestError.message
+          : "Unable to queue the approved reply.",
+      );
+    } finally {
+      setPendingAction(null);
+    }
+  }
+
+  async function createNewDraft() {
+    if (!lead) return;
+
+    setPendingAction("new");
+    setActionError(null);
+    setValidationError(null);
+    setNotice(null);
+    setCopyMessage(null);
+
+    try {
+      const response = await fetch(`/api/leads/${lead.id}/reply-drafts`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      const data = await readJson(response);
+
+      if (!response.ok) {
+        throw new Error(
+          errorMessage(data, "Unable to create a new draft reply."),
+        );
+      }
+
+      const newDraft = parseSavedReplyDraftResponse(data);
+
+      if (!newDraft) {
+        throw new Error("The draft service returned an unexpected response.");
+      }
+
+      replaceDraft(newDraft);
+      setOutboundMessage(null);
+      setNotice(
+        "New draft created from the current approved business facts. Review and edit it before approval.",
+      );
+    } catch (requestError) {
+      setActionError(
+        requestError instanceof Error
+          ? requestError.message
+          : "Unable to create a new draft reply.",
       );
     } finally {
       setPendingAction(null);
@@ -498,8 +797,9 @@ export function DraftReplyDialog({
         className="mt-5 rounded-xl border border-[color-mix(in_oklab,var(--rp-warning)_25%,transparent)] bg-warning-soft px-4 py-3 text-sm leading-6 text-warning-ink"
       >
         Demonstration output from ReplyPilot&apos;s mock provider. No live AI
-        model was used. Review before sending manually; approval here does not
-        send a message.
+        model was used. Approval records your review; approve and queue adds the
+        reply to the mock outbound worker. Nothing is sent to WhatsApp in this
+        milestone.
       </p>
 
       {isLoading ? (
@@ -532,6 +832,157 @@ export function DraftReplyDialog({
               </p>
             ) : null}
           </div>
+
+          {selectedDraft.status === "draft" ? (
+            <section
+              aria-labelledby="approval-behaviour-title"
+              className="rounded-xl border border-line bg-hushed p-4"
+            >
+              <h3
+                id="approval-behaviour-title"
+                className="text-sm font-semibold text-ink"
+              >
+                Approval behaviour
+              </h3>
+              <p className="mt-1 text-xs leading-5 text-ink-soft">
+                Workspace default:{" "}
+                <strong className="text-ink">
+                  {APPROVAL_SEND_POLICY_LABELS[defaultApprovalSendPolicy]}
+                </strong>
+                . Approving always records your review; approve and queue also
+                adds the reply to the mock outbound worker.
+              </p>
+              <label className={`${labelClass} mt-3`}>
+                On approval
+                <select
+                  value={sendPolicyChoice}
+                  onChange={(event) =>
+                    setSendPolicyChoice(
+                      event.target.value as SendPolicyChoice,
+                    )
+                  }
+                  disabled={isBusy}
+                  className={inputClass}
+                >
+                  <option value="default">
+                    Use workspace default (
+                    {APPROVAL_SEND_POLICY_LABELS[defaultApprovalSendPolicy]})
+                  </option>
+                  {APPROVAL_SEND_POLICIES.map((policy) => (
+                    <option key={policy} value={policy}>
+                      {APPROVAL_SEND_POLICY_LABELS[policy]}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              {effectiveSendPolicy === "approve_and_send" ? (
+                eligibleConversations.length === 0 ? (
+                  <p className="mt-3 rounded-lg bg-warning-soft px-3 py-2 text-xs leading-5 text-warning-ink">
+                    No active WhatsApp conversation is linked to this lead.
+                    Approve and queue requires an explicit conversation.
+                  </p>
+                ) : eligibleConversations.length === 1 ? (
+                  <p className="mt-3 text-xs leading-5 text-ink-soft">
+                    Queues to{" "}
+                    <strong className="text-ink">
+                      {conversationDisplayName(eligibleConversations[0])}
+                    </strong>
+                    .
+                  </p>
+                ) : (
+                  <label className={`${labelClass} mt-3`}>
+                    Conversation
+                    <select
+                      value={selectedConversationId}
+                      onChange={(event) =>
+                        setSelectedConversationId(event.target.value)
+                      }
+                      disabled={isBusy}
+                      required
+                      className={inputClass}
+                    >
+                      <option value="">Choose a conversation</option>
+                      {eligibleConversations.map((conversation) => (
+                        <option key={conversation.id} value={conversation.id}>
+                          {conversationDisplayName(conversation)} ·{" "}
+                          {conversation.status}
+                        </option>
+                      ))}
+                    </select>
+                    <span className="help-text mt-1">
+                      This lead has multiple active conversations. Choose one
+                      explicitly; ReplyPilot will not guess.
+                    </span>
+                  </label>
+                )
+              ) : null}
+
+              {approvalContextError ? (
+                <p role="alert" className="mt-3 text-xs text-danger-ink">
+                  {approvalContextError}
+                </p>
+              ) : null}
+            </section>
+          ) : (
+            <section className="rounded-xl border border-line bg-hushed p-4">
+              <h3 className="text-sm font-semibold text-ink">
+                Approval snapshot
+              </h3>
+              <p className="mt-1 text-xs leading-5 text-ink-soft">
+                Effective policy:{" "}
+                <strong className="text-ink">
+                  {selectedDraft.approvalSendPolicy
+                    ? APPROVAL_SEND_POLICY_LABELS[
+                        selectedDraft.approvalSendPolicy
+                      ]
+                    : "Not recorded for this approval"}
+                </strong>
+                {selectedDraft.sendPolicyOverride
+                  ? ` · per-draft override: ${
+                      APPROVAL_SEND_POLICY_LABELS[
+                        selectedDraft.sendPolicyOverride
+                      ]
+                    }`
+                  : " · workspace default"}
+                . The approved reply text is the content snapshot used for any
+                outbound attempt.
+              </p>
+            </section>
+          )}
+
+          {outboundMessage ? (
+            <section
+              aria-labelledby="outbound-message-title"
+              className="rounded-xl border border-line bg-raised p-4"
+            >
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <h3
+                  id="outbound-message-title"
+                  className="text-sm font-semibold text-ink"
+                >
+                  Outbound message
+                </h3>
+                <span className="badge badge-neutral">
+                  {OUTBOUND_STATUS_LABELS[outboundMessage.status]}
+                </span>
+              </div>
+              <p className="mt-2 text-xs leading-5 text-ink-soft">
+                {OUTBOUND_STATUS_DESCRIPTIONS[outboundMessage.status]} Attempts:{" "}
+                {outboundMessage.attempts} of {outboundMessage.maxAttempts}.
+              </p>
+              {outboundMessage.providerMessageId ? (
+                <p className="mt-1 break-all text-xs text-ink-faint">
+                  Provider message ID: {outboundMessage.providerMessageId}
+                </p>
+              ) : null}
+              {outboundMessage.failureReason ? (
+                <p className="mt-1 text-xs text-danger-ink">
+                  {outboundMessage.failureReason}
+                </p>
+              ) : null}
+            </section>
+          ) : null}
 
           {/* Lead and enquiry context */}
           <section
@@ -643,6 +1094,14 @@ export function DraftReplyDialog({
           <div className="flex flex-col-reverse gap-3 border-t border-line pt-5 sm:flex-row sm:flex-wrap sm:justify-end">
             <button
               type="button"
+              onClick={() => void createNewDraft()}
+              disabled={isBusy}
+              className="btn btn-secondary"
+            >
+              {pendingAction === "new" ? "Creating…" : "New draft"}
+            </button>
+            <button
+              type="button"
               onClick={() => void regenerateDraft()}
               disabled={isBusy}
               className="btn btn-secondary"
@@ -670,16 +1129,30 @@ export function DraftReplyDialog({
               {pendingAction === "save" ? "Saving…" : "Save changes"}
             </button>
             {selectedDraft.status === "approved" ? (
-              <button
-                type="button"
-                onClick={() => void updateStatus("draft")}
-                disabled={isBusy}
-                className="btn btn-secondary"
-              >
-                {pendingAction === "unapprove"
-                  ? "Returning…"
-                  : "Return to draft"}
-              </button>
+              <>
+                <button
+                  type="button"
+                  onClick={() => void queueApprovedSend()}
+                  disabled={isBusy}
+                  className="btn btn-primary"
+                >
+                  {pendingAction === "send"
+                    ? "Queueing…"
+                    : outboundMessage?.status === "failed"
+                      ? "Retry queued send"
+                      : "Queue approved reply"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void updateStatus("draft")}
+                  disabled={isBusy}
+                  className="btn btn-secondary"
+                >
+                  {pendingAction === "unapprove"
+                    ? "Returning…"
+                    : "Return to draft"}
+                </button>
+              </>
             ) : (
               <button
                 type="button"
@@ -687,7 +1160,13 @@ export function DraftReplyDialog({
                 disabled={isBusy || hasUnsavedChanges}
                 className="btn btn-primary"
               >
-                {pendingAction === "approve" ? "Approving…" : "Approve draft"}
+                {pendingAction === "approve"
+                  ? effectiveSendPolicy === "approve_and_send"
+                    ? "Approving and queueing…"
+                    : "Approving…"
+                  : effectiveSendPolicy === "approve_and_send"
+                    ? "Approve and queue"
+                    : "Approve draft"}
               </button>
             )}
           </div>
