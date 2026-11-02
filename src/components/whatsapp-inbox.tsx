@@ -585,8 +585,9 @@ function ConversationThread({
       </div>
 
       <p className="border-t border-line px-4 py-2.5 text-[11px] text-ink-faint sm:px-5">
-        Inbound-only view. Reply drafting and WhatsApp sending are not connected
-        to this inbox.
+        Inbound messages come from the WhatsApp webhook. Outbound entries
+        reflect ReplyPilot&apos;s mock queue only; they are not real WhatsApp
+        deliveries.
       </p>
     </>
   );
@@ -797,9 +798,10 @@ export function WhatsAppInbox() {
 
       <div className="mt-4 space-y-3">
         <Alert tone="info">
-          <span className="font-semibold">Inbound-only inbox.</span> Messages
-          delivered to your connected WhatsApp number appear here. Outbound
-          replies, templates, and AI drafting are not connected yet.
+          <span className="font-semibold">Inbound WhatsApp integration.</span>{" "}
+          Inbound webhook messages appear here. ReplyPilot&apos;s separate
+          outbound queue uses a mock provider; no real WhatsApp sending,
+          templates, or automatic replies are connected.
         </Alert>
 
         {sessionExpired ? (

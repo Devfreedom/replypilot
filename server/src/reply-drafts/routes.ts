@@ -107,6 +107,14 @@ export function createReplyDraftsRouter({
       return;
     }
 
+    if (result.kind === "manual-review") {
+      response.status(409).json({
+        error:
+          "The provider outcome is unknown. Reconcile with the provider before any further send.",
+      });
+      return;
+    }
+
     if (result.kind === "content-changed") {
       response.status(409).json({
         error:

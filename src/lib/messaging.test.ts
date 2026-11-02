@@ -6,9 +6,12 @@ import {
   OUTBOUND_MESSAGE_STATUSES,
   OUTBOUND_STATUS_DESCRIPTIONS,
   OUTBOUND_STATUS_LABELS,
+  canRetryOutboundForRole,
   parseMessagingSettingsResponse,
   parseOutboundMessage,
   parseOutboundMessagesResponse,
+  parseSendOutboundMessageResponse,
+  sendPolicyChoiceForDraftSelection,
 } from "./messaging.js";
 
 const outboundMessage = {
@@ -92,6 +95,40 @@ test("outbound message parser rejects an unknown status", () => {
   );
 });
 
+test("manual retry parser accepts the API envelope", () => {
+  assert.deepEqual(
+    parseSendOutboundMessageResponse({ outboundMessage }),
+    outboundMessage,
+  );
+  assert.equal(parseSendOutboundMessageResponse(outboundMessage), null);
+});
+
+test("changing drafts resets the per-draft policy choice", () => {
+  assert.equal(
+    sendPolicyChoiceForDraftSelection(
+      "draft-one",
+      "draft-two",
+      "approve_and_send",
+    ),
+    "default",
+  );
+  assert.equal(
+    sendPolicyChoiceForDraftSelection(
+      "draft-one",
+      "draft-one",
+      "approve_and_send",
+    ),
+    "approve_and_send",
+  );
+});
+
+test("only owners see retry controls for retryable outbound messages", () => {
+  assert.equal(canRetryOutboundForRole("owner", true), true);
+  assert.equal(canRetryOutboundForRole("member", true), false);
+  assert.equal(canRetryOutboundForRole(null, true), false);
+  assert.equal(canRetryOutboundForRole("owner", false), false);
+});
+
 test("status labels keep provider acceptance distinct from delivery", () => {
   assert.deepEqual(OUTBOUND_MESSAGE_STATUSES, [
     "queued",
@@ -100,9 +137,11 @@ test("status labels keep provider acceptance distinct from delivery", () => {
     "delivered",
     "failed",
     "cancelled",
+    "manual_review",
   ]);
   assert.equal(OUTBOUND_STATUS_LABELS.sent, "Sent");
   assert.equal(OUTBOUND_STATUS_LABELS.delivered, "Delivered");
+  assert.equal(OUTBOUND_STATUS_LABELS.manual_review, "Needs review");
   assert.match(OUTBOUND_STATUS_DESCRIPTIONS.sent, /not confirmed/i);
   assert.match(OUTBOUND_STATUS_DESCRIPTIONS.delivered, /reported delivery/i);
 });

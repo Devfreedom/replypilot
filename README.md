@@ -20,7 +20,7 @@ This project uses [`next/font`](https://nextjs.org/docs/app/building-your-applic
 
 ## API, authentication, and local PostgreSQL
 
-> **Not production-ready warning:** email/password authentication and workspace isolation are implemented, but this application still needs HTTPS, production origin and cookie review, email verification, password recovery, deployment hardening, operational monitoring, and a complete security review before production use. Reply generation remains mock-only. WhatsApp is a single-number, inbound-only test integration with no outbound sending or automatic replies. Do not use real customer or business data yet.
+> **Not production-ready warning:** email/password authentication and workspace isolation are implemented, but this application still needs HTTPS, production origin and cookie review, email verification, password recovery, deployment hardening, operational monitoring, and a complete security review before production use. Reply generation and the outbound queue provider remain mock-only. WhatsApp integration is inbound-only; real WhatsApp outbound delivery is not implemented. Do not use real customer or business data yet.
 
 The Express API is a separate development service. It binds to `127.0.0.1` and must not be exposed publicly. The browser dashboard is a separate Next.js app; it proxies `/api/*` requests to `API_ORIGIN`, which defaults to `http://127.0.0.1:4000`. This keeps Better Auth and business API requests same-origin from the browser, so session cookies flow through the rewrite.
 
@@ -346,7 +346,7 @@ A saved draft response is wrapped as `{"draft":{...}}`:
 
 Draft status starts as `draft` with `approvedAt: null`. Approval with `{"status":"approved"}` records the timestamp. Saving edited text returns the draft to `draft` and clears approval. Regeneration updates the same draft in place, refreshes the business-fact snapshot, and resets approval because the content changed. `{"status":"draft"}` explicitly returns an approved draft to draft status. Editing and approving in the same request is rejected; save the edited text first, then approve it as a separate review action.
 
-Approval is a review status only. It is not a legal signature, does not prove that edited text is factually correct, and does not send a WhatsApp, email, Instagram, or other customer message. The owner must still copy and send any message manually.
+Approval is a review action, not a legal signature or proof that edited text is factually correct. Depending on the workspace policy or a per-draft override, approval can create a record in ReplyPilot's separate mock outbound queue. The mock worker does not send a WhatsApp, email, Instagram, or other customer message; real WhatsApp outbound delivery is not implemented.
 
 #### How business facts are selected and snapshotted
 
@@ -360,7 +360,7 @@ The Draft Reply dialog shows the enquiry summary, missing information, **Busines
 
 ### WhatsApp Cloud API inbound test integration
 
-This milestone implements **inbound-only** WhatsApp Cloud API handling for exactly one Meta test phone number and one configured ReplyPilot workspace. It does not send WhatsApp messages, generate automatic replies, call the AI provider, download media, or implement Meta Embedded Signup.
+This integration implements **inbound-only** WhatsApp Cloud API handling for exactly one Meta test phone number and one configured ReplyPilot workspace. Inbound webhook messages are stored and shown in the inbox. This integration does not send WhatsApp messages, generate automatic replies, call the AI provider, download media, or implement Meta Embedded Signup. Outbound drafts use the separate mock queue described below; they are not sent through WhatsApp.
 
 Supported behavior:
 
@@ -371,6 +371,31 @@ Supported behavior:
 - Multiple entries, changes, and messages in one webhook delivery.
 - Transactional conversation/message persistence, duplicate provider-message detection, and exact lead association.
 - A protected read-only test inbox at `/whatsapp` in the authenticated dashboard.
+
+### Mock outbound queue and worker
+
+Approved drafts may either remain approval-only or create a durable outbound
+record according to the workspace policy and per-draft override. Owners can
+also explicitly queue an already approved draft. The standalone worker uses a
+mock provider and never calls WhatsApp or another external messaging service.
+Outbound records appear in history and conversation threads; `sent` means mock
+provider acceptance, not customer delivery. `delivered` is a separate status
+and is not produced by this mock integration.
+
+The worker preserves the same idempotency key for every attempt of an outbound
+record. A provider adapter must declare guaranteed idempotency before ambiguous
+timeouts or stale claims can be retried automatically. Without that provider
+guarantee, an ambiguous outcome moves to `manual_review` and must be reconciled
+before any further send; the application does not claim exactly-once delivery.
+Draft edits or approval revocation cancel queued records. Once a record is
+claimed as `sending`, draft changes are rejected until the provider outcome is
+recorded. Provider calls remain outside database transactions, so a process
+failure between the final authorization check and provider execution is an
+unavoidable boundary; provider idempotency or manual reconciliation is needed
+to handle an unknown outcome safely.
+
+**Real WhatsApp outbound delivery is not implemented.** The inbound webhook
+integration and this mock queue/worker are separate systems.
 
 #### Required environment variables
 
@@ -481,11 +506,11 @@ The Next.js `/api/*` rewrite can forward the public callback to the local Expres
 #### Inbound WhatsApp limitations
 
 - Exactly one configured test phone-number ID and one workspace. There is no Embedded Signup, multi-number management, or workspace-selection UI.
-- Inbound only. There are no outbound Graph API calls, templates, automatic replies, AI calls, delivery-status displays, or send controls.
+- The WhatsApp integration is inbound-only: there are no outbound Graph API calls, templates, automatic replies, or real delivery-status webhooks. Mock outbound records may appear in the inbox thread, but they are not WhatsApp sends.
 - No media download or transcription. Unsupported types are stored with their provider type and shown as unsupported.
 - No automatic lead creation or name-based matching. A conversation links only by exact saved WhatsApp number; otherwise it stays unassociated.
 - No live Meta webhook delivery is exercised by the automated test suite. Tests prove the local verification, signature, parsing, persistence, idempotency, isolation, and inbox behavior only.
-- The next integration step is to connect a selected conversation and saved draft for owner review, while keeping any outbound send action explicit and separately authorized.
+- Real outbound sending still requires a provider integration, applicable WhatsApp policy/template and opt-in handling, delivery-status webhooks, and reviewed idempotency/reconciliation behavior.
 
 ### Manual authentication and isolation checks
 
@@ -506,7 +531,7 @@ These checks verify the browser flow and the server boundary. Use fictional data
 - The legacy workspace is assigned only by the guarded local CLI. There is no public bootstrap endpoint, first-user claim, or production admin console.
 - Production requires HTTPS, `BETTER_AUTH_URL` with an HTTPS origin, a secret from a deployment secret store, explicit trusted origins, secure reverse-proxy/header handling, backups, and a security review. The API currently binds to `127.0.0.1` for local development.
 - Better Auth's default rate-limit storage and the Express process model need review before horizontal scaling. Use a shared, reviewed rate-limit store if multiple API instances are deployed. Rate limiting also needs a trustworthy client IP: deploy behind a trusted reverse proxy that supplies one validated `X-Forwarded-For` value, and configure Better Auth trusted proxies (or equivalent) for multi-hop deployments. Without a resolvable IP, Better Auth falls back to a shared per-path bucket.
-- Reply generation is still a deterministic mock. WhatsApp is an inbound-only single-number test integration; there is no live AI provider, outbound WhatsApp sending, approved-template sending, webhook media download, scheduling, or customer-message delivery. Approval never sends a message.
+- Reply generation and the outbound queue provider are deterministic mocks. WhatsApp integration is inbound-only; there is no live AI provider, real outbound WhatsApp sending, approved-template sending, webhook media download, scheduling, or customer-message delivery. Approval can enqueue a mock outbound record but does not itself deliver a customer message.
 - There is no audit log for business-record changes, no account recovery support workflow, and no automated backup/restore verification. Do not treat passing tests as evidence that the application is production-ready.
 
 ## Learn More

@@ -7698,6 +7698,8 @@ test("draft edits cancel queued work and worker cancels inactive conversations",
 
   let providerCalls = 0;
   const provider: OutboundMessageProvider = {
+    name: "test",
+    idempotency: "unsupported",
     async send() {
       providerCalls += 1;
       return {
@@ -7828,6 +7830,8 @@ test("worker cancels a queued snapshot when approved draft content changes", asy
 
   let providerCalls = 0;
   const provider: OutboundMessageProvider = {
+    name: "test",
+    idempotency: "unsupported",
     async send() {
       providerCalls += 1;
       return {
@@ -7910,6 +7914,8 @@ test("two workers cannot send the same queued outbound message twice", async () 
 
   let providerCalls = 0;
   const provider: OutboundMessageProvider = {
+    name: "test",
+    idempotency: "unsupported",
     async send(input) {
       providerCalls += 1;
       await new Promise((resolve) => setTimeout(resolve, 25));
