@@ -719,8 +719,14 @@ async function createLeadWithConversation(
   overrides: Record<string, unknown> = {},
   messageOverrides: Partial<InboundWhatsAppMessage> = {},
 ): Promise<Readonly<{ lead: Lead; conversationId: string }>> {
+  const senderPhoneNumber =
+    messageOverrides.senderPhoneNumber === undefined
+      ? TEST_WHATSAPP_CUSTOMER_WA_ID
+      : messageOverrides.senderPhoneNumber;
+  const senderWaId =
+    messageOverrides.senderWaId ?? senderPhoneNumber ?? undefined;
   const lead = await createDraftLead({
-    whatsappNumber: TEST_WHATSAPP_CUSTOMER_WA_ID,
+    whatsappNumber: senderPhoneNumber,
     ...overrides,
   });
   const stored = await persistInboundMessages(
@@ -728,8 +734,8 @@ async function createLeadWithConversation(
     requireSession().workspace.id,
     [
       inboundMessage({
-        senderWaId: TEST_WHATSAPP_CUSTOMER_WA_ID,
-        senderPhoneNumber: TEST_WHATSAPP_CUSTOMER_WA_ID,
+        senderWaId: senderWaId ?? TEST_WHATSAPP_CUSTOMER_WA_ID,
+        senderPhoneNumber,
         ...messageOverrides,
       }),
     ],
@@ -3785,6 +3791,7 @@ test("workspace members are read-only for business data", async () => {
     draftReply(lead.id),
     createSavedDraft(lead.id),
     patchSavedDraft(lead.id, draft.id, { status: "approved" }),
+    sendSavedDraft(draft.id),
     jsonRequest(`/api/business/catalogue/${catalogue.id}`, "DELETE"),
     jsonRequest("/api/business/knowledge", "POST", {
       title: "Member knowledge",
@@ -7005,4 +7012,938 @@ test("GET /api/conversations supports archived and all status filters", async ()
       .sort(),
     ["Archived Customer", "Closed Customer", "Open Customer"],
   );
+});
+
+test("messaging settings default to approve only and only owners can change them", async () => {
+  const initial = await getMessagingSettings();
+  assert.equal(initial.status, 200);
+  const initialSettings = await readJson<MessagingSettingsPayload>(initial);
+  assert.equal(
+    initialSettings.settings.defaultApprovalSendPolicy,
+    "approve_only",
+  );
+
+  const updated = await patchMessagingSettings("approve_and_send");
+  assert.equal(updated.status, 200);
+  assert.deepEqual(await readJson(updated), {
+    settings: { defaultApprovalSendPolicy: "approve_and_send" },
+  });
+
+  const invalid = await jsonRequest("/api/settings/messaging", "PATCH", {
+    defaultApprovalSendPolicy: "send_immediately",
+  });
+  assert.equal(invalid.status, 400);
+
+  const member = requireSession();
+  const owner = await registerUser({
+    email: `messaging-owner-${randomUUID()}@example.test`,
+    name: "Messaging Owner",
+  });
+
+  currentSession = owner;
+  const ownerSettings = await readJson<MessagingSettingsPayload>(
+    await getMessagingSettings(),
+  );
+  assert.equal(
+    ownerSettings.settings.defaultApprovalSendPolicy,
+    "approve_only",
+  );
+
+  currentSession = member;
+  await pool.query(
+    `
+      UPDATE workspace_memberships
+      SET is_default = false, updated_at = now()
+      WHERE user_id = $1
+    `,
+    [member.user.id],
+  );
+  await pool.query(
+    `
+      INSERT INTO workspace_memberships (
+        user_id,
+        workspace_id,
+        role,
+        is_default
+      )
+      VALUES ($1, $2, 'member', true)
+    `,
+    [member.user.id, owner.workspace.id],
+  );
+
+  const memberRead = await getMessagingSettings();
+  assert.equal(memberRead.status, 200);
+  assert.equal(
+    (await readJson<MessagingSettingsPayload>(memberRead)).settings
+      .defaultApprovalSendPolicy,
+    "approve_only",
+  );
+
+  const memberWrite = await patchMessagingSettings("approve_and_send");
+  assert.equal(memberWrite.status, 403);
+  assert.deepEqual(await readJson(memberWrite), { error: "Forbidden" });
+
+  currentSession = owner;
+  const unchanged = await readJson<MessagingSettingsPayload>(
+    await getMessagingSettings(),
+  );
+  assert.equal(
+    unchanged.settings.defaultApprovalSendPolicy,
+    "approve_only",
+  );
+});
+
+test("approval defaults to approve only without creating an outbound message", async () => {
+  const { lead } = await createLeadWithConversation();
+  const draft = await createSavedDraftPayload(lead.id);
+  const approved = await approveSavedDraft(lead.id, draft.id);
+
+  assert.equal(approved.status, 200);
+  const payload = await readJson<ReplyDraftApprovalPayload>(approved);
+  assert.equal(payload.draft.status, "approved");
+  assert.equal(payload.draft.approvalSendPolicy, "approve_only");
+  assert.equal(payload.draft.sendPolicyOverride, null);
+  assert.equal(payload.draft.approvedBy, requireSession().user.id);
+  assert.ok(payload.draft.approvedAt);
+  assert.equal(payload.outboundMessage, null);
+
+  const outboundCount = await pool.query<{ count: number }>(
+    "SELECT count(*)::int AS count FROM outbound_messages WHERE workspace_id = $1",
+    [requireSession().workspace.id],
+  );
+  assert.equal(outboundCount.rows[0]?.count, 0);
+
+  const repeated = await approveSavedDraft(lead.id, draft.id, {
+    status: "approved",
+    sendPolicy: "approve_and_send",
+  });
+  assert.equal(repeated.status, 200);
+  const repeatedPayload = await readJson<ReplyDraftApprovalPayload>(repeated);
+  assert.equal(repeatedPayload.outboundMessage, null);
+  assert.equal(repeatedPayload.draft.approvalSendPolicy, "approve_only");
+
+  const repeatedCount = await pool.query<{ count: number }>(
+    "SELECT count(*)::int AS count FROM outbound_messages WHERE workspace_id = $1",
+    [requireSession().workspace.id],
+  );
+  assert.equal(repeatedCount.rows[0]?.count, 0);
+
+  const missingStatus = await approveSavedDraft(lead.id, draft.id, {
+    sendPolicy: "approve_and_send",
+  });
+  assert.equal(missingStatus.status, 400);
+});
+
+test("per-draft approve-and-send snapshots content and creates one outbound record", async () => {
+  const { lead, conversationId } = await createLeadWithConversation();
+  const draft = await createSavedDraftPayload(lead.id);
+  const approved = await approveSavedDraft(lead.id, draft.id, {
+    status: "approved",
+    sendPolicy: "approve_and_send",
+    conversationId,
+  });
+
+  assert.equal(approved.status, 200);
+  const payload = await readJson<ReplyDraftApprovalPayload>(approved);
+  assert.ok(payload.outboundMessage);
+  assert.equal(payload.outboundMessage.conversationId, conversationId);
+  assert.equal(payload.outboundMessage.replyDraftId, draft.id);
+  assert.equal(payload.outboundMessage.content, draft.draftReply);
+  assert.equal(payload.outboundMessage.status, "queued");
+  assert.equal(payload.outboundMessage.attempts, 0);
+  assert.equal(payload.outboundMessage.maxAttempts, 3);
+  assert.equal(payload.outboundMessage.provider, "mock");
+  assert.equal(payload.draft.sendPolicyOverride, "approve_and_send");
+  assert.equal(payload.draft.approvalSendPolicy, "approve_and_send");
+
+  const repeated = await approveSavedDraft(lead.id, draft.id, {
+    status: "approved",
+    sendPolicy: "approve_and_send",
+    conversationId,
+  });
+  assert.equal(repeated.status, 200);
+  const repeatedPayload = await readJson<ReplyDraftApprovalPayload>(repeated);
+  assert.equal(
+    repeatedPayload.outboundMessage?.id,
+    payload.outboundMessage.id,
+  );
+  assert.equal(repeatedPayload.draft.approvedAt, payload.draft.approvedAt);
+
+  const outboundCount = await pool.query<{ count: number }>(
+    `
+      SELECT count(*)::int AS count
+      FROM outbound_messages
+      WHERE workspace_id = $1
+        AND reply_draft_id = $2
+    `,
+    [requireSession().workspace.id, draft.id],
+  );
+  assert.equal(outboundCount.rows[0]?.count, 1);
+});
+
+test("concurrent approvals converge on one approved draft and one outbound record", async () => {
+  const { lead, conversationId } = await createLeadWithConversation();
+  const draft = await createSavedDraftPayload(lead.id);
+  const body = {
+    status: "approved",
+    sendPolicy: "approve_and_send",
+    conversationId,
+  };
+
+  const [first, second] = await Promise.all([
+    approveSavedDraft(lead.id, draft.id, body),
+    approveSavedDraft(lead.id, draft.id, body),
+  ]);
+  assert.equal(first.status, 200);
+  assert.equal(second.status, 200);
+
+  const firstPayload = await readJson<ReplyDraftApprovalPayload>(first);
+  const secondPayload = await readJson<ReplyDraftApprovalPayload>(second);
+  assert.ok(firstPayload.outboundMessage);
+  assert.equal(
+    secondPayload.outboundMessage?.id,
+    firstPayload.outboundMessage.id,
+  );
+  assert.equal(secondPayload.draft.status, "approved");
+
+  const outboundCount = await pool.query<{ count: number }>(
+    `
+      SELECT count(*)::int AS count
+      FROM outbound_messages
+      WHERE workspace_id = $1
+        AND reply_draft_id = $2
+    `,
+    [requireSession().workspace.id, draft.id],
+  );
+  assert.equal(outboundCount.rows[0]?.count, 1);
+});
+
+test("workspace approve-and-send default queues approved replies", async () => {
+  const settings = await patchMessagingSettings("approve_and_send");
+  assert.equal(settings.status, 200);
+
+  const { lead, conversationId } = await createLeadWithConversation();
+  const draft = await createSavedDraftPayload(lead.id);
+  const approved = await approveSavedDraft(lead.id, draft.id);
+  assert.equal(approved.status, 200);
+
+  const payload = await readJson<ReplyDraftApprovalPayload>(approved);
+  assert.ok(payload.outboundMessage);
+  assert.equal(payload.outboundMessage.conversationId, conversationId);
+  assert.equal(payload.outboundMessage.status, "queued");
+  assert.equal(payload.draft.sendPolicyOverride, null);
+  assert.equal(payload.draft.approvalSendPolicy, "approve_and_send");
+});
+
+test("approve-and-send requires an active linked conversation", async () => {
+  const lead = await createDraftLead({
+    whatsappNumber: TEST_WHATSAPP_CUSTOMER_WA_ID,
+  });
+  const draft = await createSavedDraftPayload(lead.id);
+  const approved = await approveSavedDraft(lead.id, draft.id, {
+    status: "approved",
+    sendPolicy: "approve_and_send",
+  });
+
+  assert.equal(approved.status, 409);
+  assert.match(
+    (await readJson<ErrorPayload>(approved)).error,
+    /no active WhatsApp conversation/i,
+  );
+
+  const drafts = await readJson<ReplyDraftsPayload>(
+    await listSavedDrafts(lead.id),
+  );
+  assert.equal(drafts.drafts[0]?.status, "draft");
+  const outboundCount = await pool.query<{ count: number }>(
+    "SELECT count(*)::int AS count FROM outbound_messages WHERE workspace_id = $1",
+    [requireSession().workspace.id],
+  );
+  assert.equal(outboundCount.rows[0]?.count, 0);
+
+  const approvedOnly = await approveSavedDraft(lead.id, draft.id);
+  assert.equal(approvedOnly.status, 200);
+  const send = await sendSavedDraft(draft.id);
+  assert.equal(send.status, 409);
+  assert.match(
+    (await readJson<ErrorPayload>(send)).error,
+    /no active WhatsApp conversation/i,
+  );
+});
+
+test("ambiguous conversations require an explicit validated conversationId", async () => {
+  const { lead } = await createLeadWithConversation();
+  const stored = await persistInboundMessages(
+    pool,
+    requireSession().workspace.id,
+    [
+      inboundMessage({
+        phoneNumberId: "106540352242923",
+        senderWaId: TEST_WHATSAPP_CUSTOMER_WA_ID,
+        senderPhoneNumber: TEST_WHATSAPP_CUSTOMER_WA_ID,
+      }),
+    ],
+  );
+  assert.equal(stored.stored, 1);
+
+  const conversationIds = await conversationIdsForLead(lead.id);
+  assert.equal(conversationIds.length, 2);
+  const draft = await createSavedDraftPayload(lead.id);
+
+  const ambiguous = await approveSavedDraft(lead.id, draft.id, {
+    status: "approved",
+    sendPolicy: "approve_and_send",
+  });
+  assert.equal(ambiguous.status, 409);
+  assert.match(
+    (await readJson<ErrorPayload>(ambiguous)).error,
+    /multiple active WhatsApp conversations/i,
+  );
+
+  const drafts = await readJson<ReplyDraftsPayload>(
+    await listSavedDrafts(lead.id),
+  );
+  assert.equal(drafts.drafts[0]?.status, "draft");
+
+  const wrongConversation = await approveSavedDraft(lead.id, draft.id, {
+    status: "approved",
+    sendPolicy: "approve_and_send",
+    conversationId: randomUUID(),
+  });
+  assert.equal(wrongConversation.status, 409);
+  assert.match(
+    (await readJson<ErrorPayload>(wrongConversation)).error,
+    /selected conversation/i,
+  );
+
+  const explicit = await approveSavedDraft(lead.id, draft.id, {
+    status: "approved",
+    sendPolicy: "approve_and_send",
+    conversationId: conversationIds[1],
+  });
+  assert.equal(explicit.status, 200);
+  const payload = await readJson<ReplyDraftApprovalPayload>(explicit);
+  assert.equal(
+    payload.outboundMessage?.conversationId,
+    conversationIds[1],
+  );
+});
+
+test("manual send only queues approved drafts and is idempotent", async () => {
+  const { lead } = await createLeadWithConversation();
+  const draft = await createSavedDraftPayload(lead.id);
+
+  const unapproved = await sendSavedDraft(draft.id);
+  assert.equal(unapproved.status, 409);
+  assert.match(
+    (await readJson<ErrorPayload>(unapproved)).error,
+    /Only approved drafts/i,
+  );
+
+  const approved = await approveSavedDraft(lead.id, draft.id);
+  assert.equal(approved.status, 200);
+  assert.equal(
+    (await readJson<ReplyDraftApprovalPayload>(approved)).outboundMessage,
+    null,
+  );
+
+  const invalidConversation = await sendSavedDraft(draft.id, {
+    conversationId: "not-a-uuid",
+  });
+  assert.equal(invalidConversation.status, 400);
+
+  const sent = await sendSavedDraft(draft.id);
+  assert.equal(sent.status, 200);
+  const sentPayload = await readJson<OutboundMessagePayload>(sent);
+  assert.equal(sentPayload.outboundMessage.status, "queued");
+  assert.equal(sentPayload.outboundMessage.content, draft.draftReply);
+  assert.equal(sentPayload.outboundMessage.attempts, 0);
+
+  const repeated = await sendSavedDraft(draft.id);
+  assert.equal(repeated.status, 200);
+  assert.equal(
+    (await readJson<OutboundMessagePayload>(repeated)).outboundMessage.id,
+    sentPayload.outboundMessage.id,
+  );
+
+  const outboundCount = await pool.query<{ count: number }>(
+    `
+      SELECT count(*)::int AS count
+      FROM outbound_messages
+      WHERE workspace_id = $1
+        AND reply_draft_id = $2
+    `,
+    [requireSession().workspace.id, draft.id],
+  );
+  assert.equal(outboundCount.rows[0]?.count, 1);
+
+  const invalidDraftId = await sendSavedDraft("not-a-uuid");
+  assert.equal(invalidDraftId.status, 400);
+});
+
+test("outbound history filters by workspace, status, and conversation", async () => {
+  const { lead, conversationId } = await createLeadWithConversation();
+  const draft = await createSavedDraftPayload(lead.id);
+  const approved = await approveSavedDraft(lead.id, draft.id, {
+    status: "approved",
+    sendPolicy: "approve_and_send",
+    conversationId,
+  });
+  assert.equal(approved.status, 200);
+
+  const history = await listOutboundMessages("?limit=10&offset=0");
+  assert.equal(history.status, 200);
+  const payload = await readJson<OutboundHistoryPayload>(history);
+  assert.equal(payload.messages.length, 1);
+  assert.equal(payload.messages[0]?.conversation.id, conversationId);
+  assert.equal(payload.messages[0]?.status, "queued");
+  assert.equal(payload.messages[0]?.canRetry, false);
+  assert.equal(payload.pagination.hasMore, false);
+
+  const queued = await readJson<OutboundHistoryPayload>(
+    await listOutboundMessages("?status=queued"),
+  );
+  assert.equal(queued.messages.length, 1);
+
+  const sent = await readJson<OutboundHistoryPayload>(
+    await listOutboundMessages("?status=sent"),
+  );
+  assert.equal(sent.messages.length, 0);
+
+  const byConversation = await readJson<OutboundHistoryPayload>(
+    await listOutboundMessages(`?conversationId=${conversationId}`),
+  );
+  assert.equal(byConversation.messages.length, 1);
+
+  const invalidStatus = await listOutboundMessages("?status=accepted");
+  assert.equal(invalidStatus.status, 400);
+  const invalidConversation = await listOutboundMessages(
+    "?conversationId=not-a-uuid",
+  );
+  assert.equal(invalidConversation.status, 400);
+
+  const second = await createLeadWithConversation(
+    { name: "Second Outbound Lead" },
+    {
+      senderWaId: "2348031234567",
+      senderPhoneNumber: "2348031234567",
+    },
+  );
+  const secondDraft = await createSavedDraftPayload(second.lead.id);
+  const secondApproved = await approveSavedDraft(
+    second.lead.id,
+    secondDraft.id,
+    {
+      status: "approved",
+      sendPolicy: "approve_and_send",
+      conversationId: second.conversationId,
+    },
+  );
+  assert.equal(secondApproved.status, 200);
+
+  const firstPage = await readJson<OutboundHistoryPayload>(
+    await listOutboundMessages("?limit=1&offset=0"),
+  );
+  assert.equal(firstPage.messages.length, 1);
+  assert.equal(firstPage.pagination.hasMore, true);
+  assert.equal(firstPage.pagination.nextOffset, 1);
+
+  const secondPage = await readJson<OutboundHistoryPayload>(
+    await listOutboundMessages("?limit=1&offset=1"),
+  );
+  assert.equal(secondPage.messages.length, 1);
+  assert.equal(secondPage.pagination.hasMore, false);
+});
+
+test("outbound history and manual send are isolated by workspace", async () => {
+  const { lead, conversationId } = await createLeadWithConversation();
+  const draft = await createSavedDraftPayload(lead.id);
+  const approved = await approveSavedDraft(lead.id, draft.id, {
+    status: "approved",
+    sendPolicy: "approve_and_send",
+    conversationId,
+  });
+  assert.equal(approved.status, 200);
+
+  const other = await registerUser({
+    email: `outbound-other-${randomUUID()}@example.test`,
+    name: "Other Workspace",
+  });
+  currentSession = other;
+
+  const history = await listOutboundMessages();
+  assert.equal(history.status, 200);
+  assert.equal((await readJson<OutboundHistoryPayload>(history)).messages.length, 0);
+
+  const send = await sendSavedDraft(draft.id);
+  assert.equal(send.status, 404);
+
+  const settings = await getMessagingSettings();
+  assert.equal(settings.status, 200);
+  assert.equal(
+    (await readJson<MessagingSettingsPayload>(settings)).settings
+      .defaultApprovalSendPolicy,
+    "approve_only",
+  );
+});
+
+test("worker sends queued outbound and conversation view exposes direction and status", async () => {
+  const { lead, conversationId } = await createLeadWithConversation();
+  const draft = await createSavedDraftPayload(lead.id);
+  const approved = await approveSavedDraft(lead.id, draft.id, {
+    status: "approved",
+    sendPolicy: "approve_and_send",
+    conversationId,
+  });
+  assert.equal(approved.status, 200);
+  const outbound = (await readJson<ReplyDraftApprovalPayload>(approved))
+    .outboundMessage;
+  assert.ok(outbound);
+
+  const inboundRows = await pool.query<{ id: string }>(
+    `
+      SELECT id
+      FROM whatsapp_messages
+      WHERE workspace_id = $1
+        AND conversation_id = $2
+        AND direction = 'inbound'
+      ORDER BY provider_timestamp ASC
+    `,
+    [requireSession().workspace.id, conversationId],
+  );
+  const inboundId = inboundRows.rows[0]?.id;
+  assert.ok(inboundId);
+
+  const before = await readJson<ConversationMessagesPayload>(
+    await fetch(`${baseUrl}/api/conversations/${conversationId}/messages?limit=50`),
+  );
+  const inboundMessageView = before.messages.find(
+    (message) => message.id === inboundId,
+  );
+  const outboundView = before.messages.find(
+    (message) => message.id === outbound.id,
+  );
+  assert.ok(inboundMessageView);
+  assert.ok(outboundView);
+  assert.notEqual(inboundMessageView.id, outboundView.id);
+  assert.equal(inboundMessageView.direction, "inbound");
+  assert.equal(inboundMessageView.processingStatus, "stored");
+  assert.equal(inboundMessageView.outboundStatus, null);
+  assert.equal(outboundView.direction, "outbound");
+  assert.equal(outboundView.processingStatus, null);
+  assert.equal(outboundView.outboundStatus, "queued");
+  assert.equal(outboundView.failureReason, null);
+
+  const result = await runOutboundWorkerOnce(
+    pool,
+    new MockOutboundMessageProvider(),
+    { batchSize: 10, baseRetryDelayMs: 0, staleAfterMs: 60_000 },
+  );
+  assert.equal(result.recovered, 0);
+  assert.equal(result.cancelled, 0);
+  assert.equal(result.claimed, 1);
+  assert.equal(result.sent, 1);
+
+  const history = await readJson<OutboundHistoryPayload>(
+    await listOutboundMessages(),
+  );
+  const sent = history.messages.find((message) => message.id === outbound.id);
+  assert.ok(sent);
+  assert.equal(sent.status, "sent");
+  assert.equal(sent.attempts, 1);
+  assert.equal(sent.deliveredAt, null);
+  assert.ok(sent.sentAt);
+  assert.match(sent.providerMessageId ?? "", /^mock-/);
+  assert.equal(sent.canRetry, false);
+
+  const after = await readJson<ConversationMessagesPayload>(
+    await fetch(`${baseUrl}/api/conversations/${conversationId}/messages?limit=50`),
+  );
+  const sentView = after.messages.find((message) => message.id === outbound.id);
+  assert.ok(sentView);
+  assert.equal(sentView.processingStatus, null);
+  assert.equal(sentView.outboundStatus, "sent");
+
+  const conversation = await readJson<ConversationPayload>(
+    await fetch(`${baseUrl}/api/conversations/${conversationId}`),
+  );
+  assert.equal(conversation.conversation.lastMessageDirection, "outbound");
+  assert.equal(conversation.conversation.lastMessageOutboundStatus, "sent");
+  assert.equal(conversation.conversation.lastMessageStatus, null);
+});
+
+test("worker retries provider failures with bounded backoff and preserves content", async () => {
+  const { lead, conversationId } = await createLeadWithConversation();
+  const draft = await createSavedDraftPayload(lead.id);
+  const approved = await approveSavedDraft(lead.id, draft.id, {
+    status: "approved",
+    sendPolicy: "approve_and_send",
+    conversationId,
+  });
+  assert.equal(approved.status, 200);
+
+  const provider = new MockOutboundMessageProvider({
+    failures: { [`reply-draft:${draft.id}`]: 2 },
+  });
+  const options = {
+    batchSize: 10,
+    baseRetryDelayMs: 0,
+    staleAfterMs: 60_000,
+  };
+
+  const first = await runOutboundWorkerOnce(pool, provider, options);
+  assert.equal(first.retried, 1);
+  assert.equal(first.sent, 0);
+  let history = await readJson<OutboundHistoryPayload>(
+    await listOutboundMessages(),
+  );
+  assert.equal(history.messages[0]?.status, "queued");
+  assert.equal(history.messages[0]?.attempts, 1);
+  assert.ok(history.messages[0]?.failureReason);
+  assert.equal(history.messages[0]?.content, draft.draftReply);
+
+  const second = await runOutboundWorkerOnce(pool, provider, options);
+  assert.equal(second.retried, 1);
+  history = await readJson<OutboundHistoryPayload>(
+    await listOutboundMessages(),
+  );
+  assert.equal(history.messages[0]?.status, "queued");
+  assert.equal(history.messages[0]?.attempts, 2);
+
+  const third = await runOutboundWorkerOnce(pool, provider, options);
+  assert.equal(third.sent, 1);
+  history = await readJson<OutboundHistoryPayload>(
+    await listOutboundMessages(),
+  );
+  assert.equal(history.messages[0]?.status, "sent");
+  assert.equal(history.messages[0]?.attempts, 3);
+  assert.equal(history.messages[0]?.content, draft.draftReply);
+  assert.equal(history.messages[0]?.failureReason, null);
+});
+
+test("permanent worker failure is retryable only through explicit manual send", async () => {
+  const { lead, conversationId } = await createLeadWithConversation();
+  const draft = await createSavedDraftPayload(lead.id);
+  const approved = await approveSavedDraft(lead.id, draft.id, {
+    status: "approved",
+    sendPolicy: "approve_and_send",
+    conversationId,
+  });
+  assert.equal(approved.status, 200);
+
+  const provider = new MockOutboundMessageProvider({ failAll: true });
+  const options = {
+    batchSize: 10,
+    baseRetryDelayMs: 0,
+    staleAfterMs: 60_000,
+  };
+
+  const first = await runOutboundWorkerOnce(pool, provider, options);
+  assert.equal(first.retried, 1);
+  const second = await runOutboundWorkerOnce(pool, provider, options);
+  assert.equal(second.retried, 1);
+  const third = await runOutboundWorkerOnce(pool, provider, options);
+  assert.equal(third.failed, 1);
+
+  const history = await readJson<OutboundHistoryPayload>(
+    await listOutboundMessages(),
+  );
+  const failed = history.messages[0];
+  assert.ok(failed);
+  assert.equal(failed.status, "failed");
+  assert.equal(failed.attempts, 3);
+  assert.equal(failed.canRetry, true);
+  assert.ok(failed.failureReason);
+
+  const retry = await sendSavedDraft(draft.id);
+  assert.equal(retry.status, 200);
+  const queued = await readJson<OutboundMessagePayload>(retry);
+  assert.equal(queued.outboundMessage.id, failed.id);
+  assert.equal(queued.outboundMessage.status, "queued");
+  assert.equal(queued.outboundMessage.attempts, 0);
+  assert.equal(queued.outboundMessage.content, failed.content);
+  assert.equal(queued.outboundMessage.failureReason, null);
+
+  const success = await runOutboundWorkerOnce(
+    pool,
+    new MockOutboundMessageProvider(),
+    options,
+  );
+  assert.equal(success.sent, 1);
+  const retried = await readJson<OutboundHistoryPayload>(
+    await listOutboundMessages(),
+  );
+  assert.equal(retried.messages[0]?.status, "sent");
+  assert.equal(retried.messages[0]?.attempts, 1);
+});
+
+test("worker cancels queued work when approval is withdrawn", async () => {
+  const { lead, conversationId } = await createLeadWithConversation();
+  const draft = await createSavedDraftPayload(lead.id);
+  const approved = await approveSavedDraft(lead.id, draft.id, {
+    status: "approved",
+    sendPolicy: "approve_and_send",
+    conversationId,
+  });
+  assert.equal(approved.status, 200);
+
+  const edited = await patchSavedDraft(lead.id, draft.id, {
+    draftReply: "A changed reply that is not approved.",
+  });
+  assert.equal(edited.status, 200);
+  assert.equal(
+    (await readJson<ReplyDraftPayload>(edited)).draft.status,
+    "draft",
+  );
+
+  let providerCalls = 0;
+  const provider: OutboundMessageProvider = {
+    async send() {
+      providerCalls += 1;
+      return {
+        providerMessageId: "should-not-be-used",
+        status: "sent",
+      };
+    },
+  };
+  const result = await runOutboundWorkerOnce(pool, provider, {
+    batchSize: 10,
+    baseRetryDelayMs: 0,
+    staleAfterMs: 60_000,
+  });
+  assert.equal(result.cancelled, 1);
+  assert.equal(result.claimed, 0);
+  assert.equal(providerCalls, 0);
+
+  const history = await readJson<OutboundHistoryPayload>(
+    await listOutboundMessages(),
+  );
+  assert.equal(history.messages[0]?.status, "cancelled");
+  assert.equal(history.messages[0]?.canRetry, false);
+
+  const reapproved = await approveSavedDraft(lead.id, draft.id);
+  assert.equal(reapproved.status, 200);
+  const cancelled = await readJson<ReplyDraftApprovalPayload>(reapproved);
+  assert.equal(cancelled.outboundMessage?.status, "cancelled");
+
+  const retry = await sendSavedDraft(draft.id);
+  assert.equal(retry.status, 409);
+  assert.match(
+    (await readJson<ErrorPayload>(retry)).error,
+    /cancelled and cannot be retried/i,
+  );
+});
+
+test("two workers cannot send the same queued outbound message twice", async () => {
+  const { lead, conversationId } = await createLeadWithConversation();
+  const draft = await createSavedDraftPayload(lead.id);
+  const approved = await approveSavedDraft(lead.id, draft.id, {
+    status: "approved",
+    sendPolicy: "approve_and_send",
+    conversationId,
+  });
+  assert.equal(approved.status, 200);
+
+  let providerCalls = 0;
+  const provider: OutboundMessageProvider = {
+    async send(input) {
+      providerCalls += 1;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      return {
+        providerMessageId: `mock-${input.idempotencyKey}`,
+        status: "sent",
+      };
+    },
+  };
+  const options = {
+    batchSize: 10,
+    baseRetryDelayMs: 0,
+    staleAfterMs: 60_000,
+  };
+
+  const [first, second] = await Promise.all([
+    runOutboundWorkerOnce(pool, provider, options),
+    runOutboundWorkerOnce(pool, provider, options),
+  ]);
+  assert.equal(providerCalls, 1);
+  assert.equal(first.sent + second.sent, 1);
+
+  const history = await readJson<OutboundHistoryPayload>(
+    await listOutboundMessages(),
+  );
+  assert.equal(history.messages.length, 1);
+  assert.equal(history.messages[0]?.status, "sent");
+});
+
+test("worker recovers stale claims and fails exhausted stale claims", async () => {
+  const first = await createLeadWithConversation();
+  const firstDraft = await createSavedDraftPayload(first.lead.id);
+  const firstApproved = await approveSavedDraft(
+    first.lead.id,
+    firstDraft.id,
+    {
+      status: "approved",
+      sendPolicy: "approve_and_send",
+      conversationId: first.conversationId,
+    },
+  );
+  assert.equal(firstApproved.status, 200);
+  const firstOutbound = (
+    await readJson<ReplyDraftApprovalPayload>(firstApproved)
+  ).outboundMessage;
+  assert.ok(firstOutbound);
+
+  await pool.query(
+    `
+      UPDATE outbound_messages
+      SET status = 'sending',
+          attempts = 1,
+          started_at = now() - interval '10 minutes',
+          updated_at = now()
+      WHERE id = $1
+    `,
+    [firstOutbound.id],
+  );
+
+  const recovered = await runOutboundWorkerOnce(
+    pool,
+    new MockOutboundMessageProvider(),
+    { batchSize: 10, baseRetryDelayMs: 0, staleAfterMs: 60_000 },
+  );
+  assert.equal(recovered.recovered, 1);
+  assert.equal(recovered.sent, 1);
+
+  let history = await readJson<OutboundHistoryPayload>(
+    await listOutboundMessages(),
+  );
+  assert.equal(history.messages[0]?.status, "sent");
+  assert.equal(history.messages[0]?.attempts, 2);
+
+  const second = await createLeadWithConversation(
+    { name: "Stale Exhausted Lead" },
+    {
+      senderWaId: "2348031234567",
+      senderPhoneNumber: "2348031234567",
+    },
+  );
+  const secondDraft = await createSavedDraftPayload(second.lead.id);
+  const secondApproved = await approveSavedDraft(
+    second.lead.id,
+    secondDraft.id,
+    {
+      status: "approved",
+      sendPolicy: "approve_and_send",
+      conversationId: second.conversationId,
+    },
+  );
+  assert.equal(secondApproved.status, 200);
+  const secondOutbound = (
+    await readJson<ReplyDraftApprovalPayload>(secondApproved)
+  ).outboundMessage;
+  assert.ok(secondOutbound);
+
+  await pool.query(
+    `
+      UPDATE outbound_messages
+      SET status = 'sending',
+          attempts = 3,
+          started_at = now() - interval '10 minutes',
+          updated_at = now()
+      WHERE id = $1
+    `,
+    [secondOutbound.id],
+  );
+
+  const exhausted = await runOutboundWorkerOnce(
+    pool,
+    new MockOutboundMessageProvider(),
+    { batchSize: 10, baseRetryDelayMs: 0, staleAfterMs: 60_000 },
+  );
+  assert.equal(exhausted.recovered, 1);
+  assert.equal(exhausted.claimed, 0);
+
+  history = await readJson<OutboundHistoryPayload>(
+    await listOutboundMessages(),
+  );
+  const failed = history.messages.find(
+    (message) => message.id === secondOutbound.id,
+  );
+  assert.ok(failed);
+  assert.equal(failed.status, "failed");
+  assert.equal(failed.attempts, 3);
+  assert.equal(failed.canRetry, true);
+});
+
+test("worker processes at most one bounded batch per tick", async () => {
+  const first = await createLeadWithConversation();
+  const firstDraft = await createSavedDraftPayload(first.lead.id);
+  assert.equal(
+    (
+      await approveSavedDraft(first.lead.id, firstDraft.id, {
+        status: "approved",
+        sendPolicy: "approve_and_send",
+        conversationId: first.conversationId,
+      })
+    ).status,
+    200,
+  );
+
+  const second = await createLeadWithConversation(
+    { name: "Batch Lead" },
+    {
+      senderWaId: "2348031234567",
+      senderPhoneNumber: "2348031234567",
+    },
+  );
+  const secondDraft = await createSavedDraftPayload(second.lead.id);
+  assert.equal(
+    (
+      await approveSavedDraft(second.lead.id, secondDraft.id, {
+        status: "approved",
+        sendPolicy: "approve_and_send",
+        conversationId: second.conversationId,
+      })
+    ).status,
+    200,
+  );
+
+  const provider = new MockOutboundMessageProvider();
+  const firstTick = await runOutboundWorkerOnce(pool, provider, {
+    batchSize: 1,
+    baseRetryDelayMs: 0,
+    staleAfterMs: 60_000,
+  });
+  assert.equal(firstTick.claimed, 1);
+  assert.equal(firstTick.sent, 1);
+
+  const secondTick = await runOutboundWorkerOnce(pool, provider, {
+    batchSize: 1,
+    baseRetryDelayMs: 0,
+    staleAfterMs: 60_000,
+  });
+  assert.equal(secondTick.claimed, 1);
+  assert.equal(secondTick.sent, 1);
+
+  const thirdTick = await runOutboundWorkerOnce(pool, provider, {
+    batchSize: 1,
+    baseRetryDelayMs: 0,
+    staleAfterMs: 60_000,
+  });
+  assert.equal(thirdTick.claimed, 0);
+});
+
+test("mock provider idempotency key produces a stable provider message ID", async () => {
+  const provider = new MockOutboundMessageProvider();
+  const input = {
+    conversationId: randomUUID(),
+    content: "Stable outbound content.",
+    idempotencyKey: "reply-draft:stable-idempotency-test",
+  };
+  const first = await provider.send(input);
+  const second = await provider.send(input);
+
+  assert.equal(first.status, "sent");
+  assert.equal(second.status, "sent");
+  assert.equal(first.providerMessageId, second.providerMessageId);
+  assert.match(first.providerMessageId, /^mock-[0-9a-f]{24}$/);
 });

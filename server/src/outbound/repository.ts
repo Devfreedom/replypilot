@@ -30,6 +30,26 @@ const OUTBOUND_MESSAGE_COLUMNS = `
   updated_at
 `;
 
+const OUTBOUND_MESSAGE_RETURNING_COLUMNS = `
+  message.id,
+  message.conversation_id,
+  message.reply_draft_id,
+  message.provider,
+  message.provider_message_id,
+  message.content,
+  message.status,
+  message.idempotency_key,
+  message.failure_reason,
+  message.attempts,
+  message.max_attempts,
+  message.queued_at,
+  message.started_at,
+  message.sent_at,
+  message.delivered_at,
+  message.created_at,
+  message.updated_at
+`;
+
 const OUTBOUND_MESSAGE_SELECT_COLUMNS = `
   message.id,
   message.conversation_id,
@@ -400,7 +420,7 @@ export async function claimQueuedOutboundMessages(
             updated_at = now()
         FROM claimed
         WHERE message.id = claimed.id
-        RETURNING ${OUTBOUND_MESSAGE_COLUMNS}
+        RETURNING ${OUTBOUND_MESSAGE_RETURNING_COLUMNS}
       `,
       [batchSize],
     );

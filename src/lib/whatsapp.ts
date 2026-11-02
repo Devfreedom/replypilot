@@ -3,7 +3,7 @@ import {
   OUTBOUND_MESSAGE_STATUSES,
   OUTBOUND_STATUS_LABELS,
   type OutboundMessageStatus,
-} from "./messaging.js";
+} from "./messaging";
 
 const processingStatusSchema = z.enum(["stored", "unsupported"]);
 const outboundStatusSchema = z.enum(OUTBOUND_MESSAGE_STATUSES);

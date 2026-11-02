@@ -3,7 +3,7 @@ import {
   APPROVAL_SEND_POLICIES,
   outboundMessageSchema,
   type OutboundMessage,
-} from "./messaging.js";
+} from "./messaging";
 
 export const LEAD_STATUSES = [
   "New",
