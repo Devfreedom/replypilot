@@ -5356,22 +5356,22 @@ test("Step 6. Signed delivery webhook applies sent, delivered, read, and failed 
     const unknownWamid = `wamid.step6-unknown-${randomUUID()}`;
     const sentOutboundId = await createSentOutbound(
       "Step 6 Sent",
-      "+16505556001",
+      "2348031234501",
       sentWamid,
     );
     const deliveredOutboundId = await createSentOutbound(
       "Step 6 Delivered",
-      "+16505556002",
+      "2348031234502",
       deliveredWamid,
     );
     const readOutboundId = await createSentOutbound(
       "Step 6 Read",
-      "+16505556003",
+      "2348031234503",
       readWamid,
     );
     const failedOutboundId = await createSentOutbound(
       "Step 6 Failed",
-      "+16505556004",
+      "2348031234504",
       failedWamid,
     );
 

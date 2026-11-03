@@ -1425,9 +1425,15 @@ test("22. Older events cannot overwrite newer valid states", async () => {
     [TEST_WORKSPACE_ID, wamid],
   );
   assert.equal(audit.rows.length, 2);
-  assert.equal(audit.rows[0]?.processing_outcome, "processed");
-  assert.equal(audit.rows[1]?.processing_outcome, "ignored");
-  assert.match(audit.rows[1]?.processing_reason ?? "", /stale/i);
+  const deliveredAudit = audit.rows.find(
+    (event) => event.provider_status === "delivered",
+  );
+  const olderSentAudit = audit.rows.find(
+    (event) => event.provider_status === "sent",
+  );
+  assert.equal(deliveredAudit?.processing_outcome, "processed");
+  assert.equal(olderSentAudit?.processing_outcome, "ignored");
+  assert.match(olderSentAudit?.processing_reason ?? "", /stale/i);
 });
 
 test("23. Delivered and read cannot regress to sent", async () => {
