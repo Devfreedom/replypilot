@@ -33,6 +33,7 @@ import type {
   OutboundMessageRecord,
 } from "../src/outbound/types.js";
 import { runOutboundWorkerOnce } from "../src/outbound/worker.js";
+import { recordWorkerHeartbeat } from "../src/outbound/worker-status.js";
 import {
   LEGACY_WORKSPACE_ID,
   bootstrapLegacyWorkspace,
@@ -9869,4 +9870,340 @@ test("Step 9. End-to-end outbound queue, mock worker, history, conversation, and
     false,
     "Provider credentials must never appear in outbound API responses",
   );
+});
+
+// ─── M13 delivery and protection APIs ───────────────────────────────────────
+
+type ProtectionPayload = {
+  runtime: string;
+  providerForWorkspace: "mock" | "whatsapp";
+  defaultApprovalSendPolicy: ApprovalSendPolicy;
+  meta: {
+    enabled: boolean;
+    senderConfigured: boolean;
+    senderPhoneNumberId: string | null;
+    recipientAllowlistCount: number;
+    testWorkspaceConfigured: boolean;
+    workspaceAllowlistedForMeta: boolean;
+    productionBlocked: boolean;
+    productionProtection: string;
+  };
+  inboundWebhook: {
+    configured: boolean;
+    phoneNumberId: string | null;
+    workspaceMatches: boolean;
+  };
+  suppressions: { count: number };
+};
+
+type WorkerStatusPayload = {
+  queue: {
+    counts: Record<string, number>;
+    total: number;
+    oldestQueuedAt: string | null;
+  };
+  heartbeatStaleAfterMs: number;
+  workers: Array<{
+    provider: string;
+    workerId: string;
+    workerStartedAt: string;
+    lastSeenAt: string;
+    lastTick: Record<string, unknown>;
+    stale: boolean;
+  }>;
+};
+
+type SuppressionsPayload = {
+  suppressions: Array<{
+    suppression: {
+      id: string;
+      customerId: string;
+      reason: string;
+      notes: string | null;
+      suppressedAt: string;
+    };
+    customer: {
+      id: string;
+      displayName: string | null;
+      phoneE164: string | null;
+    };
+    conversationCount: number;
+  }>;
+  total: number;
+};
+
+type ConversationProtectionPayload = {
+  protection: {
+    customer: { id: string };
+    serviceWindow: { kind: string };
+    suppression: { reason: string } | null;
+  };
+};
+
+type DeliveryEventsPayload = {
+  events: Array<{
+    id: string;
+    outboundMessageId: string | null;
+    providerMessageId: string;
+    providerStatus: string;
+    duplicateCount: number;
+    processingOutcome: string;
+    providerTimestamp: string;
+    outboundStatus: string | null;
+  }>;
+  pagination: { hasMore: boolean; nextOffset: number | null };
+};
+
+test("M13 protection API summarises provider limits without exposing credentials", async () => {
+  const response = await fetch(`${baseUrl}/api/whatsapp/protection`);
+  assert.equal(response.status, 200);
+  const payload = await readJson<ProtectionPayload>(response);
+
+  assert.equal(payload.providerForWorkspace, "mock");
+  assert.equal(payload.meta.enabled, false);
+  assert.equal(payload.meta.recipientAllowlistCount, 0);
+  assert.equal(payload.inboundWebhook.configured, false);
+  assert.equal(payload.suppressions.count, 0);
+  assert.equal(payload.defaultApprovalSendPolicy, "approve_only");
+  assert.equal(
+    JSON.stringify(payload).includes("EAAB"),
+    false,
+    "Provider credentials must never appear in the protection response",
+  );
+});
+
+test("M13 worker-status API reports queue counts and live heartbeats", async () => {
+  const initial = await fetch(`${baseUrl}/api/outbound-messages/worker-status`);
+  assert.equal(initial.status, 200);
+  const initialPayload = await readJson<WorkerStatusPayload>(initial);
+  assert.equal(initialPayload.queue.total, 0);
+  assert.deepEqual(initialPayload.workers, []);
+
+  await recordWorkerHeartbeat(pool, {
+    provider: "mock",
+    workerId: "test-host:1234",
+    workerStartedAt: new Date(),
+    lastTick: { claimed: 1, sent: 1 },
+  });
+
+  const response = await fetch(`${baseUrl}/api/outbound-messages/worker-status`);
+  assert.equal(response.status, 200);
+  const payload = await readJson<WorkerStatusPayload>(response);
+
+  assert.equal(payload.workers.length, 1);
+  assert.equal(payload.workers[0]?.provider, "mock");
+  assert.equal(payload.workers[0]?.workerId, "test-host:1234");
+  assert.equal(payload.workers[0]?.stale, false);
+  assert.deepEqual(payload.workers[0]?.lastTick, { claimed: 1, sent: 1 });
+});
+
+test("M13 suppression API is workspace-scoped, cancels queued work, and restores", async () => {
+  const { lead, conversationId } = await createLeadWithConversation(
+    {},
+    { providerTimestamp: new Date() },
+  );
+  const draft = await createSavedDraftPayload(lead.id);
+  const approved = await approveSavedDraft(lead.id, draft.id, {
+    status: "approved",
+    sendPolicy: "approve_and_send",
+    conversationId,
+  });
+  assert.equal(approved.status, 200);
+
+  const protectionResponse = await fetch(
+    `${baseUrl}/api/whatsapp/conversations/${conversationId}/protection`,
+  );
+  assert.equal(protectionResponse.status, 200);
+  const protection = await readJson<ConversationProtectionPayload>(
+    protectionResponse,
+  );
+  assert.equal(protection.protection.serviceWindow.kind, "open");
+  assert.equal(protection.protection.suppression, null);
+  const customerId = protection.protection.customer.id;
+
+  const suppressResponse = await jsonRequest(
+    `/api/whatsapp/customers/${customerId}/suppression`,
+    "PUT",
+    { reason: "opt_out", notes: "Fictional demo opt-out" },
+  );
+  assert.equal(suppressResponse.status, 200);
+
+  const suppressions = await readJson<SuppressionsPayload>(
+    await fetch(`${baseUrl}/api/whatsapp/suppressions`),
+  );
+  assert.equal(suppressions.total, 1);
+  assert.equal(suppressions.suppressions[0]?.suppression.reason, "opt_out");
+  assert.equal(suppressions.suppressions[0]?.conversationCount, 1);
+
+  const afterSuppression = await readJson<ConversationProtectionPayload>(
+    await fetch(
+      `${baseUrl}/api/whatsapp/conversations/${conversationId}/protection`,
+    ),
+  );
+  assert.equal(afterSuppression.protection.suppression?.reason, "opt_out");
+
+  const workerResult = await runOutboundWorkerOnce(
+    pool,
+    new MockOutboundMessageProvider(),
+    { staleAfterMs: 60_000 },
+  );
+  assert.equal(workerResult.cancelled, 1);
+  assert.equal(workerResult.claimed, 0);
+
+  const history = await pool.query<{
+    status: string;
+    failure_reason: string | null;
+  }>(
+    `
+      SELECT status, failure_reason
+      FROM outbound_messages
+      WHERE workspace_id = $1 AND reply_draft_id = $2
+    `,
+    [requireSession().workspace.id, draft.id],
+  );
+  assert.equal(history.rows[0]?.status, "cancelled");
+  assert.match(history.rows[0]?.failure_reason ?? "", /suppressed/i);
+
+  const otherSession = await registerUser({
+    email: `m13-isolation-${randomUUID()}@example.test`,
+    name: "M13 Isolation",
+  });
+  const crossWorkspace = await requestAs(
+    otherSession,
+    `/api/whatsapp/customers/${customerId}/suppression`,
+    "PUT",
+    { reason: "admin" },
+  );
+  assert.equal(crossWorkspace.status, 404);
+
+  const restoreResponse = await requestAs(
+    requireSession(),
+    `/api/whatsapp/customers/${customerId}/suppression`,
+    "DELETE",
+  );
+  assert.equal(restoreResponse.status, 200);
+  assert.equal(
+    (await readJson<{ removed: boolean }>(restoreResponse)).removed,
+    true,
+  );
+
+  const afterRestore = await readJson<SuppressionsPayload>(
+    await fetch(`${baseUrl}/api/whatsapp/suppressions`),
+  );
+  assert.equal(afterRestore.total, 0);
+});
+
+test("M13 delivery-event API shows audited events, duplicates, and workspace isolation", async () => {
+  const { lead, conversationId } = await createLeadWithConversation(
+    {},
+    { providerTimestamp: new Date() },
+  );
+  const draft = await createSavedDraftPayload(lead.id);
+  const approved = await approveSavedDraft(lead.id, draft.id, {
+    status: "approved",
+    sendPolicy: "approve_and_send",
+    conversationId,
+  });
+  assert.equal(approved.status, 200);
+
+  const workerResult = await runOutboundWorkerOnce(
+    pool,
+    new MockOutboundMessageProvider(),
+    { staleAfterMs: 60_000 },
+  );
+  assert.equal(workerResult.claimed, 1);
+  assert.equal(workerResult.sent, 1);
+
+  const outbound = await pool.query<{ provider_message_id: string }>(
+    `
+      SELECT provider_message_id
+      FROM outbound_messages
+      WHERE workspace_id = $1 AND reply_draft_id = $2
+    `,
+    [requireSession().workspace.id, draft.id],
+  );
+  assert.match(outbound.rows[0]?.provider_message_id ?? "", /^mock-/);
+
+  // Local delivery fixtures use the same wamid shape Meta sends. The mock
+  // provider's identifier is intentionally not Meta-shaped, so the fixture
+  // assigns a clearly local wamid to the persisted record.
+  const wamid = `wamid.local-${randomUUID()}`;
+  await pool.query(
+    `
+      UPDATE outbound_messages
+      SET provider_message_id = $2
+      WHERE workspace_id = $1 AND reply_draft_id = $3
+    `,
+    [requireSession().workspace.id, wamid, draft.id],
+  );
+
+  const app = await startWhatsAppServer();
+  const body = whatsappDeliveryEnvelope([
+    {
+      id: wamid,
+      status: "delivered",
+      timestamp: String(Math.floor(Date.now() / 1_000)),
+      recipient_id: TEST_WHATSAPP_CUSTOMER_WA_ID,
+    },
+  ]);
+
+  try {
+    const first = await postWhatsApp(app, body);
+    assert.equal(first.status, 200);
+    assert.equal(
+      (await readJson<WhatsAppWebhookPayload>(first)).deliveryProcessed,
+      1,
+    );
+
+    const duplicate = await postWhatsApp(app, body);
+    assert.equal(duplicate.status, 200);
+
+    const eventsResponse = await fetch(
+      `${baseUrl}/api/whatsapp/delivery-events?limit=10`,
+    );
+    assert.equal(eventsResponse.status, 200);
+    const events = await readJson<DeliveryEventsPayload>(eventsResponse);
+    assert.equal(events.events.length, 1);
+    assert.equal(events.events[0]?.providerMessageId, wamid);
+    assert.equal(events.events[0]?.providerStatus, "delivered");
+    assert.equal(events.events[0]?.processingOutcome, "processed");
+    assert.equal(events.events[0]?.duplicateCount, 1);
+    assert.equal(events.events[0]?.outboundStatus, "delivered");
+
+    const otherSession = await registerUser({
+      email: `m13-events-${randomUUID()}@example.test`,
+      name: "M13 Events Isolation",
+    });
+    const isolated = await requestAs(
+      otherSession,
+      "/api/whatsapp/delivery-events?limit=10",
+    );
+    assert.equal(isolated.status, 200);
+    assert.deepEqual(
+      (await readJson<DeliveryEventsPayload>(isolated)).events,
+      [],
+    );
+  } finally {
+    await stopServer(app.server);
+  }
+});
+
+test("M13 protection API reflects a complete Meta test configuration", async () => {
+  await withMetaOutboundEnabled(requireSession().workspace.id, async () => {
+    const response = await fetch(`${baseUrl}/api/whatsapp/protection`);
+    assert.equal(response.status, 200);
+    const payload = await readJson<ProtectionPayload>(response);
+
+    assert.equal(payload.providerForWorkspace, "whatsapp");
+    assert.equal(payload.meta.enabled, true);
+    assert.equal(payload.meta.workspaceAllowlistedForMeta, true);
+    assert.equal(payload.meta.recipientAllowlistCount, 1);
+    assert.equal(payload.meta.senderConfigured, true);
+    assert.equal(payload.meta.productionBlocked, false);
+    assert.equal(
+      JSON.stringify(payload).includes("EAAB"),
+      false,
+      "Provider credentials must never appear in the protection response",
+    );
+  });
 });

@@ -308,6 +308,32 @@ export function OutboundHistory() {
                   </dd>
                 </div>
                 <div>
+                  <dt className="font-medium text-ink-soft">Attempt started</dt>
+                  <dd className="mt-0.5 text-ink">
+                    {item.startedAt
+                      ? formatWhatsAppTimestamp(item.startedAt)
+                      : "Not claimed"}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="font-medium text-ink-soft">
+                    Provider accepted
+                  </dt>
+                  <dd className="mt-0.5 text-ink">
+                    {item.sentAt
+                      ? formatWhatsAppTimestamp(item.sentAt)
+                      : "Not accepted"}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="font-medium text-ink-soft">Delivered</dt>
+                  <dd className="mt-0.5 text-ink">
+                    {item.deliveredAt
+                      ? formatWhatsAppTimestamp(item.deliveredAt)
+                      : "Not reported"}
+                  </dd>
+                </div>
+                <div>
                   <dt className="font-medium text-ink-soft">Attempts</dt>
                   <dd className="mt-0.5 text-ink">
                     {item.attempts} of {item.maxAttempts}

@@ -1,9 +1,11 @@
+import { hostname } from "node:os";
 import { loadConfig } from "../config.js";
 import { createPool } from "../db/pool.js";
 import { loadMetaOutboundConfig } from "./meta-config.js";
 import { MetaWhatsAppCloudProvider } from "./meta-provider.js";
 import { MockOutboundMessageProvider, type OutboundMessageProvider } from "./provider.js";
-import { runOutboundWorkerOnce } from "./worker.js";
+import { runOutboundWorkerOnce, type OutboundWorkerResult } from "./worker.js";
+import { recordWorkerHeartbeat } from "./worker-status.js";
 
 const DEFAULT_POLL_INTERVAL_MS = 2_000;
 const DEFAULT_BATCH_SIZE = 10;
@@ -44,6 +46,39 @@ function sleep(milliseconds: number): Promise<void> {
   });
 }
 
+/**
+ * Local-only controlled-failure controls for the mock provider. They let a
+ * developer demonstrate bounded retries, permanent failure, and manual review
+ * through the real queue/worker path without contacting any provider.
+ *
+ * These variables are rejected in production so a deployment can never be
+ * configured into simulated failures by accident.
+ */
+function readMockControlKeys(name: string): Record<string, number> {
+  const raw = process.env[name]?.trim();
+
+  if (!raw) {
+    return {};
+  }
+
+  if (process.env.NODE_ENV === "production") {
+    throw new Error(
+      `${name} is a local development control and must not be set in production.`,
+    );
+  }
+
+  const keys = raw
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
+
+  if (keys.length === 0) {
+    throw new Error(`${name} must contain at least one idempotency key.`);
+  }
+
+  return Object.fromEntries(keys.map((key) => [key, 10]));
+}
+
 async function main(): Promise<void> {
   const config = loadConfig();
   const pollIntervalMs = positiveInteger(
@@ -59,6 +94,14 @@ async function main(): Promise<void> {
     DEFAULT_STALE_AFTER_MS,
   );
   const pool = createPool(config.databaseUrl);
+  const workerId = `${hostname()}:${process.pid}`;
+  const workerStartedAt = new Date();
+
+  // Local-only controlled failure controls. Empty in normal development.
+  const mockFailKeys = readMockControlKeys("OUTBOUND_MOCK_FAIL_KEYS");
+  const mockAmbiguousKeys = readMockControlKeys(
+    "OUTBOUND_MOCK_AMBIGUOUS_KEYS",
+  );
 
   // Load Meta outbound configuration. Fails closed for production and invalid
   // enabled configurations.
@@ -68,13 +111,18 @@ async function main(): Promise<void> {
     Readonly<{ provider: OutboundMessageProvider; label: string }>
   > = [];
 
+  const mockProvider = new MockOutboundMessageProvider({
+    failures: mockFailKeys,
+    ambiguous: mockAmbiguousKeys,
+  });
+
   if (metaConfig) {
     providers.push({
       provider: new MetaWhatsAppCloudProvider(metaConfig, pool),
       label: `whatsapp (sender=${metaConfig.senderPhoneNumberId}, workspace=${metaConfig.testWorkspaceId})`,
     });
     providers.push({
-      provider: new MockOutboundMessageProvider(),
+      provider: mockProvider,
       label: "mock",
     });
     // Never log the access token or any credential. Only log the provider name
@@ -87,8 +135,20 @@ async function main(): Promise<void> {
     });
   } else {
     providers.push({
-      provider: new MockOutboundMessageProvider(),
+      provider: mockProvider,
       label: "mock",
+    });
+  }
+
+  if (Object.keys(mockFailKeys).length > 0) {
+    log("outbound_worker_mock_failures", {
+      keys: Object.keys(mockFailKeys).length,
+    });
+  }
+
+  if (Object.keys(mockAmbiguousKeys).length > 0) {
+    log("outbound_worker_mock_ambiguous", {
+      keys: Object.keys(mockAmbiguousKeys).length,
     });
   }
 
@@ -116,11 +176,14 @@ async function main(): Promise<void> {
   try {
     while (!stopping) {
       for (const { provider } of providers) {
+        let lastTick: OutboundWorkerResult | Readonly<{ error: string }>;
+
         try {
           const result = await runOutboundWorkerOnce(pool, provider, {
             batchSize,
             staleAfterMs,
           });
+          lastTick = result;
 
           if (
             result.recovered > 0 ||
@@ -135,7 +198,25 @@ async function main(): Promise<void> {
             log("outbound_worker_tick", { provider: provider.name, ...result });
           }
         } catch (error) {
+          lastTick = {
+            error:
+              error instanceof Error ? error.message : "Unknown error.",
+          };
           log("outbound_worker_error", {
+            provider: provider.name,
+            message: lastTick.error,
+          });
+        }
+
+        try {
+          await recordWorkerHeartbeat(pool, {
+            provider: provider.name,
+            workerId,
+            workerStartedAt,
+            lastTick,
+          });
+        } catch (error) {
+          log("outbound_worker_heartbeat_error", {
             provider: provider.name,
             message:
               error instanceof Error ? error.message : "Unknown error.",

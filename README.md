@@ -537,6 +537,87 @@ curl -i -X POST "http://127.0.0.1:4000/api/webhooks/whatsapp" \
 
 A successful response is `200 {"status":"ok","stored":1,"duplicates":0}`. Re-send the exact same body to confirm `duplicates:1` and no second inbox message. Then open `http://localhost:3000/whatsapp` while signed in to the configured workspace.
 
+#### Test delivery-status events locally with a signed fixture
+
+Delivery-status events use the same signed webhook. The mock provider's
+identifier is intentionally not Meta-shaped, so a local fixture first assigns a
+clearly local wamid to the persisted record. This is test bookkeeping only; it
+does not contact Meta.
+
+```bash
+set -a
+. ./.env
+set +a
+
+# Pick a sent mock outbound record and give it a local wamid.
+psql "$DATABASE_URL" -c "
+  UPDATE outbound_messages
+  SET provider_message_id = 'wamid.local-fixture-' || gen_random_uuid()
+  WHERE id = (
+    SELECT id FROM outbound_messages
+    WHERE status = 'sent' AND provider = 'mock'
+    ORDER BY created_at DESC LIMIT 1
+  )
+  RETURNING id, provider_message_id;
+"
+```
+
+Copy the returned `provider_message_id` and build one signed event. Re-send the
+same body to verify deduplication at `/delivery`.
+
+```bash
+WAMID='wamid.local-fixture-REPLACE_ME'
+TS=$(date +%s)
+BODY='{"object":"whatsapp_business_account","entry":[{"id":"waba-local-test","changes":[{"field":"messages","value":{"messaging_product":"whatsapp","metadata":{"display_phone_number":"15550783881","phone_number_id":"'"${WHATSAPP_TEST_PHONE_NUMBER_ID}"'"},"statuses":[{"id":"'"${WAMID}"'","status":"delivered","timestamp":"'"${TS}"'","recipient_id":"16505551234"}]}}]}]}'
+
+SIGNATURE=$(BODY="$BODY" node -e 'const { createHmac } = require("node:crypto"); process.stdout.write("sha256=" + createHmac("sha256", process.env.WHATSAPP_APP_SECRET).update(process.env.BODY, "utf8").digest("hex"));')
+
+curl -i -X POST "http://127.0.0.1:4000/api/webhooks/whatsapp" \
+  -H "Content-Type: application/json" \
+  -H "X-Hub-Signature-256: ${SIGNATURE}" \
+  --data-binary "$BODY"
+```
+
+Change `delivered` to `read` and use a newer timestamp to advance the record.
+An older timestamp, or `sent` after `delivered`/`read`, is audited as ignored
+and cannot regress the outbound status. A `failed` event stores a bounded error
+description. Reusing the same body records a duplicate count instead of applying
+the status twice.
+
+#### Delivery and protection dashboard
+
+Open `http://localhost:3000/delivery` while signed in. The page shows:
+
+- The server-selected outbound provider and whether Meta sending is enabled,
+  the recipient allowlist size, sender configuration, test-workspace match, and
+  whether the production protection is active. Credentials are never returned.
+- Queue counts by status plus standalone-worker heartbeats and the last tick.
+- Workspace-scoped customer suppressions with owner controls to suppress or
+  restore a customer known from an existing conversation.
+- The audited delivery-status events, including provider timestamp, duplicate
+  count, processing outcome, ignored/failed reasons, and the linked outbound
+  status.
+
+The conversation view at `/whatsapp` also shows the 24-hour service-window
+state and the customer's suppression state, with owner opt-out/restore
+controls. These checks are enforced server-side and cannot be bypassed by the
+browser.
+
+#### Local controlled-failure controls
+
+The standalone worker accepts two local-only controls for the mock provider:
+
+| Variable | Purpose |
+| --- | --- |
+| `OUTBOUND_MOCK_FAIL_KEYS` | Comma-separated idempotency keys that fail every attempt, ending in `failed` after the bounded retry limit. |
+| `OUTBOUND_MOCK_AMBIGUOUS_KEYS` | Comma-separated idempotency keys that return an ambiguous outcome, ending in `manual_review` without an automatic retry once the attempt limit is reached. |
+
+Both are rejected when `NODE_ENV=production`. Use them only to demonstrate
+bounded retries, permanent failure, and manual review through the real queue
+and worker. The idempotency key for an approved draft is
+`reply-draft:<draft UUID>`.
+
+
 Automated tests use their own test-only secret and signed fixtures. They do not require real Meta credentials, external network calls, or an actual WhatsApp message.
 
 #### Configure Meta's test assets and webhook subscription

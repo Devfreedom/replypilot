@@ -39,6 +39,10 @@ server-side test configuration, and is rejected in a production runtime.
   draft content. Editing or returning a draft cancels queued work immediately.
   A `sending` claim is a short-lived authorization reservation: mutations that
   race with it receive `409` until the provider outcome is recorded.
+- Writes a heartbeat row for each provider adapter on every poll, including the
+  last bounded tick counters. The authenticated delivery dashboard uses these
+  rows plus persisted queue counts to distinguish an idle worker from a worker
+  that is not running. Heartbeats contain no customer content or credentials.
 
 ## Delivery and idempotency guarantees
 
@@ -89,6 +93,8 @@ Optional environment variables:
 | `OUTBOUND_WORKER_POLL_MS` | `2000` | Delay between worker ticks. |
 | `OUTBOUND_WORKER_BATCH_SIZE` | `10` | Maximum claims per tick. |
 | `OUTBOUND_WORKER_STALE_MS` | `300000` | Age after which a `sending` claim is recovered. |
+| `OUTBOUND_MOCK_FAIL_KEYS` | empty | Local-only idempotency keys that fail every attempt (ends in `failed`). Rejected in production. |
+| `OUTBOUND_MOCK_AMBIGUOUS_KEYS` | empty | Local-only idempotency keys that produce ambiguous outcomes (ends in `manual_review`). Rejected in production. |
 
 ## Run a compiled build
 

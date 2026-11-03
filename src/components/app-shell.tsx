@@ -10,6 +10,7 @@ export type ShellActiveKey =
   | "dashboard"
   | "whatsapp"
   | "outbound"
+  | "delivery"
   | "settings";
 
 const ACCOUNT_NAV_ITEMS: {
@@ -32,6 +33,14 @@ const ACCOUNT_NAV_ITEMS: {
     href: "/outbound",
     icon: (
       <NavIcon path="M22 2 11 13M22 2l-7 20-4-9-9-4 20-7z" />
+    ),
+  },
+  {
+    key: "delivery",
+    label: "Delivery & protection",
+    href: "/delivery",
+    icon: (
+      <NavIcon path="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10zM9 12l2 2 4-4" />
     ),
   },
   {
