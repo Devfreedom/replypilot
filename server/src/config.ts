@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { loadMetaOutboundConfig } from "./outbound/meta-config.js";
 import { loadWhatsAppConfig } from "./whatsapp/config.js";
 import type { WhatsAppIntegrationConfig } from "./whatsapp/types.js";
 
@@ -102,6 +103,8 @@ function parseTrustedOrigins(
 export function loadConfig(
   environment: NodeJS.ProcessEnv = process.env,
 ): ServerConfig {
+  loadMetaOutboundConfig(environment);
+
   const result = environmentSchema.safeParse(environment);
 
   if (!result.success) {

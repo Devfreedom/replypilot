@@ -1,6 +1,8 @@
 import { loadConfig } from "../config.js";
 import { createPool } from "../db/pool.js";
-import { MockOutboundMessageProvider } from "./provider.js";
+import { loadMetaOutboundConfig } from "./meta-config.js";
+import { MetaWhatsAppCloudProvider } from "./meta-provider.js";
+import { MockOutboundMessageProvider, type OutboundMessageProvider } from "./provider.js";
 import { runOutboundWorkerOnce } from "./worker.js";
 
 const DEFAULT_POLL_INTERVAL_MS = 2_000;
@@ -57,7 +59,39 @@ async function main(): Promise<void> {
     DEFAULT_STALE_AFTER_MS,
   );
   const pool = createPool(config.databaseUrl);
-  const provider = new MockOutboundMessageProvider();
+
+  // Load Meta outbound configuration. Fails closed for production and invalid
+  // enabled configurations.
+  const metaConfig = loadMetaOutboundConfig();
+
+  const providers: Array<
+    Readonly<{ provider: OutboundMessageProvider; label: string }>
+  > = [];
+
+  if (metaConfig) {
+    providers.push({
+      provider: new MetaWhatsAppCloudProvider(metaConfig, pool),
+      label: `whatsapp (sender=${metaConfig.senderPhoneNumberId}, workspace=${metaConfig.testWorkspaceId})`,
+    });
+    providers.push({
+      provider: new MockOutboundMessageProvider(),
+      label: "mock",
+    });
+    // Never log the access token or any credential. Only log the provider name
+    // and sender phone-number ID (non-secret) for operational visibility.
+    log("outbound_worker_provider_meta", {
+      senderPhoneNumberId: metaConfig.senderPhoneNumberId,
+      testWorkspaceId: metaConfig.testWorkspaceId,
+      graphApiVersion: metaConfig.graphApiVersion,
+      allowedRecipients: metaConfig.allowedRecipients.size,
+    });
+  } else {
+    providers.push({
+      provider: new MockOutboundMessageProvider(),
+      label: "mock",
+    });
+  }
+
   let stopping = false;
 
   function requestStop(signal: string): void {
@@ -76,34 +110,37 @@ async function main(): Promise<void> {
     pollIntervalMs,
     batchSize,
     staleAfterMs,
-    provider: "mock",
+    providers: providers.map(({ label }) => label),
   });
 
   try {
     while (!stopping) {
-      try {
-        const result = await runOutboundWorkerOnce(pool, provider, {
-          batchSize,
-          staleAfterMs,
-        });
+      for (const { provider } of providers) {
+        try {
+          const result = await runOutboundWorkerOnce(pool, provider, {
+            batchSize,
+            staleAfterMs,
+          });
 
-        if (
-          result.recovered > 0 ||
-          result.cancelled > 0 ||
-          result.claimed > 0 ||
-          result.sent > 0 ||
-          result.retried > 0 ||
-          result.failed > 0 ||
-          result.manualReview > 0 ||
-          result.skipped > 0
-        ) {
-          log("outbound_worker_tick", result);
+          if (
+            result.recovered > 0 ||
+            result.cancelled > 0 ||
+            result.claimed > 0 ||
+            result.sent > 0 ||
+            result.retried > 0 ||
+            result.failed > 0 ||
+            result.manualReview > 0 ||
+            result.skipped > 0
+          ) {
+            log("outbound_worker_tick", { provider: provider.name, ...result });
+          }
+        } catch (error) {
+          log("outbound_worker_error", {
+            provider: provider.name,
+            message:
+              error instanceof Error ? error.message : "Unknown error.",
+          });
         }
-      } catch (error) {
-        log("outbound_worker_error", {
-          message:
-            error instanceof Error ? error.message : "Unknown worker error.",
-        });
       }
 
       if (!stopping) {

@@ -8,6 +8,7 @@ import {
   canRetryOutboundForRole,
   parseOutboundMessagesResponse,
   parseSendOutboundMessageResponse,
+  retryBlockDescription,
   type OutboundHistoryItem,
   type OutboundMessageStatus,
 } from "@/lib/messaging";
@@ -206,8 +207,9 @@ export function OutboundHistory() {
           </h1>
           <p className="mt-2 max-w-2xl text-sm leading-6 text-ink-soft">
             Queued and attempted replies for this workspace. Provider acceptance
-            is shown separately from delivery. This page uses the mock provider;
-            no message is sent to WhatsApp.
+            is shown separately from delivery. The server selects the provider;
+            Meta sends are limited to configured test workspaces and recipients
+            and are unavailable in production.
           </p>
         </div>
         <label className="field-label min-w-44">
@@ -326,6 +328,12 @@ export function OutboundHistory() {
                 {OUTBOUND_STATUS_DESCRIPTIONS[item.status]}
                 {item.failureReason ? ` ${item.failureReason}` : ""}
               </p>
+              {item.status === "failed" && item.retryBlockReason ? (
+                <p className="mt-2 text-xs leading-5 text-warning-ink">
+                  Retry unavailable:{" "}
+                  {retryBlockDescription(item.retryBlockReason)}
+                </p>
+              ) : null}
             </li>
           ))}
         </ul>

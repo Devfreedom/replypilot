@@ -10,6 +10,7 @@ export const OUTBOUND_MESSAGE_STATUSES = [
   "sending",
   "sent",
   "delivered",
+  "read",
   "failed",
   "cancelled",
   "manual_review",

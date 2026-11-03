@@ -106,3 +106,31 @@ export type PersistInboundResult = Readonly<{
   stored: number;
   duplicates: number;
 }>;
+
+/**
+ * A parsed delivery-status event from Meta's webhook `statuses` array.
+ * The `providerMessageId` (wamid) is used to match the event back to the
+ * corresponding outbound_messages row.
+ */
+export type DeliveryStatusEvent = Readonly<{
+  /** The wamid of the outbound message this event refers to. */
+  providerMessageId: string;
+  /** The phone-number ID that sent the message (the business sender). */
+  phoneNumberId: string;
+  /**
+   * Provider status. Only the four statuses listed below are processed;
+   * others (e.g. "read", "warning") are captured here for completeness.
+   */
+  status: "sent" | "delivered" | "read" | "failed" | string;
+  /**
+   * The authoritative event timestamp from Meta, in seconds since epoch.
+   * This is preserved exactly as provided by Meta.
+   */
+  providerTimestamp: Date;
+  /**
+   * Bounded error description for failed events. Never includes sensitive
+   * provider data beyond error code and type.
+   */
+  errorDescription: string | null;
+}>;
+

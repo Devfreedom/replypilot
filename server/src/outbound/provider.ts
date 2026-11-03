@@ -4,6 +4,19 @@ export type OutboundProviderSendInput = Readonly<{
   conversationId: string;
   content: string;
   idempotencyKey: string;
+  /**
+   * E.164-normalized recipient phone number resolved from the outbound row's
+   * conversation customer. Null when the customer is identified only by a
+   * provider contact ID (e.g. a BSUID) and has no phone number. Providers
+   * that require a phone number (e.g. Meta Cloud API) must reject null here.
+   */
+  recipientPhone: string | null;
+  /**
+   * The workspace that owns this send request. Providers that restrict real
+   * sending to a configured test workspace validate this before calling the
+   * upstream API.
+   */
+  workspaceId: string;
 }>;
 
 export type OutboundProviderSendResult = Readonly<{
@@ -53,10 +66,6 @@ export class MockOutboundMessageProvider implements OutboundMessageProvider {
   readonly name = "mock";
   readonly idempotency = "guaranteed" as const;
   private readonly failures = new Map<string, number>();
-  private readonly accepted = new Map<
-    string,
-    OutboundProviderSendResult
-  >();
   private readonly failAll: boolean;
 
   constructor(options: MockOutboundMessageProviderOptions = {}) {
@@ -79,12 +88,6 @@ export class MockOutboundMessageProvider implements OutboundMessageProvider {
   async send(
     input: OutboundProviderSendInput,
   ): Promise<OutboundProviderSendResult> {
-    const accepted = this.accepted.get(input.idempotencyKey);
-
-    if (accepted) {
-      return accepted;
-    }
-
     const remaining = this.failures.get(input.idempotencyKey) ?? 0;
 
     if (this.failAll || remaining > 0) {
@@ -102,12 +105,9 @@ export class MockOutboundMessageProvider implements OutboundMessageProvider {
       .digest("hex")
       .slice(0, 24);
 
-    const result = {
+    return {
       providerMessageId: `mock-${digest}`,
       status: "sent",
     } as const;
-
-    this.accepted.set(input.idempotencyKey, result);
-    return result;
   }
 }

@@ -2,6 +2,7 @@ import type { Pool, PoolClient } from "pg";
 import type { OutboundMessageStatus } from "../messaging/types.js";
 import { encodeMessageCursor, type MessageCursor } from "./cursor.js";
 import { normalizeWhatsAppPhoneE164 } from "./phone.js";
+import { suppressCustomer } from "./suppression.js";
 import type {
   ConversationStatus,
   ConversationSummary,
@@ -538,6 +539,26 @@ async function updateCustomerAfterMessage(
   );
 }
 
+function isExplicitOptOutRequest(message: InboundWhatsAppMessage): boolean {
+  if (message.messageType !== "text" || !message.text) {
+    return false;
+  }
+
+  const text = message.text
+    .trim()
+    .toLowerCase()
+    .replace(/[’‘]/g, "'");
+
+  return (
+    /^(?:please\s+)?(?:stop|unsubscribe|cancel|end|quit)(?:\s+(?:all|messages?|texts?|updates?))*[.!]*$/.test(
+      text,
+    ) ||
+    /^(?:please\s+)?(?:stop\s+(?:messaging|texting|contacting)\s+me|do\s+not\s+(?:message|text|contact)\s+me|don't\s+(?:message|text|contact)\s+me)[.!]*$/.test(
+      text,
+    )
+  );
+}
+
 /**
  * Stores every inbound message exactly once. A single transaction keeps
  * connection resolution, customer creation, conversation creation/reopening,
@@ -654,6 +675,16 @@ export async function persistInboundMessages(
         displayName: message.contactName,
         providerTimestamp: message.providerTimestamp,
       });
+
+      if (isExplicitOptOutRequest(message)) {
+        await suppressCustomer(client, {
+          workspaceId,
+          customerId,
+          reason: "opt_out",
+          notes: "Customer requested no further messages through WhatsApp.",
+        });
+      }
+
       stored += 1;
     }
 
@@ -781,6 +812,26 @@ export async function listConversationSummaries(
       .map(mapConversationSummaryRow),
     hasMore,
   };
+}
+
+export async function listConversationsForLead(
+  pool: Pool,
+  workspaceId: string,
+  leadId: string,
+): Promise<ConversationSummary[]> {
+  const result = await pool.query<ConversationSummaryRow>(
+    `
+      ${CONVERSATION_SUMMARY_SELECT}
+      WHERE conversation.workspace_id = $1
+        AND conversation.lead_id = $2
+      ORDER BY
+        COALESCE(latest.provider_timestamp, conversation.created_at) DESC,
+        conversation.id ASC
+    `,
+    [workspaceId, leadId],
+  );
+
+  return result.rows.map(mapConversationSummaryRow);
 }
 
 export async function getConversationSummary(

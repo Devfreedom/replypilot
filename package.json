@@ -13,7 +13,7 @@
     "worker:outbound": "node --env-file-if-exists=.env --import tsx server/src/outbound/worker-cli.ts",
     "start:worker": "node --env-file-if-exists=.env server/dist/outbound/worker-cli.js",
     "typecheck:api": "tsc -p server/tsconfig.test.json",
-    "test:api": "node --env-file-if-exists=.env --import tsx --test server/test/*.test.ts",
+    "test:api": "node --env-file-if-exists=.env --import tsx --test --test-concurrency=1 server/test/*.test.ts",
     "test:web": "node --import tsx --test src/lib/*.test.ts",
     "db:migrate": "node --env-file-if-exists=.env --import tsx server/src/db/migrate-cli.ts",
     "db:seed": "node --env-file-if-exists=.env --import tsx server/src/db/seed-cli.ts",

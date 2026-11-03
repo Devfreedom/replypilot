@@ -20,7 +20,7 @@ This project uses [`next/font`](https://nextjs.org/docs/app/building-your-applic
 
 ## API, authentication, and local PostgreSQL
 
-> **Not production-ready warning:** email/password authentication and workspace isolation are implemented, but this application still needs HTTPS, production origin and cookie review, email verification, password recovery, deployment hardening, operational monitoring, and a complete security review before production use. Reply generation and the outbound queue provider remain mock-only. WhatsApp integration is inbound-only; real WhatsApp outbound delivery is not implemented. Do not use real customer or business data yet.
+> **Not production-ready warning:** email/password authentication and workspace isolation are implemented, but this application still needs HTTPS, production origin and cookie review, email verification, password recovery, deployment hardening, operational monitoring, and a complete security review before production use. Reply generation remains a mock. Meta outbound sending is a restricted test integration, disabled by default and unavailable in production; do not use real customer or business data.
 
 The Express API is a separate development service. It binds to `127.0.0.1` and must not be exposed publicly. The browser dashboard is a separate Next.js app; it proxies `/api/*` requests to `API_ORIGIN`, which defaults to `http://127.0.0.1:4000`. This keeps Better Auth and business API requests same-origin from the browser, so session cookies flow through the rewrite.
 
@@ -346,7 +346,7 @@ A saved draft response is wrapped as `{"draft":{...}}`:
 
 Draft status starts as `draft` with `approvedAt: null`. Approval with `{"status":"approved"}` records the timestamp. Saving edited text returns the draft to `draft` and clears approval. Regeneration updates the same draft in place, refreshes the business-fact snapshot, and resets approval because the content changed. `{"status":"draft"}` explicitly returns an approved draft to draft status. Editing and approving in the same request is rejected; save the edited text first, then approve it as a separate review action.
 
-Approval is a review action, not a legal signature or proof that edited text is factually correct. Depending on the workspace policy or a per-draft override, approval can create a record in ReplyPilot's separate mock outbound queue. The mock worker does not send a WhatsApp, email, Instagram, or other customer message; real WhatsApp outbound delivery is not implemented.
+Approval is a review action, not a legal signature or proof that edited text is factually correct. Depending on the workspace policy or a per-draft override, approval can create a durable outbound record. The server selects the provider: the configured Meta test workspace uses WhatsApp only when the complete server-side configuration is enabled; other workspaces use the mock provider. A browser request cannot select a provider or override workspace, sender, recipient, or approval restrictions.
 
 #### How business facts are selected and snapshotted
 
@@ -358,9 +358,9 @@ The saved `sources` snapshot preserves the original approved values even if a ca
 
 The Draft Reply dialog shows the enquiry summary, missing information, **Business information used**, editable text, demo labeling, review status, save/regenerate/copy/approve actions, and previously saved drafts for the lead. Reopening it restores the latest saved text, snapshot, and status; if the lead has no saved draft, it generates and saves one. Editing warns that changes may no longer be supported by the original facts.
 
-### WhatsApp Cloud API inbound test integration
+### WhatsApp Cloud API test integration
 
-This integration implements **inbound-only** WhatsApp Cloud API handling for exactly one Meta test phone number and one configured ReplyPilot workspace. Inbound webhook messages are stored and shown in the inbox. This integration does not send WhatsApp messages, generate automatic replies, call the AI provider, download media, or implement Meta Embedded Signup. Outbound drafts use the separate mock queue described below; they are not sent through WhatsApp.
+The integration supports inbound webhook messages, delivery-status webhooks, and restricted outbound test sends. It is limited to one configured inbound phone number/workspace and one configured outbound sender/test workspace. Real sending is disabled by default and rejected whenever the server runtime is production. The integration does not generate automatic replies, download media, or implement Meta Embedded Signup.
 
 Supported behavior:
 
@@ -370,17 +370,20 @@ Supported behavior:
 - Phone-number and business-scoped user ID (BSUID) senders. Current Meta payloads can omit a phone number when a customer has adopted a username; the BSUID is then used as the stable conversation identifier.
 - Multiple entries, changes, and messages in one webhook delivery.
 - Transactional conversation/message persistence, duplicate provider-message detection, and exact lead association.
+- Deterministic opt-out handling for explicit customer requests; suppression is workspace-scoped and checked before queue processing and immediately before a Meta request.
+- Durable, deduplicated delivery-event auditing with provider timestamps and out-of-order status protection.
 - A protected read-only test inbox at `/whatsapp` in the authenticated dashboard.
 
-### Mock outbound queue and worker
+### Outbound queue and worker
 
 Approved drafts may either remain approval-only or create a durable outbound
 record according to the workspace policy and per-draft override. Owners can
-also explicitly queue an already approved draft. The standalone worker uses a
-mock provider and never calls WhatsApp or another external messaging service.
-Outbound records appear in history and conversation threads; `sent` means mock
-provider acceptance, not customer delivery. `delivered` is a separate status
-and is not produced by this mock integration.
+also explicitly queue an already approved draft. The standalone worker claims
+provider-specific records; it uses the mock provider by default and can use
+Meta only for the configured test workspace, sender, and recipient allowlist.
+Outbound records appear in history and conversation threads. `sent` means
+provider acceptance, not customer delivery; `delivered` and `read` are separate
+webhook-reported states.
 
 The worker preserves the same idempotency key for every attempt of an outbound
 record. A provider adapter must declare guaranteed idempotency before ambiguous
@@ -394,12 +397,13 @@ failure between the final authorization check and provider execution is an
 unavoidable boundary; provider idempotency or manual reconciliation is needed
 to handle an unknown outcome safely.
 
-**Real WhatsApp outbound delivery is not implemented.** The inbound webhook
-integration and this mock queue/worker are separate systems.
+The inbound webhook route also receives signed delivery-status events. The
+server-side test integration described above is the only supported Meta
+outbound route.
 
-#### Required environment variables
+#### Inbound webhook configuration
 
-Add these server-only values to `.env` (or your deployment's secret store). Leave all four empty to disable the integration. If any one is set, all four must be valid or the API refuses to start; startup errors name variables but never print their values.
+Add these server-only values to `.env` (or a secret store). Leave all four empty to disable inbound webhooks. If any is set, all four must be valid or API startup fails; errors name variables but never print values.
 
 | Variable | Purpose |
 | --- | --- |
@@ -418,14 +422,57 @@ JOIN auth_users u ON u.id = m.user_id
 WHERE u.email = 'owner@example.test';
 ```
 
-There is no public or browser endpoint for changing the configured workspace or phone-number ID. The Meta access token is not needed for inbound-only processing, so do not add one for this milestone.
+There is no public or browser endpoint for changing the configured workspace or phone-number ID.
 
-Apply the migration and restart both services after configuring the variables:
+#### Restricted Meta outbound test configuration
+
+Real sending requires all variables below, but remains disabled unless
+`META_OUTBOUND_ENABLED=true`. Invalid or incomplete enabled configuration fails
+startup closed. The API and worker reject this configuration in a production
+runtime regardless of the enablement flag; leave it `false` outside isolated
+test environments. No frontend field can alter these restrictions.
+
+| Variable | Purpose |
+| --- | --- |
+| `META_OUTBOUND_ENABLED` | Must be `true` to enable Meta sending; default is `false`. |
+| `META_ACCESS_TOKEN` | Server-only Meta access token. Keep it in a secret store, never in URLs/logs/responses, and rotate before expiry or immediately if exposed. |
+| `META_GRAPH_API_VERSION` | Explicit Graph version such as `v21.0`; keep it current and supported in Meta. |
+| `WHATSAPP_SENDER_PHONE_NUMBER_ID` | Numeric test-business sender ID; server-enforced. |
+| `META_OUTBOUND_TEST_WORKSPACE_ID` | UUID of the single workspace permitted to use Meta sending. |
+| `META_TEST_RECIPIENT_PHONE_NUMBERS` | Non-empty, comma-separated E.164 recipient allowlist; configuration permits at most 50 entries. Non-allowlisted recipients are rejected before HTTP. |
+
+Use only a Meta test sender and explicitly opted-in test recipients. Configure
+the app with the WhatsApp Business Platform and grant only the WhatsApp
+messaging/management permissions required by the Meta setup for the selected
+test assets (typically `whatsapp_business_messaging` and
+`whatsapp_business_management`). Meta may require business/app review for
+non-test assets; this milestone does not enable broad production sending.
+Tokens expire or may be revoked; rotate them through the deployment secret
+store and restart the API/worker. The Graph API version is configured
+server-side and never supplied by the browser.
+
+Before queueing, the server verifies approval, workspace, sender, recipient
+allowlist, and a valid authoritative inbound provider timestamp within
+WhatsApp's 24-hour customer-service window. Clear opt-out commands are
+persisted as workspace-scoped suppression records; suppressed recipients are
+blocked before worker claiming and rechecked immediately before the Meta
+request. Suppression is not automatically removed. An ambiguous timeout or
+unknown provider outcome moves to `manual_review` rather than risking an
+automatic duplicate; reconcile it against Meta before any separately
+authorized action.
+
+For mock-only development/testing, keep `META_OUTBOUND_ENABLED=false` and run
+the same queue/worker flow. Automated tests mock HTTP and never use a real
+token or send a WhatsApp message.
+
+Apply the migration, then start the API, frontend, and standalone worker (each
+in its own terminal) after configuring the variables:
 
 ```bash
 npm run db:migrate
 npm run dev:api
 npm run dev
+npm run worker:outbound
 ```
 
 #### Webhook verification and signature behavior
@@ -443,10 +490,11 @@ npm run dev
 - Uses `express.raw()` only for this route, mounted **before** the shared `express.json()` parser. This preserves the exact bytes Meta signed.
 - Requires `X-Hub-Signature-256: sha256=<64 hex characters>`.
 - Computes HMAC-SHA256 with `WHATSAPP_APP_SECRET`, checks lengths before a timing-safe comparison, and rejects missing, malformed, or invalid signatures with `401`.
-- Parses only `whatsapp_business_account` events for the configured `phone_number_id`. Status-only events, template events, other business numbers, and unknown event types return `200 {"status":"ignored"}`.
+- Parses `whatsapp_business_account` messages and delivery statuses for the configured inbound `phone_number_id`. Unrelated events and other business numbers return `200 {"status":"ignored"}`.
+- Persists valid delivery-status events with a stable deduplication key, original provider timestamp, receipt timestamp, workspace and outbound association. Older statuses cannot regress newer message states; unknown or unsupported statuses are audited as ignored.
 - Returns `400` for malformed signed payloads, `503` if the configured workspace no longer exists, and `500` if persistence fails. A non-200 response causes Meta to retry, so a failed store is never falsely acknowledged.
 - Does not log raw payloads, signatures, message bodies, or secret values.
-- Never calls the Graph API, the AI provider, or any sending function.
+- Does not call the AI provider or send a message as a side effect of webhook processing.
 
 #### Conversation and message persistence
 
@@ -498,19 +546,18 @@ Automated tests use their own test-only secret and signed fixtures. They do not 
 3. Put the Phone number ID, app secret, your chosen verify token, and the ReplyPilot workspace UUID into `.env`, then restart the API.
 4. Expose the local app over HTTPS with a tunnel or deploy it. Meta requires a publicly reachable callback with a valid TLS certificate; self-signed certificates are not supported.
 5. In **WhatsApp → Configuration** (or the app's webhook configuration), set the callback URL to `https://<your-public-host>/api/webhooks/whatsapp` and the verify token to exactly `WHATSAPP_WEBHOOK_VERIFY_TOKEN`. Complete Meta's **Verify and save** step.
-6. Subscribe the WhatsApp Business Account to the **messages** webhook field. Follow the current [Meta webhook endpoint guide](https://developers.facebook.com/documentation/business-messaging/whatsapp/webhooks/create-webhook-endpoint) and [payload reference](https://developers.facebook.com/docs/whatsapp/cloud-api/webhooks/payload-examples) for dashboard details that may change.
+6. Subscribe the WhatsApp Business Account to the **messages** webhook field; Meta delivers inbound messages and delivery-status updates through this subscription. Follow the current [Meta webhook endpoint guide](https://developers.facebook.com/documentation/business-messaging/whatsapp/webhooks/create-webhook-endpoint) and [payload reference](https://developers.facebook.com/docs/whatsapp/cloud-api/webhooks/payload-examples) for dashboard details that may change.
 7. From the test recipient, send a text message to the Meta test business number. It should appear at `/whatsapp` after a refresh. If the dashboard does not deliver the event, confirm the app/webhook subscription state, callback URL, verify token, and that the event's `phone_number_id` matches `WHATSAPP_TEST_PHONE_NUMBER_ID`.
 
 The Next.js `/api/*` rewrite can forward the public callback to the local Express API. Alternatively, route the same HTTPS path to the API with your own reverse proxy. Keep `/api/webhooks/whatsapp` public for Meta, but keep the rest of the API private.
 
-#### Inbound WhatsApp limitations
+#### WhatsApp test integration limitations
 
-- Exactly one configured test phone-number ID and one workspace. There is no Embedded Signup, multi-number management, or workspace-selection UI.
-- The WhatsApp integration is inbound-only: there are no outbound Graph API calls, templates, automatic replies, or real delivery-status webhooks. Mock outbound records may appear in the inbox thread, but they are not WhatsApp sends.
+- Exactly one configured inbound test phone-number ID/workspace and one outbound sender/test workspace/recipient allowlist. There is no Embedded Signup, multi-number management, or workspace-selection UI.
+- No templates, automatic replies, or production-wide sending. Outbound Meta delivery is restricted test functionality and remains disabled in production.
 - No media download or transcription. Unsupported types are stored with their provider type and shown as unsupported.
 - No automatic lead creation or name-based matching. A conversation links only by exact saved WhatsApp number; otherwise it stays unassociated.
-- No live Meta webhook delivery is exercised by the automated test suite. Tests prove the local verification, signature, parsing, persistence, idempotency, isolation, and inbox behavior only.
-- Real outbound sending still requires a provider integration, applicable WhatsApp policy/template and opt-in handling, delivery-status webhooks, and reviewed idempotency/reconciliation behavior.
+- Automated tests use signed fixtures and mocked HTTP; they do not prove live Meta dashboard configuration, real delivery, or provider-side reconciliation.
 
 ### Manual authentication and isolation checks
 
@@ -531,7 +578,7 @@ These checks verify the browser flow and the server boundary. Use fictional data
 - The legacy workspace is assigned only by the guarded local CLI. There is no public bootstrap endpoint, first-user claim, or production admin console.
 - Production requires HTTPS, `BETTER_AUTH_URL` with an HTTPS origin, a secret from a deployment secret store, explicit trusted origins, secure reverse-proxy/header handling, backups, and a security review. The API currently binds to `127.0.0.1` for local development.
 - Better Auth's default rate-limit storage and the Express process model need review before horizontal scaling. Use a shared, reviewed rate-limit store if multiple API instances are deployed. Rate limiting also needs a trustworthy client IP: deploy behind a trusted reverse proxy that supplies one validated `X-Forwarded-For` value, and configure Better Auth trusted proxies (or equivalent) for multi-hop deployments. Without a resolvable IP, Better Auth falls back to a shared per-path bucket.
-- Reply generation and the outbound queue provider are deterministic mocks. WhatsApp integration is inbound-only; there is no live AI provider, real outbound WhatsApp sending, approved-template sending, webhook media download, scheduling, or customer-message delivery. Approval can enqueue a mock outbound record but does not itself deliver a customer message.
+- Reply generation remains a deterministic mock. Meta outbound is restricted to the configured test workspace, sender, and recipient allowlist, and is unavailable in production. There is no live AI provider, approved-template sending, webhook media download, scheduling, or production-wide customer messaging. Approval can enqueue a mock record or (for the configured test workspace when enabled) a Meta test record; the worker performs delivery separately.
 - There is no audit log for business-record changes, no account recovery support workflow, and no automated backup/restore verification. Do not treat passing tests as evidence that the application is production-ready.
 
 ## Learn More

@@ -1,6 +1,12 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useEffectEvent,
+  useRef,
+  useState,
+} from "react";
 import {
   parseReplyDraftApprovalResponse,
   parseReplyDraftsResponse,
@@ -16,13 +22,16 @@ import {
   APPROVAL_SEND_POLICY_LABELS,
   OUTBOUND_STATUS_DESCRIPTIONS,
   OUTBOUND_STATUS_LABELS,
+  isRetryableConversationStatus,
   parseMessagingSettingsResponse,
+  parseOutboundMessageLookupResponse,
+  preferredConversationIdForDraft,
   sendPolicyChoiceForDraftSelection,
   type ApprovalSendPolicy,
   type OutboundMessage,
 } from "@/lib/messaging";
 import {
-  conversationDisplayName,
+  conversationOptionLabel,
   parseConversationsResponse,
   type WhatsAppConversation,
 } from "@/lib/whatsapp";
@@ -161,7 +170,12 @@ export function DraftReplyDialog({
 }) {
   const dialogRef = useRef<HTMLDialogElement>(null);
   const requestIdRef = useRef(0);
+  const approvalContextRequestIdRef = useRef(0);
+  const outboundRequestIdRef = useRef(0);
+  const conversationsRequestIdRef = useRef(0);
   const loadedLeadIdRef = useRef<string | null>(null);
+  const conversationsRef = useRef<WhatsAppConversation[]>([]);
+  const outboundMessageRef = useRef<OutboundMessage | null>(null);
   const [drafts, setDrafts] = useState<SavedReplyDraft[]>([]);
   const [selectedDraftId, setSelectedDraftId] = useState<string | null>(null);
   const [editedReply, setEditedReply] = useState("");
@@ -185,8 +199,13 @@ export function DraftReplyDialog({
   const [approvalContextError, setApprovalContextError] = useState<
     string | null
   >(null);
+  const [approvalContextLoading, setApprovalContextLoading] = useState(false);
   const [outboundMessage, setOutboundMessage] =
     useState<OutboundMessage | null>(null);
+  const [outboundLoading, setOutboundLoading] = useState(false);
+  const [outboundLoadError, setOutboundLoadError] = useState<string | null>(
+    null,
+  );
 
   const selectedDraft =
     drafts.find((draft) => draft.id === selectedDraftId) ?? null;
@@ -202,12 +221,73 @@ export function DraftReplyDialog({
     ? conversations.filter(
         (conversation) =>
           conversation.leadId === lead.id &&
-          (conversation.status === "open" ||
-            conversation.status === "closed"),
+          isRetryableConversationStatus(conversation.status),
       )
     : [];
+  const outboundConversation = outboundMessage
+    ? conversations.find(
+        (conversation) =>
+          conversation.id === outboundMessage.conversationId,
+      ) ?? null
+    : null;
+  const outboundConversationIsEligible =
+    outboundMessage !== null &&
+    eligibleConversations.some(
+      (conversation) => conversation.id === outboundMessage.conversationId,
+    );
+  const retryBlockedByContentChange =
+    outboundMessage?.status === "failed" &&
+    selectedDraft !== null &&
+    outboundMessage.content !== selectedDraft.draftReply;
+  const retryBlockedByInactiveConversation =
+    outboundMessage?.status === "failed" && !outboundConversationIsEligible;
+  const outboundAlreadyHandled =
+    outboundMessage !== null && outboundMessage.status !== "failed";
+
+  const setConversationsForLead = useCallback(
+    (leadId: string, nextConversations: WhatsAppConversation[]) => {
+      conversationsRef.current = nextConversations;
+      setConversations(nextConversations);
+      setSelectedConversationId(
+        preferredConversationIdForDraft(
+          outboundMessageRef.current?.conversationId ?? null,
+          nextConversations.filter(
+            (conversation) =>
+              conversation.leadId === leadId &&
+              isRetryableConversationStatus(conversation.status),
+          ),
+        ),
+      );
+    },
+    [],
+  );
+
+  const setOutboundForLead = useCallback(
+    (leadId: string, nextOutboundMessage: OutboundMessage | null) => {
+      outboundMessageRef.current = nextOutboundMessage;
+      setOutboundMessage(nextOutboundMessage);
+      setSelectedConversationId(
+        preferredConversationIdForDraft(
+          nextOutboundMessage?.conversationId ?? null,
+          conversationsRef.current.filter(
+            (conversation) =>
+              conversation.leadId === leadId &&
+              isRetryableConversationStatus(conversation.status),
+          ),
+        ),
+      );
+    },
+    [],
+  );
 
   function replaceDraft(nextDraft: SavedReplyDraft) {
+    if (nextDraft.id !== selectedDraftId) {
+      outboundRequestIdRef.current += 1;
+      setOutboundForLead(lead?.id ?? "", null);
+      setOutboundLoadError(null);
+      setOutboundLoading(false);
+    }
+
     setSendPolicyChoice((choice) =>
       sendPolicyChoiceForDraftSelection(
         selectedDraftId,
@@ -231,6 +311,7 @@ export function DraftReplyDialog({
   }
 
   function selectDraft(draft: SavedReplyDraft) {
+    outboundRequestIdRef.current += 1;
     setSendPolicyChoice((choice) =>
       sendPolicyChoiceForDraftSelection(
         selectedDraftId,
@@ -244,153 +325,251 @@ export function DraftReplyDialog({
     setValidationError(null);
     setNotice(null);
     setCopyMessage(null);
-    setOutboundMessage(null);
+    setOutboundForLead(lead?.id ?? "", null);
+    setOutboundLoadError(null);
+    if (lead) {
+      void loadOutboundMessage(draft.id, lead.id);
+    }
   }
 
-  async function loadApprovalContext(selectedLead: Lead) {
-    setApprovalContextError(null);
+  const loadOutboundMessage = useCallback(
+    async (draftId: string, leadId: string) => {
+      const requestId = ++outboundRequestIdRef.current;
+      const conversationsRequestId = ++conversationsRequestIdRef.current;
+      setOutboundLoading(true);
+      setOutboundLoadError(null);
 
-    try {
-      const [settingsResponse, openResponse, closedResponse] =
-        await Promise.all([
-          fetch("/api/settings/messaging"),
-          fetch("/api/conversations?status=open&limit=100"),
-          fetch("/api/conversations?status=closed&limit=100"),
+      try {
+        const [response, conversationsResponse] = await Promise.all([
+          fetch(`/api/outbound-messages/by-draft/${draftId}`),
+          fetch(`/api/conversations/by-lead/${leadId}`),
         ]);
-      const [settingsData, openData, closedData] = await Promise.all([
-        readJson(settingsResponse),
-        readJson(openResponse),
-        readJson(closedResponse),
-      ]);
+        const [data, conversationsData] = await Promise.all([
+          readJson(response),
+          readJson(conversationsResponse),
+        ]);
 
-      if (settingsResponse.ok) {
-        const settings = parseMessagingSettingsResponse(settingsData);
+        if (!response.ok) {
+          throw new Error(
+            errorMessage(data, "Unable to load this draft's outbound status."),
+          );
+        }
 
-        if (settings) {
-          setDefaultApprovalSendPolicy(settings.defaultApprovalSendPolicy);
+        if (!conversationsResponse.ok) {
+          throw new Error(
+            errorMessage(
+              conversationsData,
+              "Unable to refresh WhatsApp conversation status.",
+            ),
+          );
+        }
+
+        const result = parseOutboundMessageLookupResponse(data);
+
+        if (!result) {
+          throw new Error(
+            "The outbound message service returned an unexpected response.",
+          );
+        }
+
+        const conversationResult =
+          parseConversationsResponse(conversationsData);
+
+        if (!conversationResult) {
+          throw new Error(
+            "The conversation service returned an unexpected response.",
+          );
+        }
+
+        if (
+          requestId === outboundRequestIdRef.current &&
+          conversationsRequestId === conversationsRequestIdRef.current
+        ) {
+          setConversationsForLead(leadId, conversationResult.conversations);
+          setOutboundForLead(leadId, result.outboundMessage);
+        }
+      } catch (requestError) {
+        if (
+          requestId === outboundRequestIdRef.current &&
+          conversationsRequestId === conversationsRequestIdRef.current
+        ) {
+          setOutboundLoadError(
+            requestError instanceof Error
+              ? requestError.message
+              : "Unable to load this draft's outbound status.",
+          );
+        }
+      } finally {
+        if (requestId === outboundRequestIdRef.current) {
+          setOutboundLoading(false);
         }
       }
+    },
+    [setConversationsForLead, setOutboundForLead],
+  );
 
-      if (!openResponse.ok || !closedResponse.ok) {
-        setApprovalContextError(
-          errorMessage(
-            openData,
-            "Unable to load WhatsApp conversations for this lead.",
-          ),
-        );
-        return;
+  async function loadApprovalContext(selectedLead: Lead) {
+      const requestId = ++approvalContextRequestIdRef.current;
+      const conversationsRequestId = ++conversationsRequestIdRef.current;
+      setApprovalContextLoading(true);
+      setApprovalContextError(null);
+      setConversationsForLead(selectedLead.id, []);
+      setSelectedConversationId("");
+
+      try {
+        const [settingsResponse, conversationsResponse] = await Promise.all([
+          fetch("/api/settings/messaging"),
+          fetch(`/api/conversations/by-lead/${selectedLead.id}`),
+        ]);
+        const [settingsData, conversationsData] = await Promise.all([
+          readJson(settingsResponse),
+          readJson(conversationsResponse),
+        ]);
+
+        if (requestId !== approvalContextRequestIdRef.current) return;
+
+        if (!settingsResponse.ok) {
+          setApprovalContextError(
+            errorMessage(
+              settingsData,
+              "Unable to load workspace messaging settings.",
+            ),
+          );
+          return;
+        }
+
+        const settings = parseMessagingSettingsResponse(settingsData);
+
+        if (!settings) {
+          setApprovalContextError(
+            "The messaging settings service returned an unexpected response.",
+          );
+          return;
+        }
+
+        setDefaultApprovalSendPolicy(settings.defaultApprovalSendPolicy);
+
+        if (!conversationsResponse.ok) {
+          setApprovalContextError(
+            errorMessage(
+              conversationsData,
+              "Unable to load WhatsApp conversations for this lead.",
+            ),
+          );
+          return;
+        }
+
+        const result = parseConversationsResponse(conversationsData);
+
+        if (!result) {
+          setApprovalContextError(
+            "The conversation service returned an unexpected response.",
+          );
+          return;
+        }
+
+        if (
+          conversationsRequestId === conversationsRequestIdRef.current
+        ) {
+          setConversationsForLead(selectedLead.id, result.conversations);
+        }
+      } catch {
+        if (requestId === approvalContextRequestIdRef.current) {
+          setApprovalContextError(
+            "Unable to load approval settings and conversations.",
+          );
+        }
+      } finally {
+        if (requestId === approvalContextRequestIdRef.current) {
+          setApprovalContextLoading(false);
+        }
       }
-
-      const open = parseConversationsResponse(openData);
-      const closed = parseConversationsResponse(closedData);
-
-      if (!open || !closed) {
-        setApprovalContextError(
-          "The conversation service returned an unexpected response.",
-        );
-        return;
-      }
-
-      const byId = new Map<string, WhatsAppConversation>();
-
-      for (const conversation of [...open.conversations, ...closed.conversations]) {
-        byId.set(conversation.id, conversation);
-      }
-
-      const eligible = [...byId.values()].filter(
-        (conversation) =>
-          conversation.leadId === selectedLead.id &&
-          (conversation.status === "open" ||
-            conversation.status === "closed"),
-      );
-
-      setConversations(eligible);
-      setSelectedConversationId(
-        eligible.length === 1 ? eligible[0].id : "",
-      );
-    } catch {
-      setApprovalContextError(
-        "Unable to load approval settings and conversations.",
-      );
-    }
   }
 
   async function loadDrafts(selectedLead: Lead) {
-    const requestId = ++requestIdRef.current;
-    setIsLoading(true);
-    setError(null);
-    setActionError(null);
-    setValidationError(null);
-    setNotice(null);
-    setCopyMessage(null);
-    setDrafts([]);
-    setSelectedDraftId(null);
-    setEditedReply("");
+      const requestId = ++requestIdRef.current;
+      setIsLoading(true);
+      setError(null);
+      setActionError(null);
+      setValidationError(null);
+      setNotice(null);
+      setCopyMessage(null);
+      setDrafts([]);
+      setSelectedDraftId(null);
+      setEditedReply("");
+      setOutboundForLead(selectedLead.id, null);
+      setOutboundLoadError(null);
+      setOutboundLoading(false);
+      outboundRequestIdRef.current += 1;
 
-    try {
-      const response = await fetch(
-        `/api/leads/${selectedLead.id}/reply-drafts`,
-      );
-      const data = await readJson(response);
-
-      if (!response.ok) {
-        throw new Error(
-          errorMessage(data, "Unable to load saved reply drafts."),
+      try {
+        const response = await fetch(
+          `/api/leads/${selectedLead.id}/reply-drafts`,
         );
-      }
+        const data = await readJson(response);
 
-      const savedDrafts = parseReplyDraftsResponse(data);
+        if (!response.ok) {
+          throw new Error(
+            errorMessage(data, "Unable to load saved reply drafts."),
+          );
+        }
 
-      if (!savedDrafts) {
-        throw new Error("The draft service returned an unexpected response.");
-      }
+        const savedDrafts = parseReplyDraftsResponse(data);
 
-      if (requestId !== requestIdRef.current) return;
+        if (!savedDrafts) {
+          throw new Error("The draft service returned an unexpected response.");
+        }
 
-      if (savedDrafts.length > 0) {
-        setDrafts(savedDrafts);
-        setSelectedDraftId(savedDrafts[0].id);
-        setEditedReply(savedDrafts[0].draftReply);
-        return;
-      }
+        if (requestId !== requestIdRef.current) return;
 
-      const createResponse = await fetch(
-        `/api/leads/${selectedLead.id}/reply-drafts`,
-        { method: "POST" },
-      );
-      const createData = await readJson(createResponse);
+        if (savedDrafts.length > 0) {
+          setDrafts(savedDrafts);
+          setSelectedDraftId(savedDrafts[0].id);
+          setEditedReply(savedDrafts[0].draftReply);
+          void loadOutboundMessage(savedDrafts[0].id, selectedLead.id);
+          return;
+        }
 
-      if (!createResponse.ok) {
-        throw new Error(
-          errorMessage(createData, "Unable to generate a draft reply."),
+        const createResponse = await fetch(
+          `/api/leads/${selectedLead.id}/reply-drafts`,
+          { method: "POST" },
         );
+        const createData = await readJson(createResponse);
+
+        if (!createResponse.ok) {
+          throw new Error(
+            errorMessage(createData, "Unable to generate a draft reply."),
+          );
+        }
+
+        const createdDraft = parseSavedReplyDraftResponse(createData);
+
+        if (!createdDraft) {
+          throw new Error("The draft service returned an unexpected response.");
+        }
+
+        if (requestId !== requestIdRef.current) return;
+
+        setDrafts([createdDraft]);
+        setSelectedDraftId(createdDraft.id);
+        setEditedReply(createdDraft.draftReply);
+      } catch (requestError) {
+        if (requestId !== requestIdRef.current) return;
+
+        setError(
+          requestError instanceof Error
+            ? requestError.message
+            : "Unable to load saved reply drafts.",
+        );
+      } finally {
+        if (requestId === requestIdRef.current) {
+          setIsLoading(false);
+        }
       }
-
-      const createdDraft = parseSavedReplyDraftResponse(createData);
-
-      if (!createdDraft) {
-        throw new Error("The draft service returned an unexpected response.");
-      }
-
-      if (requestId !== requestIdRef.current) return;
-
-      setDrafts([createdDraft]);
-      setSelectedDraftId(createdDraft.id);
-      setEditedReply(createdDraft.draftReply);
-    } catch (requestError) {
-      if (requestId !== requestIdRef.current) return;
-
-      setError(
-        requestError instanceof Error
-          ? requestError.message
-          : "Unable to load saved reply drafts.",
-      );
-    } finally {
-      if (requestId === requestIdRef.current) {
-        setIsLoading(false);
-      }
-    }
   }
+
+  const loadApprovalContextForEffect = useEffectEvent(loadApprovalContext);
+  const loadDraftsForEffect = useEffectEvent(loadDrafts);
 
   useEffect(() => {
     const dialog = dialogRef.current;
@@ -404,14 +583,18 @@ export function DraftReplyDialog({
 
       if (loadedLeadIdRef.current !== lead.id) {
         loadedLeadIdRef.current = lead.id;
+        approvalContextRequestIdRef.current += 1;
+        outboundRequestIdRef.current += 1;
+        conversationsRequestIdRef.current += 1;
         setSendPolicyChoice("default");
         setSelectedConversationId("");
-        setOutboundMessage(null);
-        void loadDrafts(lead);
-        void loadApprovalContext(lead);
+        void loadDraftsForEffect(lead);
+        void loadApprovalContextForEffect(lead);
       }
     } else {
       requestIdRef.current += 1;
+      approvalContextRequestIdRef.current += 1;
+      outboundRequestIdRef.current += 1;
       loadedLeadIdRef.current = null;
 
       if (dialog.open) {
@@ -474,6 +657,14 @@ export function DraftReplyDialog({
     if (!lead || !selectedDraft) return;
 
     if (status === "approved" && effectiveSendPolicy === "approve_and_send") {
+      if (approvalContextLoading || approvalContextError) {
+        setActionError(
+          approvalContextError ??
+            "Wait for approval settings and conversations to finish loading.",
+        );
+        return;
+      }
+
       if (eligibleConversations.length === 0) {
         setActionError(
           "This lead has no active WhatsApp conversation. Link a conversation before using approve and send.",
@@ -546,7 +737,7 @@ export function DraftReplyDialog({
         }
 
         replaceDraft(result.draft);
-        setOutboundMessage(result.outboundMessage);
+        setOutboundForLead(lead.id, result.outboundMessage);
         setNotice(
           result.outboundMessage
             ? `Draft approved and ${OUTBOUND_STATUS_LABELS[result.outboundMessage.status].toLowerCase()} for the mock worker. Provider acceptance is not delivery.`
@@ -562,7 +753,7 @@ export function DraftReplyDialog({
       }
 
       replaceDraft(updatedDraft);
-      setOutboundMessage(null);
+      setOutboundForLead(lead.id, null);
       setNotice(
         "Draft returned to draft status. Review the text and approve it when ready.",
       );
@@ -579,6 +770,51 @@ export function DraftReplyDialog({
 
   async function queueApprovedSend() {
     if (!lead || !selectedDraft) return;
+
+    if (outboundLoading || outboundLoadError) {
+      setActionError(
+        outboundLoadError ??
+          "Wait for the existing outbound status to finish loading.",
+      );
+      return;
+    }
+
+    if (approvalContextLoading || approvalContextError) {
+      setActionError(
+        approvalContextError ??
+          "Wait for eligible conversations to finish loading.",
+      );
+      return;
+    }
+
+    if (hasUnsavedChanges) {
+      setActionError("Save your changes before queueing this approved reply.");
+      return;
+    }
+
+    if (retryBlockedByContentChange) {
+      setActionError(
+        "This failed message contains an earlier content snapshot. Create a new draft to send the revised reply.",
+      );
+      return;
+    }
+
+    if (retryBlockedByInactiveConversation) {
+      setActionError(
+        "The original conversation is no longer active. This message cannot be retargeted; create a new draft for an active conversation.",
+      );
+      return;
+    }
+
+    if (
+      outboundMessage?.status === "failed" &&
+      selectedConversationId !== outboundMessage.conversationId
+    ) {
+      setActionError(
+        "A failed message can only be retried to its original conversation.",
+      );
+      return;
+    }
 
     if (eligibleConversations.length === 0) {
       setActionError(
@@ -629,7 +865,7 @@ export function DraftReplyDialog({
         throw new Error("The draft service returned an unexpected response.");
       }
 
-      setOutboundMessage(queued);
+      setOutboundForLead(lead.id, queued);
       setNotice(
         `Approved reply ${OUTBOUND_STATUS_LABELS[queued.status].toLowerCase()} for the mock worker. Provider acceptance is not delivery.`,
       );
@@ -674,7 +910,7 @@ export function DraftReplyDialog({
       }
 
       replaceDraft(newDraft);
-      setOutboundMessage(null);
+      setOutboundForLead(lead.id, null);
       setNotice(
         "New draft created from the current approved business facts. Review and edit it before approval.",
       );
@@ -798,8 +1034,9 @@ export function DraftReplyDialog({
       >
         Demonstration output from ReplyPilot&apos;s mock provider. No live AI
         model was used. Approval records your review; approve and queue adds the
-        reply to the mock outbound worker. Nothing is sent to WhatsApp in this
-        milestone.
+        approved snapshot to the server-selected outbound worker. Meta delivery
+        requires restricted server-side test configuration and is unavailable
+        in production.
       </p>
 
       {isLoading ? (
@@ -850,7 +1087,7 @@ export function DraftReplyDialog({
                   {APPROVAL_SEND_POLICY_LABELS[defaultApprovalSendPolicy]}
                 </strong>
                 . Approving always records your review; approve and queue also
-                adds the reply to the mock outbound worker.
+                adds the reply to the server-selected outbound queue.
               </p>
               <label className={`${labelClass} mt-3`}>
                 On approval
@@ -886,7 +1123,7 @@ export function DraftReplyDialog({
                   <p className="mt-3 text-xs leading-5 text-ink-soft">
                     Queues to{" "}
                     <strong className="text-ink">
-                      {conversationDisplayName(eligibleConversations[0])}
+                      {conversationOptionLabel(eligibleConversations[0])}
                     </strong>
                     .
                   </p>
@@ -898,14 +1135,14 @@ export function DraftReplyDialog({
                       onChange={(event) =>
                         setSelectedConversationId(event.target.value)
                       }
-                      disabled={isBusy}
+                      disabled={isBusy || approvalContextLoading}
                       required
                       className={inputClass}
                     >
                       <option value="">Choose a conversation</option>
                       {eligibleConversations.map((conversation) => (
                         <option key={conversation.id} value={conversation.id}>
-                          {conversationDisplayName(conversation)} ·{" "}
+                          {conversationOptionLabel(conversation)} ·{" "}
                           {conversation.status}
                         </option>
                       ))}
@@ -951,6 +1188,96 @@ export function DraftReplyDialog({
             </section>
           )}
 
+          {selectedDraft.status === "approved" ? (
+            <section
+              aria-labelledby="outbound-conversation-title"
+              className="rounded-xl border border-line bg-hushed p-4"
+            >
+              <h3
+                id="outbound-conversation-title"
+                className="text-sm font-semibold text-ink"
+              >
+                WhatsApp conversation
+              </h3>
+              {approvalContextLoading ? (
+                <p role="status" className="mt-2 text-xs text-ink-soft">
+                  Loading conversations…
+                </p>
+              ) : approvalContextError ? (
+                <p role="alert" className="mt-2 text-xs text-danger-ink">
+                  {approvalContextError}
+                </p>
+              ) : eligibleConversations.length === 0 ? (
+                <p className="mt-2 text-xs leading-5 text-warning-ink">
+                  {retryBlockedByInactiveConversation
+                    ? "This conversation is archived. Reopen it before retrying. The failed message cannot be retargeted."
+                    : "No active WhatsApp conversation is linked to this lead."}
+                </p>
+              ) : eligibleConversations.length === 1 &&
+                (!outboundMessage || outboundConversationIsEligible) ? (
+                <p className="mt-2 text-xs leading-5 text-ink-soft">
+                  Queues to{" "}
+                  <strong className="text-ink">
+                    {conversationOptionLabel(eligibleConversations[0])}
+                  </strong>
+                  .
+                </p>
+              ) : eligibleConversations.length > 1 ? (
+                <label className={`${labelClass} mt-2`}>
+                  Conversation
+                  <select
+                    value={selectedConversationId}
+                    onChange={(event) =>
+                      setSelectedConversationId(event.target.value)
+                    }
+                    disabled={isBusy || outboundMessage !== null}
+                    required
+                    className={inputClass}
+                  >
+                    <option value="">Choose a conversation</option>
+                    {eligibleConversations.map((conversation) => (
+                      <option key={conversation.id} value={conversation.id}>
+                        {conversationOptionLabel(conversation)} ·{" "}
+                        {conversation.status}
+                      </option>
+                    ))}
+                    {outboundMessage &&
+                    !outboundConversationIsEligible &&
+                    outboundConversation ? (
+                      <option
+                        value={outboundMessage.conversationId}
+                        disabled
+                      >
+                        {conversationOptionLabel(outboundConversation)}{" "}
+                        · inactive original target
+                      </option>
+                    ) : null}
+                  </select>
+                  <span className="help-text mt-1">
+                    {outboundMessage
+                      ? "An existing outbound message cannot be retargeted."
+                      : "Choose the intended customer thread. ReplyPilot will not guess."}
+                  </span>
+                </label>
+              ) : outboundMessage ? (
+                <p className="mt-2 text-xs leading-5 text-warning-ink">
+                  The existing outbound message is tied to its original
+                  conversation and cannot be retargeted.
+                </p>
+              ) : null}
+              {outboundLoading ? (
+                <p role="status" className="mt-2 text-xs text-ink-soft">
+                  Loading existing outbound status…
+                </p>
+              ) : null}
+              {outboundLoadError ? (
+                <p role="alert" className="mt-2 text-xs text-danger-ink">
+                  {outboundLoadError}
+                </p>
+              ) : null}
+            </section>
+          ) : null}
+
           {outboundMessage ? (
             <section
               aria-labelledby="outbound-message-title"
@@ -981,7 +1308,27 @@ export function DraftReplyDialog({
                   {outboundMessage.failureReason}
                 </p>
               ) : null}
-            </section>
+                {outboundMessage.status === "manual_review" ? (
+                  <p className="mt-2 text-xs leading-5 text-warning-ink">
+                    Do not retry until you check the provider&apos;s own records.
+                    ReplyPilot cannot reconcile this outcome automatically.
+                  </p>
+                ) : null}
+                {outboundMessage.status === "failed" &&
+                retryBlockedByContentChange ? (
+                  <p className="mt-2 text-xs leading-5 text-warning-ink">
+                    This failed message uses an earlier content snapshot. Create
+                    a new draft to send revised content.
+                  </p>
+                ) : null}
+                {outboundMessage.status === "failed" &&
+                retryBlockedByInactiveConversation ? (
+                  <p className="mt-2 text-xs leading-5 text-warning-ink">
+                    This conversation is archived. Reopen it before retrying.
+                    This message cannot be retargeted.
+                  </p>
+                ) : null}
+              </section>
           ) : null}
 
           {/* Lead and enquiry context */}
@@ -1133,14 +1480,39 @@ export function DraftReplyDialog({
                 <button
                   type="button"
                   onClick={() => void queueApprovedSend()}
-                  disabled={isBusy}
+                  disabled={
+                      isBusy ||
+                      outboundLoading ||
+                      approvalContextLoading ||
+                      Boolean(outboundLoadError) ||
+                      Boolean(approvalContextError) ||
+                      outboundAlreadyHandled ||
+                      hasUnsavedChanges ||
+                      retryBlockedByContentChange ||
+                      retryBlockedByInactiveConversation
+                  }
                   className="btn btn-primary"
                 >
                   {pendingAction === "send"
-                    ? "Queueing…"
-                    : outboundMessage?.status === "failed"
-                      ? "Retry queued send"
-                      : "Queue approved reply"}
+                      ? "Queueing…"
+                      : outboundMessage?.status === "failed"
+                        ? retryBlockedByContentChange ||
+                          retryBlockedByInactiveConversation
+                          ? "Retry unavailable"
+                          : "Retry queued send"
+                        : outboundMessage?.status === "queued"
+                          ? "Already queued"
+                          : outboundMessage?.status === "sending"
+                            ? "Sending"
+                            : outboundMessage?.status === "sent"
+                              ? "Already sent"
+                              : outboundMessage?.status === "delivered"
+                                ? "Delivered"
+                                : outboundMessage?.status === "manual_review"
+                                  ? "Needs manual review"
+                                  : outboundMessage?.status === "cancelled"
+                                    ? "Cannot queue cancelled message"
+                                    : "Queue approved reply"}
                 </button>
                 <button
                   type="button"

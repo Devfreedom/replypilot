@@ -1,10 +1,15 @@
 import express, { Router, type NextFunction, type Request, type Response } from "express";
 import type { Pool } from "pg";
-import { InvalidWhatsAppPayloadError, parseWhatsAppWebhook } from "./parser.js";
+import {
+  InvalidWhatsAppPayloadError,
+  parseWhatsAppDeliveryStatuses,
+  parseWhatsAppWebhook,
+} from "./parser.js";
 import {
   persistInboundMessages,
   WhatsAppWorkspaceNotFoundError,
 } from "./repository.js";
+import { processDeliveryStatusEvents } from "./delivery-webhook.js";
 import { isValidMetaSignature, safeEqualString } from "./signature.js";
 import type { WhatsAppIntegrationConfig } from "./types.js";
 
@@ -85,10 +90,17 @@ export function createWhatsAppWebhookRouter({
         return;
       }
 
+      // Parse inbound messages and delivery-status events from the same payload.
+      // A single change can carry both; we handle them independently.
       let messages;
+      let deliveryEvents;
 
       try {
         messages = parseWhatsAppWebhook(payload, config.phoneNumberId);
+        deliveryEvents = parseWhatsAppDeliveryStatuses(
+          payload,
+          config.phoneNumberId,
+        );
       } catch (error) {
         if (error instanceof InvalidWhatsAppPayloadError) {
           response.status(400).json({ error: "Invalid webhook payload" });
@@ -99,21 +111,46 @@ export function createWhatsAppWebhookRouter({
         return;
       }
 
-      if (messages.length === 0) {
+      const hasInbound = messages.length > 0;
+      const hasDelivery = deliveryEvents.length > 0;
+
+      if (!hasInbound && !hasDelivery) {
         response.status(200).json({ status: "ignored" });
         return;
       }
 
       try {
-        const result = await persistInboundMessages(
-          pool,
-          config.workspaceId,
-          messages,
-        );
+        let stored = 0;
+        let duplicates = 0;
+        let deliveryProcessed = 0;
+        let deliveryIgnored = 0;
+
+        if (hasInbound) {
+          const inboundResult = await persistInboundMessages(
+            pool,
+            config.workspaceId,
+            messages,
+          );
+          stored = inboundResult.stored;
+          duplicates = inboundResult.duplicates;
+        }
+
+        if (hasDelivery) {
+          const deliveryResult = await processDeliveryStatusEvents(
+            pool,
+            config.workspaceId,
+            deliveryEvents,
+          );
+          deliveryProcessed = deliveryResult.processed;
+          deliveryIgnored = deliveryResult.ignored;
+        }
+
         response.status(200).json({
           status: "ok",
-          stored: result.stored,
-          duplicates: result.duplicates,
+          stored,
+          duplicates,
+          deliveryProcessed,
+          deliveryIgnored,
         });
       } catch (error) {
         if (error instanceof WhatsAppWorkspaceNotFoundError) {

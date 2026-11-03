@@ -1,7 +1,9 @@
 # Milestone 11B — Unified WhatsApp Inbox
 
-Status: implemented. Inbound-only. No outbound WhatsApp sending, AI replies,
-reply approvals, media storage, or catalogue management is included.
+Status: implemented. WhatsApp provider integration is inbound-only. The inbox
+can also display records from the separate mock outbound queue and worker;
+those records are not sent through WhatsApp. Real outbound WhatsApp delivery,
+AI replies, media storage, and catalogue management are not included here.
 
 ## What the inbox does
 
@@ -12,8 +14,8 @@ reply approvals, media storage, or catalogue management is included.
 - Loads the newest message page first and older pages on demand using the
   message cursor contract in `docs/milestone-11b-message-pagination.md`.
 - Renders inbound and outbound messages differently. Only message types already
-  stored by the webhook are shown; unsupported types are labelled instead of
-  invented.
+  stored by the inbound webhook or mock outbound queue are shown; unsupported
+  inbound types are labelled instead of invented.
 - Uses a two-panel desktop layout and a list/thread mobile layout with a back
   control.
 
@@ -52,9 +54,11 @@ supplied. See the pagination document for the full contract.
 
 - **No unread state.** The schema has no per-conversation read/unread or unread
   count columns, so the inbox does not invent badges or counts.
-- **No outbound delivery status.** Outbound messages are stored with a
-  processing status only; there is no sent/delivered/read receipt field, so the
-  UI does not show check marks or delivery claims.
+- **No live WhatsApp delivery status.** Mock outbound records can show queue and
+  provider-acceptance states in the thread. `sent` means mock-provider
+  acceptance, not customer delivery; `delivered` remains distinct and the mock
+  worker does not produce it. The inbound WhatsApp integration has no outbound
+  send or delivery-receipt webhook.
 - **No media.** The schema stores a message type and text content. Images,
   audio, documents, and other media are not downloaded or displayed; they are
   labelled as unsupported when stored.

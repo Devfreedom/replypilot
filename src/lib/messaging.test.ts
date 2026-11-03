@@ -7,10 +7,14 @@ import {
   OUTBOUND_STATUS_DESCRIPTIONS,
   OUTBOUND_STATUS_LABELS,
   canRetryOutboundForRole,
+  isRetryableConversationStatus,
+  parseOutboundMessageLookupResponse,
   parseMessagingSettingsResponse,
   parseOutboundMessage,
   parseOutboundMessagesResponse,
   parseSendOutboundMessageResponse,
+  preferredConversationIdForDraft,
+  retryBlockDescription,
   sendPolicyChoiceForDraftSelection,
 } from "./messaging.js";
 
@@ -70,6 +74,7 @@ test("outbound history parser preserves provider acceptance and retry eligibilit
           status: "open",
         },
         canRetry: false,
+        retryBlockReason: null,
       },
     ],
     pagination: {
@@ -103,6 +108,18 @@ test("manual retry parser accepts the API envelope", () => {
   assert.equal(parseSendOutboundMessageResponse(outboundMessage), null);
 });
 
+test("outbound lookup parser accepts an existing message or an empty result", () => {
+  assert.deepEqual(
+    parseOutboundMessageLookupResponse({ outboundMessage }),
+    { outboundMessage },
+  );
+  assert.deepEqual(
+    parseOutboundMessageLookupResponse({ outboundMessage: null }),
+    { outboundMessage: null },
+  );
+  assert.equal(parseOutboundMessageLookupResponse({}), null);
+});
+
 test("changing drafts resets the per-draft policy choice", () => {
   assert.equal(
     sendPolicyChoiceForDraftSelection(
@@ -122,6 +139,39 @@ test("changing drafts resets the per-draft policy choice", () => {
   );
 });
 
+test("draft conversation selection keeps the outbound target and avoids guessing", () => {
+  const conversations = [{ id: "one" }, { id: "two" }];
+  assert.equal(
+    preferredConversationIdForDraft("two", conversations),
+    "two",
+  );
+  assert.equal(preferredConversationIdForDraft(null, conversations), "");
+  assert.equal(
+    preferredConversationIdForDraft(null, [{ id: "only" }]),
+    "only",
+  );
+  assert.equal(preferredConversationIdForDraft("archived", conversations), "");
+});
+
+test("retry-block explanations describe the safe next step", () => {
+  assert.match(retryBlockDescription("content_changed"), /new draft/i);
+  assert.match(retryBlockDescription("conversation_inactive"), /archived/i);
+  assert.match(retryBlockDescription("conversation_inactive"), /reopen it/i);
+});
+
+test("archived conversations are not eligible for outbound retries", () => {
+  assert.equal(isRetryableConversationStatus("open"), true);
+  assert.equal(isRetryableConversationStatus("closed"), true);
+  assert.equal(isRetryableConversationStatus("archived"), false);
+  assert.equal(
+    canRetryOutboundForRole(
+      "owner",
+      isRetryableConversationStatus("archived"),
+    ),
+    false,
+  );
+});
+
 test("only owners see retry controls for retryable outbound messages", () => {
   assert.equal(canRetryOutboundForRole("owner", true), true);
   assert.equal(canRetryOutboundForRole("member", true), false);
@@ -135,15 +185,18 @@ test("status labels keep provider acceptance distinct from delivery", () => {
     "sending",
     "sent",
     "delivered",
+    "read",
     "failed",
     "cancelled",
     "manual_review",
   ]);
   assert.equal(OUTBOUND_STATUS_LABELS.sent, "Sent");
   assert.equal(OUTBOUND_STATUS_LABELS.delivered, "Delivered");
+  assert.equal(OUTBOUND_STATUS_LABELS.read, "Read");
   assert.equal(OUTBOUND_STATUS_LABELS.manual_review, "Needs review");
   assert.match(OUTBOUND_STATUS_DESCRIPTIONS.sent, /not confirmed/i);
   assert.match(OUTBOUND_STATUS_DESCRIPTIONS.delivered, /reported delivery/i);
+  assert.match(OUTBOUND_STATUS_DESCRIPTIONS.read, /read/i);
 });
 
 test("approval policy labels cover every supported choice", () => {

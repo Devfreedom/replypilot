@@ -189,6 +189,13 @@ export function conversationIdentity(
   return { label: "Customer", value: conversation.customer.id };
 }
 
+export function conversationOptionLabel(
+  conversation: WhatsAppConversation,
+): string {
+  const identity = conversationIdentity(conversation);
+  return `${conversationDisplayName(conversation)} · ${identity.label}: ${identity.value} · WhatsApp number ${conversation.phoneNumberId}`;
+}
+
 export function conversationInitials(
   conversation: WhatsAppConversation,
 ): string {

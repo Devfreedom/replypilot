@@ -24,6 +24,7 @@ import { seedLeads } from "../src/db/seed.js";
 import type { ApprovalSendPolicy } from "../src/messaging/types.js";
 import {
   OutboundProviderAmbiguousError,
+  OutboundProviderError,
   MockOutboundMessageProvider,
   type OutboundMessageProvider,
 } from "../src/outbound/provider.js";
@@ -185,6 +186,18 @@ const TEST_AUTH_ORIGIN = "http://127.0.0.1:3000";
 const TEST_AUTH_SECRET = "replypilot-test-only-secret-0123456789abcdef";
 const TEST_CLIENT_IP = "127.0.0.1";
 const nativeFetch = globalThis.fetch.bind(globalThis);
+const META_OUTBOUND_ENV_KEYS = [
+  "META_OUTBOUND_ENABLED",
+  "META_ACCESS_TOKEN",
+  "META_GRAPH_API_VERSION",
+  "WHATSAPP_SENDER_PHONE_NUMBER_ID",
+  "META_OUTBOUND_TEST_WORKSPACE_ID",
+  "META_TEST_RECIPIENT_PHONE_NUMBERS",
+] as const;
+const originalMetaOutboundEnvironment = new Map<
+  (typeof META_OUTBOUND_ENV_KEYS)[number],
+  string | undefined
+>();
 
 type TestWorkspacePayload = {
   id: string;
@@ -303,6 +316,8 @@ type WhatsAppWebhookPayload = {
   status: "ok" | "ignored";
   stored?: number;
   duplicates?: number;
+  deliveryProcessed?: number;
+  deliveryIgnored?: number;
 };
 
 type WhatsAppConversationsPayload = {
@@ -390,6 +405,30 @@ function whatsappEnvelope(
     object,
     entry: [{ id: "waba-test", changes }],
   });
+}
+
+function whatsappDeliveryEnvelope(
+  statuses: Array<{
+    id: string;
+    status: string;
+    timestamp: string;
+    recipient_id?: string;
+    errors?: unknown[];
+  }>,
+): string {
+  return whatsappEnvelope([
+    {
+      field: "messages",
+      value: {
+        messaging_product: "whatsapp",
+        metadata: {
+          display_phone_number: "15550783881",
+          phone_number_id: TEST_WHATSAPP_PHONE_NUMBER_ID,
+        },
+        statuses,
+      },
+    },
+  ]);
 }
 
 function textWhatsAppMessage({
@@ -762,6 +801,46 @@ function jsonRequest(
   });
 }
 
+async function withMetaOutboundEnabled<T>(
+  workspaceId: string,
+  action: () => Promise<T>,
+): Promise<T> {
+  const previous = new Map(
+    META_OUTBOUND_ENV_KEYS.map((key) => [key, process.env[key]] as const),
+  );
+  const previousNodeEnv = process.env.NODE_ENV;
+
+  process.env.NODE_ENV = "test";
+  Object.assign(process.env, {
+    META_OUTBOUND_ENABLED: "true",
+    META_ACCESS_TOKEN: "EAABc0FakeTestAccessTokenAtLeast20Characters",
+    META_GRAPH_API_VERSION: "v21.0",
+    WHATSAPP_SENDER_PHONE_NUMBER_ID: "123456789012345",
+    META_OUTBOUND_TEST_WORKSPACE_ID: workspaceId,
+    META_TEST_RECIPIENT_PHONE_NUMBERS: "+16505551234",
+  });
+
+  try {
+    return await action();
+  } finally {
+    for (const key of META_OUTBOUND_ENV_KEYS) {
+      const value = previous.get(key);
+
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+
+    if (previousNodeEnv === undefined) {
+      delete process.env.NODE_ENV;
+    } else {
+      process.env.NODE_ENV = previousNodeEnv;
+    }
+  }
+}
+
 const validProfileBody = {
   businessName: "Lagos Light Studio",
   businessDescription: "Wedding and portrait photography.",
@@ -907,6 +986,11 @@ function makeContext(overrides: Partial<ReplyContext> = {}): ReplyContext {
 
 
 before(async () => {
+  for (const key of META_OUTBOUND_ENV_KEYS) {
+    originalMetaOutboundEnvironment.set(key, process.env[key]);
+  }
+  process.env.META_OUTBOUND_ENABLED = "false";
+
   pool = createPool(testDatabaseUrl);
   await prepareTestDatabase(pool);
   ({ server, baseUrl } = await startServer(pool));
@@ -929,11 +1013,37 @@ after(async () => {
   if (pool) {
     await pool.end();
   }
+
+  for (const key of META_OUTBOUND_ENV_KEYS) {
+    const value = originalMetaOutboundEnvironment.get(key);
+
+    if (value === undefined) {
+      delete process.env[key];
+    } else {
+      process.env[key] = value;
+    }
+  }
 });
 
 test("migrations are repeatable and already-applied files are skipped", async () => {
   const applied = await runMigrations(pool);
   assert.deepEqual(applied, []);
+
+  const migration = await pool.query<{ version: string }>(
+    "SELECT version FROM schema_migrations WHERE version = $1",
+    ["013_order_outbound_threads_by_send_time.sql"],
+  );
+  assert.deepEqual(migration.rows, [
+    { version: "013_order_outbound_threads_by_send_time.sql" },
+  ]);
+
+  const view = await pool.query<{ definition: string }>(
+    "SELECT pg_get_viewdef('conversation_thread_messages'::regclass) AS definition",
+  );
+  assert.match(
+    view.rows[0]?.definition ?? "",
+    /COALESCE\(message\.sent_at,\s*message\.queued_at\)/i,
+  );
 });
 
 test("profile migration adds nullable phone-country and currency columns", async () => {
@@ -4545,6 +4655,8 @@ test("WhatsApp webhook validates signatures against the exact raw body", async (
       status: "ok",
       stored: 1,
       duplicates: 0,
+      deliveryProcessed: 0,
+      deliveryIgnored: 0,
     });
   } finally {
     await stopServer(app.server);
@@ -4581,6 +4693,8 @@ test("WhatsApp webhook persists a text message and exposes it in the protected i
       status: "ok",
       stored: 1,
       duplicates: 0,
+      deliveryProcessed: 0,
+      deliveryIgnored: 0,
     });
 
     const conversations = await pool.query<{
@@ -4719,6 +4833,8 @@ test("WhatsApp webhook supports BSUID senders when phone numbers are omitted", a
       status: "ok",
       stored: 1,
       duplicates: 0,
+      deliveryProcessed: 0,
+      deliveryIgnored: 0,
     });
 
     const conversation = await pool.query<{
@@ -4797,6 +4913,8 @@ test("WhatsApp webhook stores messages from multiple entries and changes once", 
       status: "ok",
       stored: 3,
       duplicates: 0,
+      deliveryProcessed: 0,
+      deliveryIgnored: 0,
     });
 
     const conversations = await pool.query<{
@@ -4848,6 +4966,8 @@ test("WhatsApp webhook persists unsupported message types without inventing text
       status: "ok",
       stored: 1,
       duplicates: 0,
+      deliveryProcessed: 0,
+      deliveryIgnored: 0,
     });
 
     const conversation = await pool.query<{ id: string }>(
@@ -4895,7 +5015,7 @@ test("WhatsApp webhook persists unsupported message types without inventing text
   }
 });
 
-test("WhatsApp webhook ignores status and unrelated changes", async () => {
+test("WhatsApp webhook audits unknown statuses and ignores unrelated changes", async () => {
   const app = await startWhatsAppServer();
   const body = JSON.stringify({
     object: "whatsapp_business_account",
@@ -4911,7 +5031,13 @@ test("WhatsApp webhook ignores status and unrelated changes", async () => {
                 display_phone_number: "15550783881",
                 phone_number_id: TEST_WHATSAPP_PHONE_NUMBER_ID,
               },
-              statuses: [{ id: "wamid.status", status: "delivered" }],
+              statuses: [
+                {
+                  id: "wamid.status",
+                  status: "delivered",
+                  timestamp: "1760000000",
+                },
+              ],
             },
           },
           {
@@ -4927,7 +5053,11 @@ test("WhatsApp webhook ignores status and unrelated changes", async () => {
     const response = await postWhatsApp(app, body);
     assert.equal(response.status, 200);
     assert.deepEqual(await readJson<WhatsAppWebhookPayload>(response), {
-      status: "ignored",
+      status: "ok",
+      stored: 0,
+      duplicates: 0,
+      deliveryProcessed: 0,
+      deliveryIgnored: 1,
     });
 
     const counts = await pool.query<{
@@ -4939,7 +5069,517 @@ test("WhatsApp webhook ignores status and unrelated changes", async () => {
         (SELECT count(*) FROM whatsapp_messages)::int AS messages
     `);
     assert.deepEqual(counts.rows[0], { conversations: 0, messages: 0 });
+
+    const audit = await pool.query<{
+      provider_message_id: string;
+      processing_outcome: string;
+      processing_reason: string | null;
+    }>(
+      `
+        SELECT provider_message_id, processing_outcome, processing_reason
+        FROM whatsapp_delivery_events
+        WHERE workspace_id = $1
+      `,
+      [requireSession().workspace.id],
+    );
+    assert.deepEqual(audit.rows, [
+      {
+        provider_message_id: "wamid.status",
+        processing_outcome: "ignored",
+        processing_reason:
+          "No outbound message matches this wamid in the configured workspace.",
+      },
+    ]);
   } finally {
+    await stopServer(app.server);
+  }
+});
+
+test("signed delivery webhook durably deduplicates, audits, and orders status events", async () => {
+  const app = await startWhatsAppServer();
+  try {
+    const createOutbound = async (label: string) => {
+      const identityOverrides =
+        label === "Delivery second"
+          ? {
+              senderWaId: "2348031234567",
+              senderPhoneNumber: "2348031234567",
+            }
+          : {};
+      const { lead, conversationId } = await createLeadWithConversation(
+        { name: label },
+        identityOverrides,
+      );
+      const draft = await createSavedDraftPayload(lead.id);
+      const approval = await approveSavedDraft(lead.id, draft.id, {
+        status: "approved",
+        sendPolicy: "approve_and_send",
+        conversationId,
+      });
+      assert.equal(approval.status, 200);
+      const outbound = (
+        await readJson<ReplyDraftApprovalPayload>(approval)
+      ).outboundMessage;
+      assert.ok(outbound);
+      return outbound;
+    };
+    const first = await createOutbound("Delivery first");
+    const second = await createOutbound("Delivery second");
+    const firstWamid = `wamid.delivery-${randomUUID()}`;
+    const secondWamid = `wamid.failed-${randomUUID()}`;
+    await pool.query(
+      `
+        UPDATE outbound_messages
+        SET status = 'sent', provider_message_id = $2, sent_at = now()
+        WHERE id = $1
+      `,
+      [first.id, firstWamid],
+    );
+    await pool.query(
+      `
+        UPDATE outbound_messages
+        SET status = 'sent', provider_message_id = $2, sent_at = now()
+        WHERE id = $1
+      `,
+      [second.id, secondWamid],
+    );
+
+    const t1 = "1760001000";
+    const t2 = "1760001002";
+    const ordered = await postWhatsApp(
+      app,
+      whatsappDeliveryEnvelope([
+        { id: firstWamid, status: "sent", timestamp: t1 },
+        { id: firstWamid, status: "delivered", timestamp: t2 },
+        { id: firstWamid, status: "sent", timestamp: "1760001001" },
+        { id: firstWamid, status: "delivered", timestamp: t2 },
+        { id: firstWamid, status: "warning", timestamp: "1760001003" },
+        {
+          id: `wamid.unknown-${randomUUID()}`,
+          status: "sent",
+          timestamp: t1,
+        },
+      ]),
+    );
+    assert.equal(ordered.status, 200);
+    const orderedResult = await readJson<WhatsAppWebhookPayload>(ordered);
+    assert.equal(orderedResult.deliveryProcessed, 2);
+    assert.equal(orderedResult.deliveryIgnored, 3);
+
+    const finalPositive = await postWhatsApp(
+      app,
+      whatsappDeliveryEnvelope([
+        { id: firstWamid, status: "read", timestamp: "1760001004" },
+        { id: firstWamid, status: "sent", timestamp: "1760001005" },
+        { id: firstWamid, status: "failed", timestamp: "1760001006" },
+      ]),
+    );
+    assert.equal(finalPositive.status, 200);
+    const firstState = await pool.query<{
+      status: string;
+      provider_status_at: Date;
+    }>(
+      `
+        SELECT status, provider_status_at
+        FROM outbound_messages
+        WHERE id = $1
+      `,
+      [first.id],
+    );
+    assert.equal(firstState.rows[0]?.status, "read");
+    assert.equal(
+      firstState.rows[0]?.provider_status_at.toISOString(),
+      new Date(1760001004_000).toISOString(),
+    );
+
+    const failed = await postWhatsApp(
+      app,
+      whatsappDeliveryEnvelope([
+        {
+          id: secondWamid,
+          status: "failed",
+          timestamp: "1760001010",
+          errors: [{ code: 131000, type: "OAuthException" }],
+        },
+      ]),
+    );
+    assert.equal(failed.status, 200);
+    const failedState = await pool.query<{
+      status: string;
+      failure_reason: string | null;
+      provider_status_at: Date;
+    }>(
+      `
+        SELECT status, failure_reason, provider_status_at
+        FROM outbound_messages
+        WHERE id = $1
+      `,
+      [second.id],
+    );
+    assert.equal(failedState.rows[0]?.status, "failed");
+    assert.equal(
+      failedState.rows[0]?.provider_status_at.toISOString(),
+      new Date(1760001010_000).toISOString(),
+    );
+    assert.match(failedState.rows[0]?.failure_reason ?? "", /131000/);
+
+    const recovery = await postWhatsApp(
+      app,
+      whatsappDeliveryEnvelope([
+        { id: secondWamid, status: "delivered", timestamp: "1760001009" },
+        { id: secondWamid, status: "delivered", timestamp: "1760001011" },
+      ]),
+    );
+    assert.equal(recovery.status, 200);
+    const recoveryResult = await readJson<WhatsAppWebhookPayload>(recovery);
+    assert.equal(recoveryResult.deliveryProcessed, 1);
+    assert.equal(recoveryResult.deliveryIgnored, 1);
+    const recoveredState = await pool.query<{
+      status: string;
+      delivered_at: Date | null;
+    }>(
+      "SELECT status, delivered_at FROM outbound_messages WHERE id = $1",
+      [second.id],
+    );
+    assert.equal(recoveredState.rows[0]?.status, "delivered");
+    assert.equal(
+      recoveredState.rows[0]?.delivered_at?.toISOString(),
+      new Date(1760001011_000).toISOString(),
+    );
+
+    const events = await pool.query<{
+      provider_status: string;
+      provider_timestamp: Date;
+      received_at: Date;
+      last_received_at: Date;
+      duplicate_count: number;
+      processing_outcome: string;
+      outbound_message_id: string | null;
+    }>(
+      `
+        SELECT
+          provider_status,
+          provider_timestamp,
+          received_at,
+          last_received_at,
+          duplicate_count,
+          processing_outcome,
+          outbound_message_id
+        FROM whatsapp_delivery_events
+        WHERE workspace_id = $1
+          AND provider_message_id IN ($2, $3)
+        ORDER BY provider_timestamp, provider_status
+      `,
+      [requireSession().workspace.id, firstWamid, secondWamid],
+    );
+    assert.equal(events.rows.length, 10);
+    assert.ok(events.rows.every((event) => event.received_at instanceof Date));
+    assert.ok(events.rows.every((event) => event.last_received_at instanceof Date));
+    assert.ok(
+      events.rows.every((event) => event.outbound_message_id !== null),
+    );
+    assert.ok(events.rows.some((event) => event.processing_outcome === "ignored"));
+    assert.equal(
+      events.rows.find(
+        (event) =>
+          event.provider_status === "delivered" &&
+          event.provider_timestamp.toISOString() ===
+            new Date(1760001002_000).toISOString(),
+      )?.duplicate_count,
+      1,
+    );
+
+    const duplicate = await postWhatsApp(
+      app,
+      whatsappDeliveryEnvelope([
+        { id: firstWamid, status: "delivered", timestamp: t2 },
+      ]),
+    );
+    assert.equal(duplicate.status, 200);
+    const eventCount = await pool.query<{ count: number }>(
+      `
+        SELECT count(*)::int AS count
+        FROM whatsapp_delivery_events
+        WHERE workspace_id = $1 AND provider_message_id = $2
+      `,
+      [requireSession().workspace.id, firstWamid],
+    );
+    assert.equal(eventCount.rows[0]?.count, 7);
+  } finally {
+    await stopServer(app.server);
+  }
+});
+
+test("Step 6. Signed delivery webhook applies sent, delivered, read, and failed statuses with audit records", async () => {
+  const app = await startWhatsAppServer();
+  const bankTime = 1_760_003_000;
+
+  try {
+    const createSentOutbound = async (
+      label: string,
+      phone: string,
+      wamid: string,
+    ): Promise<string> => {
+      const { lead, conversationId } = await createLeadWithConversation(
+        { name: label },
+        {
+          senderWaId: phone.replace("+", ""),
+          senderPhoneNumber: phone,
+        },
+      );
+      const draft = await createSavedDraftPayload(lead.id);
+      const approval = await approveSavedDraft(lead.id, draft.id, {
+        status: "approved",
+        sendPolicy: "approve_and_send",
+        conversationId,
+      });
+      assert.equal(approval.status, 200);
+      const outbound = (
+        await readJson<ReplyDraftApprovalPayload>(approval)
+      ).outboundMessage;
+      assert.ok(outbound);
+      await pool.query(
+        `
+          UPDATE outbound_messages
+          SET status = 'sent', provider_message_id = $2, sent_at = now()
+          WHERE id = $1
+        `,
+        [outbound.id, wamid],
+      );
+      return outbound.id;
+    };
+
+    const sentWamid = `wamid.step6-sent-${randomUUID()}`;
+    const deliveredWamid = `wamid.step6-delivered-${randomUUID()}`;
+    const readWamid = `wamid.step6-read-${randomUUID()}`;
+    const failedWamid = `wamid.step6-failed-${randomUUID()}`;
+    const unknownWamid = `wamid.step6-unknown-${randomUUID()}`;
+    const sentOutboundId = await createSentOutbound(
+      "Step 6 Sent",
+      "2348031234501",
+      sentWamid,
+    );
+    const deliveredOutboundId = await createSentOutbound(
+      "Step 6 Delivered",
+      "2348031234502",
+      deliveredWamid,
+    );
+    const readOutboundId = await createSentOutbound(
+      "Step 6 Read",
+      "2348031234503",
+      readWamid,
+    );
+    const failedOutboundId = await createSentOutbound(
+      "Step 6 Failed",
+      "2348031234504",
+      failedWamid,
+    );
+
+    const response = await postWhatsApp(
+      app,
+      whatsappDeliveryEnvelope([
+        { id: sentWamid, status: "sent", timestamp: String(bankTime) },
+        {
+          id: deliveredWamid,
+          status: "delivered",
+          timestamp: String(bankTime + 1),
+        },
+        { id: readWamid, status: "read", timestamp: String(bankTime + 2) },
+        {
+          id: failedWamid,
+          status: "failed",
+          timestamp: String(bankTime + 3),
+          errors: [{ code: 131000, type: "OAuthException" }],
+        },
+        {
+          id: unknownWamid,
+          status: "delivered",
+          timestamp: String(bankTime + 4),
+        },
+      ]),
+    );
+    assert.equal(response.status, 200);
+    const result = await readJson<WhatsAppWebhookPayload>(response);
+    assert.equal(result.deliveryProcessed, 4);
+    assert.equal(result.deliveryIgnored, 1);
+
+    const expected = [
+      { id: sentOutboundId, status: "sent", timestamp: bankTime },
+      {
+        id: deliveredOutboundId,
+        status: "delivered",
+        timestamp: bankTime + 1,
+      },
+      { id: readOutboundId, status: "read", timestamp: bankTime + 2 },
+      { id: failedOutboundId, status: "failed", timestamp: bankTime + 3 },
+    ] as const;
+
+    for (const item of expected) {
+      const row = await pool.query<{
+        status: string;
+        provider_status_at: Date;
+        failure_reason: string | null;
+      }>(
+        `
+          SELECT status, provider_status_at, failure_reason
+          FROM outbound_messages
+          WHERE id = $1
+        `,
+        [item.id],
+      );
+      assert.equal(row.rows[0]?.status, item.status);
+      assert.equal(
+        row.rows[0]?.provider_status_at.toISOString(),
+        new Date(item.timestamp * 1_000).toISOString(),
+      );
+      if (item.status === "failed") {
+        assert.match(row.rows[0]?.failure_reason ?? "", /131000/);
+      } else {
+        assert.equal(row.rows[0]?.failure_reason, null);
+      }
+    }
+
+    const audit = await pool.query<{
+      provider_message_id: string;
+      provider_status: string;
+      provider_timestamp: Date;
+      processing_outcome: string;
+      outbound_message_id: string | null;
+    }>(
+      `
+        SELECT provider_message_id, provider_status, provider_timestamp,
+               processing_outcome, outbound_message_id
+        FROM whatsapp_delivery_events
+        WHERE workspace_id = $1
+          AND provider_message_id IN ($2, $3, $4, $5, $6)
+        ORDER BY provider_timestamp ASC
+      `,
+      [
+        requireSession().workspace.id,
+        sentWamid,
+        deliveredWamid,
+        readWamid,
+        failedWamid,
+        unknownWamid,
+      ],
+    );
+    assert.equal(audit.rows.length, 5);
+    assert.deepEqual(
+      audit.rows.slice(0, 4).map((row) => row.processing_outcome),
+      ["processed", "processed", "processed", "processed"],
+    );
+    assert.equal(audit.rows[4]?.processing_outcome, "ignored");
+    assert.equal(
+      audit.rows[4]?.outbound_message_id,
+      null,
+      "Unknown wamid must not be linked to an outbound message",
+    );
+
+    const rejected = await postWhatsApp(
+      app,
+      whatsappDeliveryEnvelope([
+        { id: sentWamid, status: "delivered", timestamp: String(bankTime + 5) },
+      ]),
+      { signature: `sha256=${"a".repeat(64)}` },
+    );
+    assert.equal(rejected.status, 401);
+
+    const unchanged = await pool.query<{ status: string }>(
+      "SELECT status FROM outbound_messages WHERE id = $1",
+      [sentOutboundId],
+    );
+    assert.equal(unchanged.rows[0]?.status, "sent");
+  } finally {
+    await stopServer(app.server);
+  }
+});
+
+test("signed delivery webhook records processing failure and recovers on redelivery", async () => {
+  const { lead, conversationId } = await createLeadWithConversation();
+  const draft = await createSavedDraftPayload(lead.id);
+  const approval = await approveSavedDraft(lead.id, draft.id, {
+    status: "approved",
+    sendPolicy: "approve_and_send",
+    conversationId,
+  });
+  assert.equal(approval.status, 200);
+  const outbound = (
+    await readJson<ReplyDraftApprovalPayload>(approval)
+  ).outboundMessage;
+  assert.ok(outbound);
+  const wamid = `wamid.recovery-${randomUUID()}`;
+  await pool.query(
+    `
+      UPDATE outbound_messages
+      SET status = 'sent', provider_message_id = $2, sent_at = now()
+      WHERE id = $1
+    `,
+    [outbound.id, wamid],
+  );
+
+  const app = await startWhatsAppServer();
+  const body = whatsappDeliveryEnvelope([
+    { id: wamid, status: "delivered", timestamp: "1760002000" },
+  ]);
+  try {
+    await pool.query(`
+      CREATE FUNCTION replypilot_test_reject_delivery_update()
+      RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN
+        IF NEW.provider_status_at IS NOT NULL THEN
+          RAISE EXCEPTION 'intentional delivery processing test failure';
+        END IF;
+        RETURN NEW;
+      END
+      $$
+    `);
+    await pool.query(`
+      CREATE TRIGGER replypilot_test_reject_delivery_update
+      BEFORE UPDATE ON outbound_messages
+      FOR EACH ROW EXECUTE FUNCTION replypilot_test_reject_delivery_update()
+    `);
+
+    const failed = await postWhatsApp(app, body);
+    assert.equal(failed.status, 500);
+    const failedAudit = await pool.query<{
+      processing_outcome: string;
+      failure_reason: string | null;
+    }>(
+      `
+        SELECT processing_outcome, failure_reason
+        FROM whatsapp_delivery_events
+        WHERE workspace_id = $1 AND provider_message_id = $2
+      `,
+      [requireSession().workspace.id, wamid],
+    );
+    assert.equal(failedAudit.rows[0]?.processing_outcome, "failed");
+    assert.ok(failedAudit.rows[0]?.failure_reason);
+
+    await pool.query(
+      "DROP TRIGGER replypilot_test_reject_delivery_update ON outbound_messages",
+    );
+    await pool.query(
+      "DROP FUNCTION replypilot_test_reject_delivery_update()",
+    );
+
+    const recovered = await postWhatsApp(app, body);
+    assert.equal(recovered.status, 200);
+    assert.equal(
+      (await readJson<WhatsAppWebhookPayload>(recovered)).deliveryProcessed,
+      1,
+    );
+    const final = await pool.query<{ status: string }>(
+      "SELECT status FROM outbound_messages WHERE id = $1",
+      [outbound.id],
+    );
+    assert.equal(final.rows[0]?.status, "delivered");
+  } finally {
+    await pool.query(
+      "DROP TRIGGER IF EXISTS replypilot_test_reject_delivery_update ON outbound_messages",
+    );
+    await pool.query(
+      "DROP FUNCTION IF EXISTS replypilot_test_reject_delivery_update()",
+    );
     await stopServer(app.server);
   }
 });
@@ -5036,6 +5676,8 @@ test("WhatsApp webhook acknowledges duplicate provider message IDs without new a
       status: "ok",
       stored: 1,
       duplicates: 0,
+      deliveryProcessed: 0,
+      deliveryIgnored: 0,
     });
 
     const before = await pool.query<{
@@ -5057,6 +5699,8 @@ test("WhatsApp webhook acknowledges duplicate provider message IDs without new a
       status: "ok",
       stored: 0,
       duplicates: 1,
+      deliveryProcessed: 0,
+      deliveryIgnored: 0,
     });
 
     const after = await pool.query<{
@@ -5091,6 +5735,106 @@ test("WhatsApp webhook acknowledges duplicate provider message IDs without new a
       [requireSession().workspace.id],
     );
     assert.equal(counts.rows[0]?.count, 1);
+  } finally {
+    await stopServer(app.server);
+  }
+});
+
+test("inbound opt-out suppresses idempotently and cancels queued sends without false positives", async () => {
+  const { lead, conversationId } = await createLeadWithConversation();
+  const draft = await createSavedDraftPayload(lead.id);
+  const approved = await approveSavedDraft(lead.id, draft.id, {
+    status: "approved",
+    sendPolicy: "approve_and_send",
+    conversationId,
+  });
+  assert.equal(approved.status, 200);
+
+  const app = await startWhatsAppServer();
+  const stopBody = whatsappEnvelope([
+    whatsappChange({
+      messages: [
+        textWhatsAppMessage({
+          id: `wamid.opt-out-${randomUUID()}`,
+          text: "STOP",
+          timestamp: String(Math.floor(Date.now() / 1_000)),
+        }),
+      ],
+    }),
+  ]);
+  const unrelatedBody = whatsappEnvelope([
+    whatsappChange({
+      messages: [
+        textWhatsAppMessage({
+          id: `wamid.unrelated-stop-${randomUUID()}`,
+          from: "2348031234567",
+          text: "I said stop by the shop tomorrow.",
+          timestamp: String(Math.floor(Date.now() / 1_000)),
+        }),
+      ],
+    }),
+  ]);
+
+  try {
+    const stopResponse = await postWhatsApp(app, stopBody);
+    assert.equal(stopResponse.status, 200);
+    assert.equal((await readJson<WhatsAppWebhookPayload>(stopResponse)).stored, 1);
+    const duplicate = await postWhatsApp(app, stopBody);
+    assert.equal(duplicate.status, 200);
+    assert.equal((await readJson<WhatsAppWebhookPayload>(duplicate)).duplicates, 1);
+
+    const suppression = await pool.query<{ reason: string; count: number }>(
+      `
+        SELECT reason, count(*) OVER ()::int AS count
+        FROM customer_suppressions
+        WHERE workspace_id = $1
+          AND customer_id = (
+            SELECT customer_id
+            FROM whatsapp_conversations
+            WHERE workspace_id = $1 AND id = $2
+          )
+      `,
+      [requireSession().workspace.id, conversationId],
+    );
+    assert.equal(suppression.rows[0]?.reason, "opt_out");
+    assert.equal(suppression.rows[0]?.count, 1);
+
+    const unrelated = await postWhatsApp(app, unrelatedBody);
+    assert.equal(unrelated.status, 200);
+    const unrelatedSuppression = await pool.query<{ count: number }>(
+      `
+        SELECT count(*)::int AS count
+        FROM customer_suppressions AS suppression
+        JOIN customers AS customer
+          ON customer.id = suppression.customer_id
+         AND customer.workspace_id = suppression.workspace_id
+        WHERE suppression.workspace_id = $1
+          AND customer.phone_e164 = '+2348031234567'
+      `,
+      [requireSession().workspace.id],
+    );
+    assert.equal(unrelatedSuppression.rows[0]?.count, 0);
+
+    const workerResult = await runOutboundWorkerOnce(
+      pool,
+      new MockOutboundMessageProvider(),
+      { staleAfterMs: 60_000 },
+    );
+    assert.equal(workerResult.cancelled, 1);
+    assert.equal(workerResult.claimed, 0);
+    const history = await pool.query<{
+      status: string;
+      failure_reason: string | null;
+    }>(
+      `
+        SELECT status, failure_reason
+        FROM outbound_messages
+        WHERE workspace_id = $1 AND reply_draft_id = $2
+      `,
+      [requireSession().workspace.id, draft.id],
+    );
+    assert.equal(history.rows[0]?.status, "cancelled");
+    assert.match(history.rows[0]?.failure_reason ?? "", /suppressed/i);
   } finally {
     await stopServer(app.server);
   }
@@ -7182,6 +7926,85 @@ test("per-draft approve-and-send snapshots content and creates one outbound reco
   assert.equal(outboundCount.rows[0]?.count, 1);
 });
 
+test("approval routes configured test-workspace messages to the Meta worker", async () => {
+  const testWorkspaceSession = requireSession();
+  const { lead, conversationId } = await createLeadWithConversation();
+  const draft = await createSavedDraftPayload(lead.id);
+
+  await withMetaOutboundEnabled(testWorkspaceSession.workspace.id, async () => {
+    const approved = await approveSavedDraft(lead.id, draft.id, {
+      status: "approved",
+      sendPolicy: "approve_and_send",
+      conversationId,
+    });
+
+    assert.equal(approved.status, 200);
+    const outbound = (
+      await readJson<ReplyDraftApprovalPayload>(approved)
+    ).outboundMessage;
+    assert.ok(outbound);
+    assert.equal(outbound.provider, "whatsapp");
+
+    const persisted = await pool.query<{ provider: string }>(
+      "SELECT provider FROM outbound_messages WHERE id = $1",
+      [outbound.id],
+    );
+    assert.equal(persisted.rows[0]?.provider, "whatsapp");
+
+    currentSession = await registerUser({
+      email: `outbound-mock-${randomUUID()}@example.test`,
+    });
+    const otherWorkspace = await createLeadWithConversation(
+      { name: "Non-test Workspace" },
+      {
+        senderWaId: "2348031234567",
+        senderPhoneNumber: "2348031234567",
+      },
+    );
+    const otherDraft = await createSavedDraftPayload(otherWorkspace.lead.id);
+    const otherApproval = await approveSavedDraft(
+      otherWorkspace.lead.id,
+      otherDraft.id,
+      {
+        status: "approved",
+        sendPolicy: "approve_and_send",
+        conversationId: otherWorkspace.conversationId,
+      },
+    );
+    assert.equal(otherApproval.status, 200);
+    const otherOutbound = (
+      await readJson<ReplyDraftApprovalPayload>(otherApproval)
+    ).outboundMessage;
+    assert.ok(otherOutbound);
+    assert.equal(otherOutbound.provider, "mock");
+
+    const mockResult = await runOutboundWorkerOnce(
+      pool,
+      new MockOutboundMessageProvider(),
+      { staleAfterMs: 60_000 },
+    );
+    assert.equal(mockResult.claimed, 1);
+    assert.equal(mockResult.sent, 1);
+
+    let providerCalls = 0;
+    const metaTestProvider: OutboundMessageProvider = {
+      name: "whatsapp",
+      idempotency: "unsupported",
+      async send() {
+        providerCalls += 1;
+        return { providerMessageId: "test-wamid-routing", status: "sent" };
+      },
+    };
+    const metaResult = await runOutboundWorkerOnce(pool, metaTestProvider, {
+      staleAfterMs: 60_000,
+    });
+    assert.equal(metaResult.claimed, 1);
+    assert.equal(metaResult.sent, 1);
+    assert.equal(providerCalls, 1);
+    currentSession = testWorkspaceSession;
+  });
+});
+
 test("concurrent approvals converge on one approved draft and one outbound record", async () => {
   const { lead, conversationId } = await createLeadWithConversation();
   const draft = await createSavedDraftPayload(lead.id);
@@ -7330,6 +8153,169 @@ test("ambiguous conversations require an explicit validated conversationId", asy
   );
 });
 
+test("manual queueing requires an explicit target when a lead has multiple conversations", async () => {
+  const { lead } = await createLeadWithConversation();
+  await persistInboundMessages(
+    pool,
+    requireSession().workspace.id,
+    [
+      inboundMessage({
+        phoneNumberId: "106540352242924",
+        senderWaId: TEST_WHATSAPP_CUSTOMER_WA_ID,
+        senderPhoneNumber: TEST_WHATSAPP_CUSTOMER_WA_ID,
+      }),
+    ],
+  );
+  const conversationIds = await conversationIdsForLead(lead.id);
+  assert.equal(conversationIds.length, 2);
+
+  const draft = await createSavedDraftPayload(lead.id);
+  const approved = await approveSavedDraft(lead.id, draft.id);
+  assert.equal(approved.status, 200);
+
+  const ambiguous = await sendSavedDraft(draft.id);
+  assert.equal(ambiguous.status, 409);
+  assert.match(
+    (await readJson<ErrorPayload>(ambiguous)).error,
+    /multiple active WhatsApp conversations/i,
+  );
+
+  const explicit = await sendSavedDraft(draft.id, {
+    conversationId: conversationIds[1],
+  });
+  assert.equal(explicit.status, 200);
+  const queued = await readJson<OutboundMessagePayload>(explicit);
+  assert.equal(queued.outboundMessage.conversationId, conversationIds[1]);
+  assert.equal(queued.outboundMessage.status, "queued");
+});
+
+test("manual retry cannot retarget an existing outbound message", async () => {
+  const { lead } = await createLeadWithConversation();
+  await persistInboundMessages(
+    pool,
+    requireSession().workspace.id,
+    [
+      inboundMessage({
+        phoneNumberId: "106540352242925",
+        senderWaId: TEST_WHATSAPP_CUSTOMER_WA_ID,
+        senderPhoneNumber: TEST_WHATSAPP_CUSTOMER_WA_ID,
+      }),
+    ],
+  );
+  const conversationIds = await conversationIdsForLead(lead.id);
+  assert.equal(conversationIds.length, 2);
+
+  const draft = await createSavedDraftPayload(lead.id);
+  const approved = await approveSavedDraft(lead.id, draft.id);
+  assert.equal(approved.status, 200);
+  const queued = await sendSavedDraft(draft.id, {
+    conversationId: conversationIds[1],
+  });
+  assert.equal(queued.status, 200);
+
+  await pool.query(
+    `
+      UPDATE outbound_messages
+      SET status = 'failed', failure_reason = 'Provider rejected the message.'
+      WHERE reply_draft_id = $1
+    `,
+    [draft.id],
+  );
+
+  const mismatch = await sendSavedDraft(draft.id, {
+    conversationId: conversationIds[0],
+  });
+  assert.equal(mismatch.status, 409);
+  assert.match(
+    (await readJson<ErrorPayload>(mismatch)).error,
+    /cannot be retargeted/i,
+  );
+
+  const stored = await pool.query<{
+    conversation_id: string;
+    status: string;
+    content: string;
+  }>(
+    `
+      SELECT conversation_id, status, content
+      FROM outbound_messages
+      WHERE reply_draft_id = $1
+    `,
+    [draft.id],
+  );
+  assert.deepEqual(stored.rows[0], {
+    conversation_id: conversationIds[1],
+    status: "failed",
+    content: draft.draftReply,
+  });
+});
+
+test("lead-scoped conversation lookup returns all matching conversations", async () => {
+  const { lead } = await createLeadWithConversation();
+  const additionalMessages = Array.from({ length: 105 }, (_, index) =>
+    inboundMessage({
+      phoneNumberId: String(2_000_000_000 + index),
+      senderWaId: TEST_WHATSAPP_CUSTOMER_WA_ID,
+      senderPhoneNumber: TEST_WHATSAPP_CUSTOMER_WA_ID,
+    }),
+  );
+  const stored = await persistInboundMessages(
+    pool,
+    requireSession().workspace.id,
+    additionalMessages,
+  );
+  assert.equal(stored.stored, 105);
+
+  const response = await fetch(
+    `${baseUrl}/api/conversations/by-lead/${lead.id}`,
+  );
+  assert.equal(response.status, 200);
+  const payload = await readJson<{ conversations: WhatsAppConversation[] }>(
+    response,
+  );
+  assert.equal(payload.conversations.length, 106);
+  assert.ok(payload.conversations.every((item) => item.leadId === lead.id));
+
+  const freshServer = await startServer(pool);
+  try {
+    const firstRequest = await nativeFetch(
+      `${freshServer.baseUrl}/api/conversations/by-lead/${lead.id}`,
+      {
+        headers: {
+          cookie: requireSession().cookie,
+          "x-forwarded-for": TEST_CLIENT_IP,
+        },
+      },
+    );
+    assert.equal(firstRequest.status, 200);
+    assert.equal(
+      (
+        await readJson<{ conversations: WhatsAppConversation[] }>(
+          firstRequest,
+        )
+      ).conversations.length,
+      106,
+    );
+  } finally {
+    await stopServer(freshServer.server);
+  }
+
+  const other = await registerUser({
+    email: `lead-conversation-other-${randomUUID()}@example.test`,
+    name: "Other Lead Workspace",
+  });
+  const isolated = await requestAs(
+    other,
+    `/api/conversations/by-lead/${lead.id}`,
+  );
+  assert.equal(isolated.status, 200);
+  assert.deepEqual(
+    (await readJson<{ conversations: WhatsAppConversation[] }>(isolated))
+      .conversations,
+    [],
+  );
+});
+
 test("manual send only queues approved drafts and is idempotent", async () => {
   const { lead } = await createLeadWithConversation();
   const draft = await createSavedDraftPayload(lead.id);
@@ -7360,6 +8346,17 @@ test("manual send only queues approved drafts and is idempotent", async () => {
   assert.equal(sentPayload.outboundMessage.content, draft.draftReply);
   assert.equal(sentPayload.outboundMessage.attempts, 0);
 
+  const outboundState = await fetch(
+    `${baseUrl}/api/outbound-messages/by-draft/${draft.id}`,
+  );
+  assert.equal(outboundState.status, 200);
+  assert.deepEqual(
+    await readJson<{ outboundMessage: OutboundMessageRecord | null }>(
+      outboundState,
+    ),
+    { outboundMessage: sentPayload.outboundMessage },
+  );
+
   const repeated = await sendSavedDraft(draft.id);
   assert.equal(repeated.status, 200);
   assert.equal(
@@ -7380,6 +8377,41 @@ test("manual send only queues approved drafts and is idempotent", async () => {
 
   const invalidDraftId = await sendSavedDraft("not-a-uuid");
   assert.equal(invalidDraftId.status, 400);
+});
+
+test("manual queueing uses configured provider and clients cannot override provider selection", async () => {
+  const { lead, conversationId } = await createLeadWithConversation();
+  const draft = await createSavedDraftPayload(lead.id);
+
+  const forgedApproval = await approveSavedDraft(lead.id, draft.id, {
+    status: "approved",
+    sendPolicy: "approve_and_send",
+    conversationId,
+    provider: "whatsapp",
+  });
+  assert.equal(forgedApproval.status, 400);
+
+  const approved = await approveSavedDraft(lead.id, draft.id);
+  assert.equal(approved.status, 200);
+
+  const forgedManualQueue = await sendSavedDraft(draft.id, {
+    provider: "whatsapp",
+  });
+  assert.equal(forgedManualQueue.status, 400);
+
+  await withMetaOutboundEnabled(requireSession().workspace.id, async () => {
+    const queued = await sendSavedDraft(draft.id);
+    assert.equal(queued.status, 200);
+    const outbound = (await readJson<OutboundMessagePayload>(queued))
+      .outboundMessage;
+    assert.equal(outbound.provider, "whatsapp");
+
+    const persisted = await pool.query<{ provider: string }>(
+      "SELECT provider FROM outbound_messages WHERE id = $1",
+      [outbound.id],
+    );
+    assert.equal(persisted.rows[0]?.provider, "whatsapp");
+  });
 });
 
 test("outbound history filters by workspace, status, and conversation", async () => {
@@ -7456,6 +8488,65 @@ test("outbound history filters by workspace, status, and conversation", async ()
   assert.equal(secondPage.pagination.hasMore, false);
 });
 
+test("conversation threads order outbound messages by send time and retain inbound rows", async () => {
+  const { lead, conversationId } = await createLeadWithConversation();
+  const draft = await createSavedDraftPayload(lead.id);
+  const approved = await approveSavedDraft(lead.id, draft.id, {
+    status: "approved",
+    sendPolicy: "approve_and_send",
+    conversationId,
+  });
+  assert.equal(approved.status, 200);
+  const outbound = (
+    await readJson<ReplyDraftApprovalPayload>(approved)
+  ).outboundMessage;
+  assert.ok(outbound);
+
+  const inbound = await pool.query<{ id: string }>(
+    `
+      SELECT id
+      FROM whatsapp_messages
+      WHERE workspace_id = $1 AND conversation_id = $2
+    `,
+    [requireSession().workspace.id, conversationId],
+  );
+  assert.equal(inbound.rows.length, 1);
+  await pool.query(
+    `
+      UPDATE outbound_messages
+      SET status = 'sent',
+          provider_message_id = 'mock-thread-order',
+          queued_at = '2026-10-01T10:00:00Z',
+          sent_at = '2026-10-02T10:00:00Z'
+      WHERE id = $1
+    `,
+    [outbound.id],
+  );
+
+  const thread = await pool.query<{
+    id: string;
+    direction: string;
+    provider_timestamp: Date;
+  }>(
+    `
+      SELECT id, direction, provider_timestamp
+      FROM conversation_thread_messages
+      WHERE workspace_id = $1 AND conversation_id = $2
+      ORDER BY provider_timestamp ASC, created_at ASC, id ASC
+    `,
+    [requireSession().workspace.id, conversationId],
+  );
+  assert.equal(thread.rows.length, 2);
+  assert.equal(thread.rows[0]?.id, inbound.rows[0]?.id);
+  assert.equal(thread.rows[0]?.direction, "inbound");
+  assert.equal(thread.rows[1]?.id, outbound.id);
+  assert.equal(thread.rows[1]?.direction, "outbound");
+  assert.equal(
+    thread.rows[1]?.provider_timestamp.toISOString(),
+    "2026-10-02T10:00:00.000Z",
+  );
+});
+
 test("outbound history and manual send are isolated by workspace", async () => {
   const { lead, conversationId } = await createLeadWithConversation();
   const draft = await createSavedDraftPayload(lead.id);
@@ -7478,6 +8569,17 @@ test("outbound history and manual send are isolated by workspace", async () => {
 
   const send = await sendSavedDraft(draft.id);
   assert.equal(send.status, 404);
+  const outboundState = await requestAs(
+    other,
+    `/api/outbound-messages/by-draft/${draft.id}`,
+  );
+  assert.equal(outboundState.status, 200);
+  assert.deepEqual(
+    await readJson<{ outboundMessage: OutboundMessageRecord | null }>(
+      outboundState,
+    ),
+    { outboundMessage: null },
+  );
 
   const settings = await getMessagingSettings();
   assert.equal(settings.status, 200);
@@ -7694,6 +8796,7 @@ test("permanent worker failure is retryable only through explicit manual send", 
   const failed = history.messages[0];
   assert.ok(failed);
   assert.equal(failed.status, "failed");
+  assert.equal(failed.conversation.status, "open");
   assert.equal(failed.attempts, 3);
   assert.equal(failed.canRetry, true);
   assert.ok(failed.failureReason);
@@ -7936,6 +9039,7 @@ test("manual retry refuses a snapshot from different draft content", async () =>
   );
   assert.equal(history.messages[0]?.status, "failed");
   assert.equal(history.messages[0]?.canRetry, false);
+  assert.equal(history.messages[0]?.retryBlockReason, "content_changed");
 
   const retry = await sendSavedDraft(draft.id);
   assert.equal(retry.status, 409);
@@ -7943,6 +9047,78 @@ test("manual retry refuses a snapshot from different draft content", async () =>
     (await readJson<ErrorPayload>(retry)).error,
     /draft content changed/i,
   );
+});
+
+test("failed outbound messages cannot be retried after their conversation is archived", async () => {
+  const { lead, conversationId } = await createLeadWithConversation();
+  const draft = await createSavedDraftPayload(lead.id);
+  const approved = await approveSavedDraft(lead.id, draft.id, {
+    status: "approved",
+    sendPolicy: "approve_and_send",
+    conversationId,
+  });
+  assert.equal(approved.status, 200);
+
+  await pool.query(
+    `
+      UPDATE outbound_messages
+      SET status = 'failed', failure_reason = 'Provider rejected the message.'
+      WHERE reply_draft_id = $1
+    `,
+    [draft.id],
+  );
+  await pool.query(
+    "UPDATE whatsapp_conversations SET status = 'archived' WHERE id = $1",
+    [conversationId],
+  );
+
+  const history = await readJson<OutboundHistoryPayload>(
+    await listOutboundMessages(),
+  );
+  assert.equal(history.messages[0]?.status, "failed");
+  assert.equal(history.messages[0]?.conversation.status, "archived");
+  assert.equal(history.messages[0]?.canRetry, false);
+  assert.equal(
+    history.messages[0]?.retryBlockReason,
+    "conversation_inactive",
+  );
+
+  const retry = await sendSavedDraft(draft.id, { conversationId });
+  assert.equal(retry.status, 409);
+  assert.match(
+    (await readJson<ErrorPayload>(retry)).error,
+    /not an active conversation/i,
+  );
+});
+
+test("provider failure reasons are bounded to the database limit", async () => {
+  const { lead, conversationId } = await createLeadWithConversation();
+  const draft = await createSavedDraftPayload(lead.id);
+  const approved = await approveSavedDraft(lead.id, draft.id, {
+    status: "approved",
+    sendPolicy: "approve_and_send",
+    conversationId,
+  });
+  assert.equal(approved.status, 200);
+
+  const provider: OutboundMessageProvider = {
+    name: "mock",
+    idempotency: "unsupported",
+    async send() {
+      throw new OutboundProviderError("x".repeat(1500));
+    },
+  };
+  const result = await runOutboundWorkerOnce(pool, provider, {
+    batchSize: 1,
+    baseRetryDelayMs: 0,
+    staleAfterMs: 60_000,
+  });
+  assert.equal(result.retried, 1);
+
+  const history = await readJson<OutboundHistoryPayload>(
+    await listOutboundMessages(),
+  );
+  assert.equal(history.messages[0]?.failureReason?.length, 1000);
 });
 
 test("two workers cannot send the same queued outbound message twice", async () => {
@@ -8173,7 +9349,20 @@ test("worker recovers stale claims with the original idempotency key", async () 
     conversationId,
     content: outbound.content,
     idempotencyKey,
+    recipientPhone: null,
+    workspaceId: requireSession().workspace.id,
   });
+  const repeatedAcceptance = await provider.send({
+    conversationId,
+    content: outbound.content,
+    idempotencyKey,
+    recipientPhone: null,
+    workspaceId: requireSession().workspace.id,
+  });
+  assert.equal(
+    repeatedAcceptance.providerMessageId,
+    providerAccepted.providerMessageId,
+  );
 
   await pool.query(
     `
@@ -8376,6 +9565,8 @@ test("mock provider idempotency key produces a stable provider message ID", asyn
     conversationId: randomUUID(),
     content: "Stable outbound content.",
     idempotencyKey: "reply-draft:stable-idempotency-test",
+    recipientPhone: null,
+    workspaceId: LEGACY_WORKSPACE_ID,
   };
   const first = await provider.send(input);
   const second = await provider.send(input);
@@ -8384,4 +9575,298 @@ test("mock provider idempotency key produces a stable provider message ID", asyn
   assert.equal(second.status, "sent");
   assert.equal(first.providerMessageId, second.providerMessageId);
   assert.match(first.providerMessageId, /^mock-[0-9a-f]{24}$/);
+});
+
+test("Step 9. End-to-end outbound queue, mock worker, history, conversation, and workspace isolation", async () => {
+  const workspaceId = requireSession().workspace.id;
+
+  // 1. Draft approval creates the expected queue record.
+  const approvedLead = await createLeadWithConversation();
+  const approvedDraft = await createSavedDraftPayload(approvedLead.lead.id);
+  const forgedApproval = await approveSavedDraft(
+    approvedLead.lead.id,
+    approvedDraft.id,
+    {
+      status: "approved",
+      sendPolicy: "approve_and_send",
+      conversationId: approvedLead.conversationId,
+      provider: "whatsapp",
+    },
+  );
+  assert.equal(forgedApproval.status, 400);
+
+  const approved = await approveSavedDraft(
+    approvedLead.lead.id,
+    approvedDraft.id,
+    {
+      status: "approved",
+      sendPolicy: "approve_and_send",
+      conversationId: approvedLead.conversationId,
+    },
+  );
+  assert.equal(approved.status, 200);
+  const approvedOutbound = (
+    await readJson<ReplyDraftApprovalPayload>(approved)
+  ).outboundMessage;
+  assert.ok(approvedOutbound);
+  assert.equal(approvedOutbound.conversationId, approvedLead.conversationId);
+  assert.equal(approvedOutbound.replyDraftId, approvedDraft.id);
+  assert.equal(approvedOutbound.provider, "mock");
+  assert.equal(approvedOutbound.status, "queued");
+  assert.equal(approvedOutbound.content, approvedDraft.draftReply);
+  assert.equal(approvedOutbound.attempts, 0);
+
+  const approvedQueuedRow = await pool.query<{
+    idempotency_key: string;
+    provider: string;
+    status: string;
+  }>(
+    `
+      SELECT idempotency_key, provider, status
+      FROM outbound_messages
+      WHERE id = $1 AND workspace_id = $2
+    `,
+    [approvedOutbound.id, workspaceId],
+  );
+  assert.deepEqual(approvedQueuedRow.rows[0], {
+    idempotency_key: `reply-draft:${approvedDraft.id}`,
+    provider: "mock",
+    status: "queued",
+  });
+
+  // 2. Manual queueing creates the expected queue record.
+  const manualLead = await createLeadWithConversation(
+    { name: "Manual Queue Lead" },
+    {
+      senderWaId: "2348031234567",
+      senderPhoneNumber: "2348031234567",
+    },
+  );
+  const manualDraft = await createSavedDraftPayload(manualLead.lead.id);
+  const approvedOnly = await approveSavedDraft(
+    manualLead.lead.id,
+    manualDraft.id,
+  );
+  assert.equal(approvedOnly.status, 200);
+  assert.equal(
+    (await readJson<ReplyDraftApprovalPayload>(approvedOnly)).outboundMessage,
+    null,
+  );
+
+  // 3. Provider selection is server-controlled; a browser payload cannot
+  // override it.
+  const forgedManualQueue = await sendSavedDraft(manualDraft.id, {
+    provider: "whatsapp",
+  });
+  assert.equal(forgedManualQueue.status, 400);
+
+  const manualQueued = await sendSavedDraft(manualDraft.id);
+  assert.equal(manualQueued.status, 200);
+  const manualOutbound = (
+    await readJson<OutboundMessagePayload>(manualQueued)
+  ).outboundMessage;
+  assert.equal(manualOutbound.conversationId, manualLead.conversationId);
+  assert.equal(manualOutbound.replyDraftId, manualDraft.id);
+  assert.equal(manualOutbound.provider, "mock");
+  assert.equal(manualOutbound.status, "queued");
+  assert.equal(manualOutbound.content, manualDraft.draftReply);
+  assert.equal(manualOutbound.attempts, 0);
+
+  const manualQueuedRow = await pool.query<{
+    idempotency_key: string;
+    provider: string;
+    status: string;
+  }>(
+    `
+      SELECT idempotency_key, provider, status
+      FROM outbound_messages
+      WHERE id = $1 AND workspace_id = $2
+    `,
+    [manualOutbound.id, workspaceId],
+  );
+  assert.deepEqual(manualQueuedRow.rows[0], {
+    idempotency_key: `reply-draft:${manualDraft.id}`,
+    provider: "mock",
+    status: "queued",
+  });
+
+  // 4. The mock worker must only claim mock-provider rows. Create a queued
+  // row assigned to another provider and confirm it is left untouched.
+  const otherProviderLead = await createLeadWithConversation(
+    { name: "Other Provider Lead" },
+    {
+      senderWaId: "2348031234568",
+      senderPhoneNumber: "2348031234568",
+    },
+  );
+  const otherProviderDraft = await createSavedDraftPayload(
+    otherProviderLead.lead.id,
+  );
+  assert.equal(
+    (
+      await approveSavedDraft(otherProviderLead.lead.id, otherProviderDraft.id)
+    ).status,
+    200,
+  );
+  const otherProviderQueued = await sendSavedDraft(otherProviderDraft.id);
+  assert.equal(otherProviderQueued.status, 200);
+  const otherProviderOutbound = (
+    await readJson<OutboundMessagePayload>(otherProviderQueued)
+  ).outboundMessage;
+  await pool.query(
+    `
+      UPDATE outbound_messages
+      SET provider = 'whatsapp', updated_at = now()
+      WHERE id = $1 AND workspace_id = $2
+    `,
+    [otherProviderOutbound.id, workspaceId],
+  );
+
+  const mockResult = await runOutboundWorkerOnce(
+    pool,
+    new MockOutboundMessageProvider(),
+    { batchSize: 10, baseRetryDelayMs: 0, staleAfterMs: 60_000 },
+  );
+  assert.equal(mockResult.claimed, 2);
+  assert.equal(mockResult.sent, 2);
+
+  // 5. Queue status changes are persisted.
+  for (const outbound of [approvedOutbound, manualOutbound]) {
+    const persisted = await pool.query<{
+      status: string;
+      attempts: number;
+      provider: string;
+      provider_message_id: string | null;
+      sent_at: Date | null;
+    }>(
+      `
+        SELECT status, attempts, provider, provider_message_id, sent_at
+        FROM outbound_messages
+        WHERE id = $1 AND workspace_id = $2
+      `,
+      [outbound.id, workspaceId],
+    );
+    const row = persisted.rows[0];
+    assert.ok(row);
+    assert.equal(row.status, "sent");
+    assert.equal(row.attempts, 1);
+    assert.equal(row.provider, "mock");
+    assert.match(row.provider_message_id ?? "", /^mock-[0-9a-f]{24}$/);
+    assert.ok(row.sent_at);
+  }
+
+  const untouched = await pool.query<{
+    status: string;
+    attempts: number;
+    provider_message_id: string | null;
+  }>(
+    `
+      SELECT status, attempts, provider_message_id
+      FROM outbound_messages
+      WHERE id = $1 AND workspace_id = $2
+    `,
+    [otherProviderOutbound.id, workspaceId],
+  );
+  assert.deepEqual(untouched.rows[0], {
+    status: "queued",
+    attempts: 0,
+    provider_message_id: null,
+  });
+
+  // 6. Outbound history displays the persisted status.
+  const history = await readJson<OutboundHistoryPayload>(
+    await listOutboundMessages("?limit=50"),
+  );
+  const approvedHistory = history.messages.find(
+    (message) => message.id === approvedOutbound.id,
+  );
+  const manualHistory = history.messages.find(
+    (message) => message.id === manualOutbound.id,
+  );
+  const otherProviderHistory = history.messages.find(
+    (message) => message.id === otherProviderOutbound.id,
+  );
+  assert.ok(approvedHistory);
+  assert.ok(manualHistory);
+  assert.ok(otherProviderHistory);
+  assert.equal(approvedHistory.status, "sent");
+  assert.equal(manualHistory.status, "sent");
+  assert.equal(otherProviderHistory.status, "queued");
+  assert.equal(approvedHistory.canRetry, false);
+  assert.equal(manualHistory.canRetry, false);
+  assert.match(approvedHistory.providerMessageId ?? "", /^mock-/);
+  assert.match(manualHistory.providerMessageId ?? "", /^mock-/);
+
+  // 7. Conversation associations remain correct.
+  assert.equal(
+    approvedHistory.conversation.id,
+    approvedLead.conversationId,
+  );
+  assert.equal(manualHistory.conversation.id, manualLead.conversationId);
+  assert.equal(
+    otherProviderHistory.conversation.id,
+    otherProviderLead.conversationId,
+  );
+
+  const approvedThread = await readJson<ConversationMessagesPayload>(
+    await fetch(
+      `${baseUrl}/api/conversations/${approvedLead.conversationId}/messages?limit=50`,
+    ),
+  );
+  const approvedThreadOutbound = approvedThread.messages.find(
+    (message) => message.id === approvedOutbound.id,
+  );
+  assert.ok(approvedThreadOutbound);
+  assert.equal(approvedThreadOutbound.direction, "outbound");
+  assert.equal(approvedThreadOutbound.outboundStatus, "sent");
+
+  const manualThread = await readJson<ConversationMessagesPayload>(
+    await fetch(
+      `${baseUrl}/api/conversations/${manualLead.conversationId}/messages?limit=50`,
+    ),
+  );
+  assert.ok(
+    manualThread.messages.some(
+      (message) => message.id === manualOutbound.id,
+    ),
+  );
+  assert.equal(
+    manualThread.messages.some(
+      (message) => message.id === approvedOutbound.id,
+    ),
+    false,
+    "Outbound records must not leak across conversations",
+  );
+
+  // 8. Workspace isolation is preserved for history, draft lookup, and sends.
+  const otherSession = await registerUser({
+    email: `step9-isolation-${randomUUID()}@example.test`,
+    name: "Step 9 Isolation",
+  });
+  currentSession = otherSession;
+
+  const otherHistory = await readJson<OutboundHistoryPayload>(
+    await listOutboundMessages("?limit=50"),
+  );
+  assert.equal(otherHistory.messages.length, 0);
+
+  const otherDraftLookup = await fetch(
+    `${baseUrl}/api/outbound-messages/by-draft/${approvedDraft.id}`,
+  );
+  assert.equal(otherDraftLookup.status, 200);
+  assert.deepEqual(
+    await readJson<{ outboundMessage: OutboundMessageRecord | null }>(
+      otherDraftLookup,
+    ),
+    { outboundMessage: null },
+  );
+
+  const crossWorkspaceSend = await sendSavedDraft(approvedDraft.id);
+  assert.equal(crossWorkspaceSend.status, 404);
+
+  assert.equal(
+    JSON.stringify(history).includes("EAAB"),
+    false,
+    "Provider credentials must never appear in outbound API responses",
+  );
 });
