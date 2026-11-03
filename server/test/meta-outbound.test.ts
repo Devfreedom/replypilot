@@ -37,6 +37,7 @@ import type {
   InboundWhatsAppMessage,
 } from "../src/whatsapp/types.js";
 import { runOutboundWorkerOnce } from "../src/outbound/worker.js";
+import { queueManualSend } from "../src/outbound/service.js";
 import { createPool } from "../src/db/pool.js";
 import {
   getTestDatabaseUrl,
@@ -1109,9 +1110,11 @@ test("20. Suppression is rechecked immediately before sending", async () => {
 
 function makeOptOutMessage(
   text: string,
-  overrides: Partial<InboundWhatsAppMessage> = {},
+  overrides: Partial<InboundWhatsAppMessage> & { customerPhone?: string } = {},
 ): InboundWhatsAppMessage {
-  const customerPhone = overrides.customerPhone ?? "+16505551234";
+  const { customerPhone: customerPhoneOverride, ...messageOverrides } =
+    overrides;
+  const customerPhone = customerPhoneOverride ?? "+16505551234";
   return {
     providerMessageId: `wamid.optout-${randomUUID()}`,
     phoneNumberId: TEST_PHONE_NUMBER_ID,
@@ -1121,8 +1124,24 @@ function makeOptOutMessage(
     messageType: "text",
     text,
     providerTimestamp: new Date(),
-    ...overrides,
+    ...messageOverrides,
   };
+}
+
+async function providerStatusAtForWamid(
+  workspaceId: string,
+  wamid: string,
+): Promise<Date | null> {
+  const result = await pool.query<{ provider_status_at: Date | null }>(
+    `
+      SELECT provider_status_at
+      FROM outbound_messages
+      WHERE workspace_id = $1 AND provider_message_id = $2
+    `,
+    [workspaceId, wamid],
+  );
+
+  return result.rows[0]?.provider_status_at ?? null;
 }
 
 test("23. Explicit STOP request creates suppression", async () => {
@@ -1303,9 +1322,12 @@ test("21. Duplicate delivery events are processed only once", async () => {
   const row = await getOutboundMessageByWamid(pool, TEST_WORKSPACE_ID, wamid);
   assert.ok(row);
   assert.equal(row.status, "delivered");
-  const audit = await pool.query<{ duplicate_count: number }>(
+  const audit = await pool.query<{
+    duplicate_count: number;
+    processing_outcome: string;
+  }>(
     `
-      SELECT duplicate_count
+      SELECT duplicate_count, processing_outcome
       FROM whatsapp_delivery_events
       WHERE workspace_id = $1 AND provider_message_id = $2
     `,
@@ -1313,6 +1335,8 @@ test("21. Duplicate delivery events are processed only once", async () => {
   );
   assert.equal(firstResult, true);
   assert.equal(audit.rows[0]?.duplicate_count, 1);
+  assert.equal(audit.rows[0]?.processing_outcome, "processed");
+  assert.equal(audit.rows.length, 1, "Duplicate events must not create new audit rows");
 });
 
 test("failed delivery persists its provider timestamp and bounded reason", async () => {
@@ -1386,6 +1410,24 @@ test("22. Older events cannot overwrite newer valid states", async () => {
   const row = await getOutboundMessageByWamid(pool, TEST_WORKSPACE_ID, wamid);
   assert.ok(row);
   assert.equal(row.status, "delivered", "Older 'sent' event must not overwrite 'delivered'");
+
+  const audit = await pool.query<{
+    provider_status: string;
+    processing_outcome: string;
+    processing_reason: string | null;
+  }>(
+    `
+      SELECT provider_status, processing_outcome, processing_reason
+      FROM whatsapp_delivery_events
+      WHERE workspace_id = $1 AND provider_message_id = $2
+      ORDER BY provider_timestamp ASC
+    `,
+    [TEST_WORKSPACE_ID, wamid],
+  );
+  assert.equal(audit.rows.length, 2);
+  assert.equal(audit.rows[0]?.processing_outcome, "processed");
+  assert.equal(audit.rows[1]?.processing_outcome, "ignored");
+  assert.match(audit.rows[1]?.processing_reason ?? "", /stale/i);
 });
 
 test("23. Delivered and read cannot regress to sent", async () => {
@@ -1551,6 +1593,285 @@ test("32. `read` delivery event updates the correct outbound message", async () 
   assert.equal(row.deliveredAt, eventTime.toISOString(), "delivered_at must persist for read");
 });
 
+test("33. Unknown wamid handled safely by delivery event functions", async () => {
+  const unknownWamid = `wamid.unknown-${randomUUID()}`;
+
+  assert.equal(
+    await markOutboundDeliveryEventSent(pool, TEST_WORKSPACE_ID, unknownWamid, new Date()),
+    false,
+    "sent on unknown wamid must not throw",
+  );
+  assert.equal(
+    await markOutboundDeliveryEventDelivered(pool, TEST_WORKSPACE_ID, unknownWamid, new Date()),
+    false,
+    "delivered on unknown wamid must not throw",
+  );
+  assert.equal(
+    await markOutboundDeliveryEventRead(pool, TEST_WORKSPACE_ID, unknownWamid, new Date()),
+    false,
+    "read on unknown wamid must not throw",
+  );
+  assert.equal(
+    await markOutboundDeliveryEventFailed(pool, TEST_WORKSPACE_ID, unknownWamid, new Date(), "no such message"),
+    false,
+    "failed on unknown wamid must not throw",
+  );
+});
+
+test("34. Provider event timestamps persisted for all delivery statuses", async () => {
+  const eventTime = new Date("2026-10-11T12:00:00.000Z");
+
+  const { conversationId: convSent } = await createTestCustomerAndConversation();
+  const wamidSent = `wamid.ts-sent-${randomUUID()}`;
+  await insertTestOutboundRow({ conversationId: convSent, providerMessageId: wamidSent, status: "queued" });
+  assert.equal(
+    await markOutboundDeliveryEventSent(pool, TEST_WORKSPACE_ID, wamidSent, eventTime),
+    true,
+    "sent event must be processed",
+  );
+
+  const { conversationId: convDelivered } = await createTestCustomerAndConversation({
+    customerPhone: "+447911123456",
+  });
+  const wamidDelivered = `wamid.ts-delivered-${randomUUID()}`;
+  await insertTestOutboundRow({
+    conversationId: convDelivered,
+    providerMessageId: wamidDelivered,
+  });
+  assert.equal(
+    await markOutboundDeliveryEventDelivered(pool, TEST_WORKSPACE_ID, wamidDelivered, eventTime),
+    true,
+    "delivered event must be processed",
+  );
+
+  const { conversationId: convRead } = await createTestCustomerAndConversation({
+    customerPhone: "+447911123457",
+  });
+  const wamidRead = `wamid.ts-read-${randomUUID()}`;
+  await insertTestOutboundRow({
+    conversationId: convRead,
+    providerMessageId: wamidRead,
+  });
+  assert.equal(
+    await markOutboundDeliveryEventRead(pool, TEST_WORKSPACE_ID, wamidRead, eventTime),
+    true,
+    "read event must be processed",
+  );
+
+  const { conversationId: convFailed } = await createTestCustomerAndConversation({
+    customerPhone: "+447911123458",
+  });
+  const wamidFailed = `wamid.ts-failed-${randomUUID()}`;
+  await insertTestOutboundRow({
+    conversationId: convFailed,
+    providerMessageId: wamidFailed,
+  });
+  assert.equal(
+    await markOutboundDeliveryEventFailed(pool, TEST_WORKSPACE_ID, wamidFailed, eventTime, "Meta reported delivery failure."),
+    true,
+    "failed event must be processed",
+  );
+
+  for (const wamid of [wamidSent, wamidDelivered, wamidRead, wamidFailed]) {
+    const row = await getOutboundMessageByWamid(pool, TEST_WORKSPACE_ID, wamid);
+    assert.ok(row, `Row must exist for ${wamid}`);
+    assert.equal(
+      (await providerStatusAtForWamid(TEST_WORKSPACE_ID, wamid))?.toISOString(),
+      eventTime.toISOString(),
+      `provider_status_at must persist for ${wamid}`,
+    );
+  }
+});
+
+test("35. Signed webhook payload processes end-to-end and creates audit record", async () => {
+  const { conversationId } = await createTestCustomerAndConversation();
+  const wamid = `wamid.e2e-${randomUUID()}`;
+  await insertTestOutboundRow({ conversationId, providerMessageId: wamid, status: "queued" });
+
+  const appSecret = "test-app-secret-for-signing";
+  const eventTime = new Date("2026-10-11T18:00:00.000Z");
+
+  const payload = {
+    object: "whatsapp_business_account",
+    entry: [
+      {
+        changes: [
+          {
+            field: "messages",
+            value: {
+              messaging_product: "whatsapp",
+              metadata: {
+                phone_number_id: TEST_PHONE_NUMBER_ID,
+              },
+              statuses: [
+                {
+                  id: wamid,
+                  status: "delivered",
+                  timestamp: String(Math.floor(eventTime.getTime() / 1000)),
+                  recipient_id: "16505551234",
+                },
+              ],
+            },
+          },
+        ],
+      },
+    ],
+  };
+
+  const rawBody = Buffer.from(JSON.stringify(payload), "utf8");
+  const signature = `sha256=${createHmac("sha256", appSecret).update(rawBody).digest("hex")}`;
+
+  assert.equal(isValidMetaSignature(rawBody, signature, appSecret), true, "valid signature must verify");
+
+  const events = parseWhatsAppDeliveryStatuses(payload, TEST_PHONE_NUMBER_ID);
+  assert.equal(events.length, 1, "must parse exactly one delivery status");
+  assert.equal(events[0]?.providerMessageId, wamid, "parsed wamid must match");
+  assert.equal(events[0]?.status, "delivered", "parsed status must match");
+
+  const result = await processDeliveryStatusEvents(pool, TEST_WORKSPACE_ID, events);
+  assert.equal(result.processed, 1, "must process the delivered event");
+
+  const row = await getOutboundMessageByWamid(pool, TEST_WORKSPACE_ID, wamid);
+  assert.ok(row);
+  assert.equal(row.status, "delivered", "outbound message must be delivered");
+  assert.equal(
+    (
+      await providerStatusAtForWamid(TEST_WORKSPACE_ID, wamid)
+    )?.toISOString(),
+    eventTime.toISOString(),
+    "provider_status_at must persist",
+  );
+
+  const audit = await pool.query<{ processing_outcome: string }>(
+    `
+      SELECT processing_outcome
+      FROM whatsapp_delivery_events
+      WHERE workspace_id = $1 AND provider_message_id = $2
+    `,
+    [TEST_WORKSPACE_ID, wamid],
+  );
+  assert.equal(audit.rows.length, 1, "exactly one audit record must exist");
+  assert.equal(audit.rows[0]?.processing_outcome, "processed", "audit outcome must be processed");
+});
+
+test("36. Concurrent duplicate events handled safely", async () => {
+  const { conversationId } = await createTestCustomerAndConversation();
+  const wamid = `wamid.concurrent-${randomUUID()}`;
+  await insertTestOutboundRow({ conversationId, providerMessageId: wamid });
+
+  const eventTime = new Date("2026-10-11T14:00:00.000Z");
+  const event = {
+    providerMessageId: wamid,
+    phoneNumberId: TEST_PHONE_NUMBER_ID,
+    status: "delivered",
+    providerTimestamp: eventTime,
+    errorDescription: null,
+  };
+
+  const [first, second] = await Promise.all([
+    processDeliveryStatusEvents(pool, TEST_WORKSPACE_ID, [event]),
+    processDeliveryStatusEvents(pool, TEST_WORKSPACE_ID, [event]),
+  ]);
+
+  const processed = [first.processed, second.processed].filter((n) => n === 1).length;
+  const duplicates = [first.duplicates, second.duplicates].filter((n) => n === 1).length;
+  assert.equal(processed, 1, "One concurrent event must be processed");
+  assert.equal(duplicates, 1, "The other concurrent event must be deduplicated");
+
+  const audit = await pool.query<{
+    cnt: number;
+    processing_outcome: string;
+    duplicate_count: number;
+  }>(
+    `
+      SELECT
+        COUNT(*)::int AS cnt,
+        max(processing_outcome) AS processing_outcome,
+        max(duplicate_count)::int AS duplicate_count
+      FROM whatsapp_delivery_events
+      WHERE workspace_id = $1 AND provider_message_id = $2
+    `,
+    [TEST_WORKSPACE_ID, wamid],
+  );
+  assert.equal(audit.rows[0]?.cnt, 1, "Concurrent duplicates must not create duplicate audit records");
+  assert.equal(audit.rows[0]?.processing_outcome, "processed");
+  assert.equal(audit.rows[0]?.duplicate_count, 1);
+});
+
+test("37. Database uniqueness constraint prevents duplicate event keys", async () => {
+  const { conversationId } = await createTestCustomerAndConversation();
+  const wamid = `wamid.constraint-${randomUUID()}`;
+  await insertTestOutboundRow({ conversationId, providerMessageId: wamid });
+
+  const eventTimestamp = new Date("2026-10-11T15:00:00.000Z");
+  const eventKey = createHash("sha256")
+    .update(JSON.stringify([TEST_PHONE_NUMBER_ID, wamid, "delivered", eventTimestamp.toISOString()]))
+    .digest("hex");
+
+  await pool.query(
+    `
+      INSERT INTO whatsapp_delivery_events (
+        event_key, workspace_id, provider_message_id, phone_number_id,
+        provider_status, provider_timestamp, processing_outcome
+      ) VALUES ($1, $2, $3, $4, $5, $6, 'processed')
+    `,
+    [eventKey, TEST_WORKSPACE_ID, wamid, TEST_PHONE_NUMBER_ID, "delivered", eventTimestamp],
+  );
+
+  await assert.rejects(
+    pool.query(
+      `
+        INSERT INTO whatsapp_delivery_events (
+          event_key, workspace_id, provider_message_id, phone_number_id,
+          provider_status, provider_timestamp, processing_outcome
+        ) VALUES ($1, $2, $3, $4, $5, $6, 'processed')
+      `,
+      [eventKey, TEST_WORKSPACE_ID, wamid, TEST_PHONE_NUMBER_ID, "delivered", eventTimestamp],
+    ),
+    { code: "23505" },
+  );
+
+  const count = await pool.query<{ count: number }>(
+    `
+      SELECT count(*)::int AS count
+      FROM whatsapp_delivery_events
+      WHERE workspace_id = $1 AND event_key = $2
+    `,
+    [TEST_WORKSPACE_ID, eventKey],
+  );
+  assert.equal(count.rows[0]?.count, 1, "Rejected duplicates must not add ledger rows");
+});
+
+test("38. `sent` cannot overwrite `read`", async () => {
+  const { conversationId } = await createTestCustomerAndConversation();
+  const wamid = `wamid.sent-over-read-${randomUUID()}`;
+  await insertTestOutboundRow({ conversationId, providerMessageId: wamid, status: "read" });
+
+  const readTime = new Date("2026-10-11T16:00:00.000Z");
+  const sentTime = new Date("2026-10-11T17:00:00.000Z");
+  await pool.query(
+    `
+      UPDATE outbound_messages
+      SET provider_status_at = $2
+      WHERE workspace_id = $1 AND provider_message_id = $3
+    `,
+    [TEST_WORKSPACE_ID, readTime, wamid],
+  );
+
+  await markOutboundDeliveryEventSent(pool, TEST_WORKSPACE_ID, wamid, sentTime);
+
+  const row = await getOutboundMessageByWamid(pool, TEST_WORKSPACE_ID, wamid);
+  assert.ok(row);
+  assert.equal(row.status, "read", "sent must not overwrite read");
+  assert.equal(
+    (
+      await providerStatusAtForWamid(TEST_WORKSPACE_ID, wamid)
+    )?.toISOString(),
+    readTime.toISOString(),
+    "provider_status_at must retain read timestamp",
+  );
+});
+
 // ─── 6. Regression ───────────────────────────────────────────────────────────
 
 test("27. Existing mock-provider tests continue passing", async () => {
@@ -1669,4 +1990,332 @@ test("30. Existing workspace isolation tests continue passing", async () => {
     otherCustomerId,
   );
   assert.equal(noWindowResult.kind, "no-inbound-message");
+});
+
+// ─── Step 8. Meta provider failure handling ──────────────────────────────────
+
+const STEP8_ACCESS_TOKEN =
+  "EAABc0Step8SecretTokenThatMustNeverAppearInLogs12345678";
+
+function step8MetaConfig() {
+  const config = loadMetaOutboundConfig({
+    META_OUTBOUND_ENABLED: "true",
+    META_ACCESS_TOKEN: STEP8_ACCESS_TOKEN,
+    META_GRAPH_API_VERSION: "v21.0",
+    WHATSAPP_SENDER_PHONE_NUMBER_ID: TEST_PHONE_NUMBER_ID,
+    META_OUTBOUND_TEST_WORKSPACE_ID: TEST_WORKSPACE_ID,
+    META_TEST_RECIPIENT_PHONE_NUMBERS: TEST_CUSTOMER_PHONE,
+  });
+  assert.ok(config, "Step 8 config must load");
+  return config;
+}
+
+async function createQueuedMetaOutbound(): Promise<{
+  conversationId: string;
+  outboundId: string;
+  draftId: string;
+}> {
+  const { conversationId } = await createTestCustomerAndConversation({
+    providerTimestamp: new Date(),
+  });
+  const outboundId = await insertTestOutboundRow({
+    conversationId,
+    status: "queued",
+    provider: "whatsapp",
+    content: "Approved Step 8 snapshot",
+  });
+  const draft = await pool.query<{ reply_draft_id: string }>(
+    "SELECT reply_draft_id FROM outbound_messages WHERE id = $1",
+    [outboundId],
+  );
+  const draftId = draft.rows[0]?.reply_draft_id;
+  assert.ok(draftId, "Expected an associated reply draft");
+  return { conversationId, outboundId, draftId };
+}
+
+async function readOutboundState(outboundId: string): Promise<{
+  status: string;
+  attempts: number;
+  provider_message_id: string | null;
+  failure_reason: string | null;
+}> {
+  const result = await pool.query<{
+    status: string;
+    attempts: number;
+    provider_message_id: string | null;
+    failure_reason: string | null;
+  }>(
+    `
+      SELECT status, attempts, provider_message_id, failure_reason
+      FROM outbound_messages
+      WHERE id = $1
+    `,
+    [outboundId],
+  );
+  const row = result.rows[0];
+  assert.ok(row, "Expected the outbound row to exist");
+  return row;
+}
+
+const STEP8_WORKER_OPTIONS = {
+  batchSize: 10,
+  baseRetryDelayMs: 0,
+  staleAfterMs: 60_000,
+} as const;
+
+test("Step 8.1 HTTP timeout is treated as an ambiguous outcome and routed to manual review", async () => {
+  const config = step8MetaConfig();
+  const { outboundId } = await createQueuedMetaOutbound();
+  let fetchCalls = 0;
+  const provider = new MetaWhatsAppCloudProvider(
+    config,
+    pool,
+    async (_input, init) => {
+      fetchCalls += 1;
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener(
+          "abort",
+          () => reject(new Error("simulated request timeout")),
+          { once: true },
+        );
+      });
+    },
+    5,
+  );
+
+  const result = await runOutboundWorkerOnce(
+    pool,
+    provider,
+    STEP8_WORKER_OPTIONS,
+  );
+
+  assert.equal(fetchCalls, 1, "Exactly one mocked HTTP attempt is allowed");
+  assert.equal(result.claimed, 1);
+  assert.equal(result.manualReview, 1);
+  assert.equal(result.retried, 0);
+  assert.equal(result.failed, 0);
+  const row = await readOutboundState(outboundId);
+  assert.equal(row.status, "manual_review");
+  assert.match(row.failure_reason ?? "", /outcome is ambiguous/i);
+  assert.equal(row.provider_message_id, null);
+});
+
+test("Step 8.2 Network failure is treated as an ambiguous outcome and not as a definite rejection", async () => {
+  const config = step8MetaConfig();
+  const { outboundId } = await createQueuedMetaOutbound();
+  let fetchCalls = 0;
+  const provider = new MetaWhatsAppCloudProvider(config, pool, async () => {
+    fetchCalls += 1;
+    throw new TypeError("simulated network failure");
+  });
+
+  const result = await runOutboundWorkerOnce(
+    pool,
+    provider,
+    STEP8_WORKER_OPTIONS,
+  );
+
+  assert.equal(fetchCalls, 1);
+  assert.equal(result.manualReview, 1);
+  const row = await readOutboundState(outboundId);
+  assert.equal(row.status, "manual_review");
+  assert.match(row.failure_reason ?? "", /outcome is ambiguous/i);
+  assert.match(row.failure_reason ?? "", /simulated network failure/i);
+});
+
+test("Step 8.3 Provider rejection is a definite 4xx failure with bounded, non-sensitive details", async () => {
+  const config = step8MetaConfig();
+  const { outboundId } = await createQueuedMetaOutbound();
+  const logs: unknown[] = [];
+  const originalLog = console.log;
+  const originalError = console.error;
+  console.log = (...args: unknown[]) => {
+    logs.push(args);
+  };
+  console.error = (...args: unknown[]) => {
+    logs.push(args);
+  };
+
+  try {
+    const provider = new MetaWhatsAppCloudProvider(config, pool, async () => {
+      return new Response(
+        JSON.stringify({
+          error: {
+            code: 131000,
+            type: "OAuthException",
+            message: `Rejected request contained ${STEP8_ACCESS_TOKEN}`,
+          },
+        }),
+        { status: 400, headers: { "content-type": "application/json" } },
+      );
+    });
+
+    const result = await runOutboundWorkerOnce(
+      pool,
+      provider,
+      STEP8_WORKER_OPTIONS,
+    );
+
+    assert.equal(result.retried, 1);
+    assert.equal(result.manualReview, 0);
+    const row = await readOutboundState(outboundId);
+    assert.equal(row.status, "queued");
+    assert.match(row.failure_reason ?? "", /HTTP 400/i);
+    assert.match(row.failure_reason ?? "", /code=131000/i);
+    assert.doesNotMatch(row.failure_reason ?? "", /Rejected request contained/);
+    assert.doesNotMatch(row.failure_reason ?? "", /message/i);
+    assert.ok((row.failure_reason?.length ?? 0) <= 1000);
+    assert.equal(
+      JSON.stringify(logs).includes(STEP8_ACCESS_TOKEN),
+      false,
+      "Access token must never appear in logs",
+    );
+    assert.equal(
+      row.failure_reason?.includes(STEP8_ACCESS_TOKEN),
+      false,
+      "Access token must never appear in persisted failure reasons",
+    );
+  } finally {
+    console.log = originalLog;
+    console.error = originalError;
+  }
+});
+
+test("Step 8.4 Malformed provider response is ambiguous and requires manual review", async () => {
+  const config = step8MetaConfig();
+  const { outboundId } = await createQueuedMetaOutbound();
+  let fetchCalls = 0;
+  const provider = new MetaWhatsAppCloudProvider(config, pool, async () => {
+    fetchCalls += 1;
+    return new Response("not-json", {
+      status: 200,
+      headers: { "content-type": "text/plain" },
+    });
+  });
+
+  const result = await runOutboundWorkerOnce(
+    pool,
+    provider,
+    STEP8_WORKER_OPTIONS,
+  );
+
+  assert.equal(fetchCalls, 1);
+  assert.equal(result.manualReview, 1);
+  const row = await readOutboundState(outboundId);
+  assert.equal(row.status, "manual_review");
+  assert.match(row.failure_reason ?? "", /non-JSON body/i);
+});
+
+test("Step 8.5 A success response without a wamid is ambiguous and never marked sent", async () => {
+  const config = step8MetaConfig();
+  const { outboundId } = await createQueuedMetaOutbound();
+  let fetchCalls = 0;
+  const provider = new MetaWhatsAppCloudProvider(config, pool, async () => {
+    fetchCalls += 1;
+    return new Response(JSON.stringify({ messages: [] }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  });
+
+  const result = await runOutboundWorkerOnce(
+    pool,
+    provider,
+    STEP8_WORKER_OPTIONS,
+  );
+
+  assert.equal(fetchCalls, 1);
+  assert.equal(result.sent, 0);
+  assert.equal(result.manualReview, 1);
+  const row = await readOutboundState(outboundId);
+  assert.equal(row.status, "manual_review");
+  assert.equal(row.provider_message_id, null);
+  assert.match(row.failure_reason ?? "", /valid message ID/i);
+});
+
+test("Step 8.6 Ambiguous provider outcome (HTTP 5xx) requires manual review", async () => {
+  const config = step8MetaConfig();
+  const { outboundId } = await createQueuedMetaOutbound();
+  let fetchCalls = 0;
+  const provider = new MetaWhatsAppCloudProvider(config, pool, async () => {
+    fetchCalls += 1;
+    return new Response(
+      JSON.stringify({
+        error: {
+          code: 2,
+          type: "TransientServiceError",
+          message: "Unable to determine whether the message was accepted.",
+        },
+      }),
+      { status: 503, headers: { "content-type": "application/json" } },
+    );
+  });
+
+  const result = await runOutboundWorkerOnce(
+    pool,
+    provider,
+    STEP8_WORKER_OPTIONS,
+  );
+
+  assert.equal(fetchCalls, 1);
+  assert.equal(result.manualReview, 1);
+  assert.equal(result.retried, 0);
+  const row = await readOutboundState(outboundId);
+  assert.equal(row.status, "manual_review");
+  assert.match(row.failure_reason ?? "", /HTTP 503/i);
+  assert.match(row.failure_reason ?? "", /outcome is ambiguous/i);
+});
+
+test("Step 8.7 Manual-review rows cannot be re-queued or sent again by an explicit manual send", async () => {
+  const config = step8MetaConfig();
+  const { outboundId, draftId } = await createQueuedMetaOutbound();
+  let fetchCalls = 0;
+  const provider = new MetaWhatsAppCloudProvider(config, pool, async () => {
+    fetchCalls += 1;
+    return new Response(
+      JSON.stringify({ error: { code: 1, type: "Unknown", message: "unknown" } }),
+      { status: 500, headers: { "content-type": "application/json" } },
+    );
+  });
+
+  await runOutboundWorkerOnce(pool, provider, STEP8_WORKER_OPTIONS);
+  assert.equal((await readOutboundState(outboundId)).status, "manual_review");
+
+  const manualSend = await queueManualSend(pool, {
+    workspaceId: TEST_WORKSPACE_ID,
+    draftId,
+  });
+  assert.equal(manualSend.kind, "manual-review");
+  assert.equal((await readOutboundState(outboundId)).status, "manual_review");
+  assert.equal(fetchCalls, 1, "Manual review must not trigger another HTTP call");
+});
+
+test("Step 8.8 No unsafe retry occurs after an ambiguous outcome", async () => {
+  const config = step8MetaConfig();
+  const { outboundId } = await createQueuedMetaOutbound();
+  let fetchCalls = 0;
+  const provider = new MetaWhatsAppCloudProvider(config, pool, async () => {
+    fetchCalls += 1;
+    throw new TypeError("ambiguous transport failure");
+  });
+
+  const first = await runOutboundWorkerOnce(
+    pool,
+    provider,
+    STEP8_WORKER_OPTIONS,
+  );
+  const second = await runOutboundWorkerOnce(
+    pool,
+    provider,
+    STEP8_WORKER_OPTIONS,
+  );
+
+  assert.equal(first.manualReview, 1);
+  assert.equal(second.claimed, 0);
+  assert.equal(second.manualReview, 0);
+  assert.equal(fetchCalls, 1, "Ambiguous outcome must never be retried automatically");
+  const row = await readOutboundState(outboundId);
+  assert.equal(row.status, "manual_review");
+  assert.equal(row.attempts, 1);
+  assert.equal(row.failure_reason?.includes(STEP8_ACCESS_TOKEN), false);
 });
