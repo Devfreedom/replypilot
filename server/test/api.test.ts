@@ -56,6 +56,11 @@ import { loadWhatsAppConfig } from "../src/whatsapp/config.js";
 import { normalizeWhatsAppPhoneE164 } from "../src/whatsapp/phone.js";
 import { persistInboundMessages } from "../src/whatsapp/repository.js";
 import {
+  registerWhatsAppConnection,
+  resolveActiveConnectionByPhoneNumberId,
+} from "../src/whatsapp/connections.js";
+import { ConnectionAwareMetaProvider } from "../src/outbound/meta-connection-provider.js";
+import {
   getTestDatabaseUrl,
   prepareTestDatabase,
   resetTestData,
@@ -880,6 +885,62 @@ async function withMetaOutboundEnabled<T>(
       process.env.NODE_ENV = previousNodeEnv;
     }
   }
+}
+
+const TEST_CREDENTIAL_ENCRYPTION_KEY = Buffer.alloc(32, 0x42).toString(
+  "base64",
+);
+const TEST_CREDENTIAL_KEY_VERSION = "test-v1";
+
+async function withCredentialEncryption<T>(
+  action: () => Promise<T>,
+): Promise<T> {
+  const previousKey = process.env.WHATSAPP_CREDENTIAL_ENCRYPTION_KEY;
+  const previousVersion = process.env.WHATSAPP_CREDENTIAL_KEY_VERSION;
+
+  process.env.WHATSAPP_CREDENTIAL_ENCRYPTION_KEY =
+    TEST_CREDENTIAL_ENCRYPTION_KEY;
+  process.env.WHATSAPP_CREDENTIAL_KEY_VERSION = TEST_CREDENTIAL_KEY_VERSION;
+
+  try {
+    return await action();
+  } finally {
+    if (previousKey === undefined) {
+      delete process.env.WHATSAPP_CREDENTIAL_ENCRYPTION_KEY;
+    } else {
+      process.env.WHATSAPP_CREDENTIAL_ENCRYPTION_KEY = previousKey;
+    }
+
+    if (previousVersion === undefined) {
+      delete process.env.WHATSAPP_CREDENTIAL_KEY_VERSION;
+    } else {
+      process.env.WHATSAPP_CREDENTIAL_KEY_VERSION = previousVersion;
+    }
+  }
+}
+
+async function registerTestConnection(options: Readonly<{
+  workspaceId: string;
+  phoneNumberId: string;
+  accessToken?: string;
+  status?: "pending" | "active" | "disconnected";
+  tokenExpiresAt?: Date;
+}>): Promise<string> {
+  const connection = await registerWhatsAppConnection(pool, {
+    workspaceId: options.workspaceId,
+    phoneNumberId: options.phoneNumberId,
+    displayPhoneNumber: "15550783881",
+    label: "Fictional test connection",
+    wabaId: "102290129340398",
+    status: options.status ?? "active",
+    accessToken:
+      options.accessToken === undefined
+        ? "EAABc0FictionalConnectionTokenAtLeast20Characters"
+        : options.accessToken,
+    tokenExpiresAt: options.tokenExpiresAt ?? null,
+  });
+
+  return connection.id;
 }
 
 const validProfileBody = {
@@ -7993,6 +8054,7 @@ test("GET /api/conversations?status=all is workspace-scoped", async () => {
 
   await persistInboundMessages(pool, other.workspace.id, [
     inboundMessage({
+      phoneNumberId: "109999999999333",
       senderWaId: "2348031234567",
       senderPhoneNumber: "2348031234567",
       contactName: "Other Customer",
@@ -8236,6 +8298,7 @@ test("approval routes configured test-workspace messages to the Meta worker", as
     const otherWorkspace = await createLeadWithConversation(
       { name: "Non-test Workspace" },
       {
+        phoneNumberId: "109999999999222",
         senderWaId: "2348031234567",
         senderPhoneNumber: "2348031234567",
       },
