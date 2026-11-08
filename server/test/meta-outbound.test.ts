@@ -78,6 +78,7 @@ async function createTestCustomerAndConversation(options: {
   workspaceId?: string;
   customerPhone?: string;
   providerTimestamp?: Date;
+  phoneNumberId?: string;
 } = {}): Promise<{ customerId: string; conversationId: string }> {
   const workspaceId = options.workspaceId ?? TEST_WORKSPACE_ID;
   const customerPhone = options.customerPhone ?? TEST_CUSTOMER_PHONE;
@@ -89,7 +90,7 @@ async function createTestCustomerAndConversation(options: {
 
   const msg: InboundWhatsAppMessage = {
     providerMessageId: `wamid.${randomUUID()}`,
-    phoneNumberId: TEST_PHONE_NUMBER_ID,
+    phoneNumberId: options.phoneNumberId ?? TEST_PHONE_NUMBER_ID,
     senderWaId: customerPhone.replace("+", ""),
     senderPhoneNumber: customerPhone.replace("+", ""),
     contactName: "Test Customer",
@@ -1036,6 +1037,7 @@ test("migration enforces suppression customer/workspace integrity", async () => 
   const mismatched = await createTestCustomerAndConversation({
     workspaceId: OTHER_WORKSPACE_ID,
     customerPhone: "+447911123456",
+    phoneNumberId: "109999999999444",
   });
   await assert.rejects(
     pool.query(

@@ -7,10 +7,11 @@ import {
   getAuthContext,
 } from "../auth/middleware.js";
 import {
-  getOutboundProviderNameForWorkspace,
   isWorkspaceAllowedForMetaSending,
   loadMetaOutboundConfig,
+  resolveOutboundProviderName,
 } from "../outbound/meta-config.js";
+import { getConnectionCapabilities } from "./connections.js";
 import { getWorkspaceMessagingSettings } from "../settings/messaging-repository.js";
 import {
   getConversationProtection,
@@ -224,21 +225,22 @@ export function createWhatsAppOperationsRouter({
 
   router.get("/protection", requireMember, async (_request, response) => {
     const { workspace } = getAuthContext(response);
-    const [settings, suppressions, metaConfig] = await Promise.all([
-      getWorkspaceMessagingSettings(pool, workspace.id),
-      listCustomerSuppressions(pool, workspace.id),
-      Promise.resolve(loadMetaOutboundConfig()),
-    ]);
+    const [settings, suppressions, metaConfig, connections, providerForWorkspace] =
+      await Promise.all([
+        getWorkspaceMessagingSettings(pool, workspace.id),
+        listCustomerSuppressions(pool, workspace.id),
+        Promise.resolve(loadMetaOutboundConfig()),
+        getConnectionCapabilities(pool, workspace.id),
+        resolveOutboundProviderName(pool, workspace.id),
+      ]);
 
     const runtime = process.env.NODE_ENV ?? "development";
-    const providerForWorkspace = getOutboundProviderNameForWorkspace(
-      workspace.id,
-    );
 
     response.status(200).json({
       runtime,
       providerForWorkspace,
       defaultApprovalSendPolicy: settings.defaultApprovalSendPolicy,
+      connections,
       meta: {
         enabled: metaConfig !== null,
         senderConfigured: metaConfig !== null,
@@ -260,7 +262,9 @@ export function createWhatsAppOperationsRouter({
         configured: whatsapp !== null,
         phoneNumberId: whatsapp?.phoneNumberId ?? null,
         workspaceMatches:
-          whatsapp !== null && whatsapp.workspaceId === workspace.id,
+          whatsapp !== null &&
+          whatsapp.workspaceId !== undefined &&
+          whatsapp.workspaceId === workspace.id,
       },
       suppressions: {
         count: suppressions.length,

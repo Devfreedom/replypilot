@@ -1,16 +1,33 @@
 import type { OutboundMessageStatus } from "../messaging/types.js";
 
+/**
+ * Webhook verification secrets plus the optional legacy single-workspace
+ * configuration. New integrations resolve the workspace from the registered
+ * connection for each Meta phone-number ID; the legacy fields remain while
+ * existing deployments migrate.
+ */
 export type WhatsAppIntegrationConfig = Readonly<{
   verifyToken: string;
   appSecret: string;
-  phoneNumberId: string;
-  workspaceId: string;
+  phoneNumberId?: string;
+  workspaceId?: string;
 }>;
 
 export type WhatsAppMessageProcessingStatus = "stored" | "unsupported";
 
 export const CONVERSATION_STATUSES = ["open", "closed", "archived"] as const;
 export type ConversationStatus = (typeof CONVERSATION_STATUSES)[number];
+
+/**
+ * Query filter for conversation lists. `all` is not a stored status; it means
+ * the repository should not restrict rows by status.
+ */
+export const CONVERSATION_STATUS_FILTERS = [
+  ...CONVERSATION_STATUSES,
+  "all",
+] as const;
+export type ConversationStatusFilter =
+  (typeof CONVERSATION_STATUS_FILTERS)[number];
 
 export type ConversationCustomer = Readonly<{
   id: string;

@@ -1,6 +1,6 @@
 import type { Pool } from "pg";
 import type { ApprovalSendPolicy } from "../messaging/types.js";
-import { getOutboundProviderNameForWorkspace } from "../outbound/meta-config.js";
+import { resolveOutboundProviderName } from "../outbound/meta-config.js";
 import {
   getOutboundMessageForDraft,
   insertQueuedOutboundMessage,
@@ -116,7 +116,11 @@ export async function approveReplyDraft(
         replyDraftId: input.draftId,
         content: current.draft_reply,
         idempotencyKey: `reply-draft:${input.draftId}`,
-        provider: getOutboundProviderNameForWorkspace(input.workspaceId),
+        provider: await resolveOutboundProviderName(
+          client,
+          input.workspaceId,
+          conversation.conversationId,
+        ),
       });
     }
 

@@ -2,7 +2,7 @@ import { hostname } from "node:os";
 import { loadConfig } from "../config.js";
 import { createPool } from "../db/pool.js";
 import { loadMetaOutboundConfig } from "./meta-config.js";
-import { MetaWhatsAppCloudProvider } from "./meta-provider.js";
+import { ConnectionAwareMetaProvider } from "./meta-connection-provider.js";
 import { MockOutboundMessageProvider, type OutboundMessageProvider } from "./provider.js";
 import { runOutboundWorkerOnce, type OutboundWorkerResult } from "./worker.js";
 import { recordWorkerHeartbeat } from "./worker-status.js";
@@ -116,17 +116,25 @@ async function main(): Promise<void> {
     ambiguous: mockAmbiguousKeys,
   });
 
+  // The WhatsApp provider resolves each conversation's workspace-owned
+  // connection at send time. The legacy test configuration is still passed for
+  // the single-test-workspace integration during migration. Registering it
+  // even when no connection exists is safe: only rows queued for the
+  // "whatsapp" provider are claimed.
+  providers.push({
+    provider: new ConnectionAwareMetaProvider(pool, {
+      legacyConfig: metaConfig,
+    }),
+    label: "whatsapp",
+  });
+  providers.push({
+    provider: mockProvider,
+    label: "mock",
+  });
+
   if (metaConfig) {
-    providers.push({
-      provider: new MetaWhatsAppCloudProvider(metaConfig, pool),
-      label: `whatsapp (sender=${metaConfig.senderPhoneNumberId}, workspace=${metaConfig.testWorkspaceId})`,
-    });
-    providers.push({
-      provider: mockProvider,
-      label: "mock",
-    });
-    // Never log the access token or any credential. Only log the provider name
-    // and sender phone-number ID (non-secret) for operational visibility.
+    // Never log the access token or any credential. Only log non-secret
+    // identifiers for operational visibility.
     log("outbound_worker_provider_meta", {
       senderPhoneNumberId: metaConfig.senderPhoneNumberId,
       testWorkspaceId: metaConfig.testWorkspaceId,
@@ -134,10 +142,7 @@ async function main(): Promise<void> {
       allowedRecipients: metaConfig.allowedRecipients.size,
     });
   } else {
-    providers.push({
-      provider: mockProvider,
-      label: "mock",
-    });
+    log("outbound_worker_provider_meta", { legacyConfigured: false });
   }
 
   if (Object.keys(mockFailKeys).length > 0) {

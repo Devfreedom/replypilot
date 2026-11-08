@@ -5,6 +5,7 @@ import { normalizeWhatsAppPhoneE164 } from "./phone.js";
 import { suppressCustomer } from "./suppression.js";
 import type {
   ConversationStatus,
+  ConversationStatusFilter,
   ConversationSummary,
   InboundWhatsAppMessage,
   MessagePageDirection,
@@ -225,8 +226,13 @@ async function ensureWhatsAppConnection(
 ): Promise<string> {
   const created = await client.query<{ id: string }>(
     `
-      INSERT INTO whatsapp_connections (workspace_id, phone_number_id)
-      VALUES ($1, $2)
+      INSERT INTO whatsapp_connections (
+        workspace_id,
+        phone_number_id,
+        status,
+        activated_at
+      )
+      VALUES ($1, $2, 'active', now())
       ON CONFLICT (workspace_id, phone_number_id)
       DO NOTHING
       RETURNING id
@@ -770,7 +776,7 @@ export async function listMessagesForConversation(
 export type ListConversationSummariesOptions = Readonly<{
   limit: number;
   offset: number;
-  status?: ConversationStatus;
+  status?: ConversationStatusFilter;
 }>;
 
 export async function listConversationSummaries(
@@ -783,7 +789,7 @@ export async function listConversationSummaries(
   const parameters: unknown[] = [workspaceId];
   let statusFilter = "";
 
-  if (options.status) {
+  if (options.status && options.status !== "all") {
     parameters.push(options.status);
     statusFilter = `AND conversation.status = $${parameters.length}`;
   }

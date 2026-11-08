@@ -154,9 +154,9 @@ export function MessagingSettings() {
           </h2>
           <p className="mt-1 max-w-2xl text-sm leading-6 text-ink-soft">
             Choose what approval does by default. The safe default is approve
-            only. The server selects the outbound provider. Meta delivery is
-            limited to configured test workspaces and recipients, and is
-            unavailable in production.
+            only. The server selects the outbound provider and sends through the
+            WhatsApp number connected to this workspace. Access tokens stay
+            encrypted on the server.
           </p>
         </div>
         <span className="badge badge-neutral">Server-selected provider</span>
