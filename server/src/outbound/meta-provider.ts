@@ -50,7 +50,7 @@ const MAX_PROVIDER_ERROR_LENGTH = 500;
  * Truncates a string to at most `max` Unicode code points. Used to bound
  * error messages before storing them.
  */
-function truncateToCodePoints(value: string, max: number): string {
+export function truncateToCodePoints(value: string, max: number): string {
   let codePointLength = 0;
   let characterLength = 0;
 
@@ -68,7 +68,7 @@ function truncateToCodePoints(value: string, max: number): string {
  * Only includes the top-level error code and type to avoid logging sensitive
  * provider data. Never includes user data or message content.
  */
-function describeMetaError(data: unknown): string {
+export function describeMetaError(data: unknown): string {
   if (
     typeof data === "object" &&
     data !== null &&
@@ -355,7 +355,7 @@ export class MetaWhatsAppCloudProvider implements OutboundMessageProvider {
  * Expected structure:
  * { messages: [{ id: "wamid.xxx" }] }
  */
-function extractWamid(data: unknown): string | null {
+export function extractWamid(data: unknown): string | null {
   if (
     typeof data !== "object" ||
     data === null ||
