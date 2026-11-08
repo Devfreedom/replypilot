@@ -4568,7 +4568,7 @@ test("customer first_seen_at migration uses the earliest inbound message", async
   }
 });
 
-test("WhatsApp configuration is optional but all-or-none", () => {
+test("WhatsApp configuration is optional and supports connection-only webhooks", () => {
   assert.equal(loadWhatsAppConfig({}), null);
   assert.equal(
     loadWhatsAppConfig({
@@ -4578,18 +4578,31 @@ test("WhatsApp configuration is optional but all-or-none", () => {
     null,
   );
 
+  // The webhook verification pair is enough for the multi-workspace
+  // connection architecture. The legacy phone/workspace pair is optional.
+  assert.deepEqual(
+    loadWhatsAppConfig({
+      WHATSAPP_WEBHOOK_VERIFY_TOKEN: TEST_WHATSAPP_VERIFY_TOKEN,
+      WHATSAPP_APP_SECRET: TEST_WHATSAPP_APP_SECRET,
+    }),
+    {
+      verifyToken: TEST_WHATSAPP_VERIFY_TOKEN,
+      appSecret: TEST_WHATSAPP_APP_SECRET,
+    },
+  );
+
   let error: unknown;
   try {
     loadWhatsAppConfig({
       WHATSAPP_WEBHOOK_VERIFY_TOKEN: "super-secret-verify-token",
       WHATSAPP_APP_SECRET: "super-secret-app-secret-value",
+      WHATSAPP_TEST_PHONE_NUMBER_ID: TEST_WHATSAPP_PHONE_NUMBER_ID,
     });
   } catch (caught) {
     error = caught;
   }
 
   assert.ok(error instanceof Error);
-  assert.match(error.message, /WHATSAPP_TEST_PHONE_NUMBER_ID/);
   assert.match(error.message, /WHATSAPP_TEST_WORKSPACE_ID/);
   assert.doesNotMatch(error.message, /super-secret/);
 
@@ -6421,7 +6434,10 @@ test("different workspaces keep separate customers for the same phone number", a
     inboundMessage({ providerTimestamp: timestamp }),
   ]);
   await persistInboundMessages(pool, other.workspace.id, [
-    inboundMessage({ providerTimestamp: timestamp }),
+    inboundMessage({
+      phoneNumberId: "109999999999111",
+      providerTimestamp: timestamp,
+    }),
   ]);
 
   const customers = await pool.query<{

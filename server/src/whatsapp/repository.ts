@@ -226,8 +226,13 @@ async function ensureWhatsAppConnection(
 ): Promise<string> {
   const created = await client.query<{ id: string }>(
     `
-      INSERT INTO whatsapp_connections (workspace_id, phone_number_id)
-      VALUES ($1, $2)
+      INSERT INTO whatsapp_connections (
+        workspace_id,
+        phone_number_id,
+        status,
+        activated_at
+      )
+      VALUES ($1, $2, 'active', now())
       ON CONFLICT (workspace_id, phone_number_id)
       DO NOTHING
       RETURNING id
