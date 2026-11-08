@@ -11,6 +11,11 @@ import {
   getOutboundMessageForDraft,
   listOutboundMessages,
 } from "./repository.js";
+import {
+  WORKER_HEARTBEAT_STALE_AFTER_MS,
+  getOutboundQueueSummary,
+  listWorkerHeartbeats,
+} from "./worker-status.js";
 
 const DEFAULT_PAGE_SIZE = 25;
 const MAX_PAGE_SIZE = 100;
@@ -111,6 +116,32 @@ export function createOutboundMessagesRouter({
         result.hasMore,
         result.messages.length,
       ),
+    });
+  });
+
+  /**
+   * Workspace-scoped queue counts plus process-level worker heartbeats. The
+   * heartbeat table is infrastructure state, not customer data, and is
+   * exposed only to authenticated workspace members.
+   */
+  router.get("/worker-status", requireMember, async (_request, response) => {
+    const { workspace } = getAuthContext(response);
+    const [queue, heartbeats] = await Promise.all([
+      getOutboundQueueSummary(pool, workspace.id),
+      listWorkerHeartbeats(pool),
+    ]);
+
+    const now = Date.now();
+
+    response.status(200).json({
+      queue,
+      heartbeatStaleAfterMs: WORKER_HEARTBEAT_STALE_AFTER_MS,
+      workers: heartbeats.map((heartbeat) => ({
+        ...heartbeat,
+        stale:
+          now - new Date(heartbeat.lastSeenAt).getTime() >
+          WORKER_HEARTBEAT_STALE_AFTER_MS,
+      })),
     });
   });
 

@@ -33,6 +33,14 @@ import {
   type WhatsAppMessage,
 } from "@/lib/whatsapp";
 import { OUTBOUND_STATUS_DESCRIPTIONS } from "@/lib/messaging";
+import {
+  SUPPRESSION_REASON_LABELS,
+  parseConversationProtectionResponse,
+  parseSuppressionResponse,
+  serviceWindowDescription,
+  serviceWindowLabel,
+  type ConversationProtection,
+} from "@/lib/delivery";
 
 const CONVERSATION_PAGE_SIZE = 30;
 const MESSAGE_PAGE_SIZE = 30;
@@ -277,7 +285,8 @@ function ConversationThread({
   onBack: () => void;
   onRetry: () => void;
 }) {
-  const { signOut } = useAuth();
+  const { signOut, role } = useAuth();
+  const canManage = role === "owner";
   const [messages, setMessages] = useState<WhatsAppMessage[]>([]);
   const [messagesLoading, setMessagesLoading] = useState(true);
   const [messagesError, setMessagesError] = useState<ApiError | null>(null);
@@ -285,6 +294,13 @@ function ConversationThread({
   const [olderCursor, setOlderCursor] = useState<string | null>(null);
   const [hasOlder, setHasOlder] = useState(false);
   const [loadingOlder, setLoadingOlder] = useState(false);
+  const [protection, setProtection] = useState<ConversationProtection | null>(
+    null,
+  );
+  const [protectionError, setProtectionError] = useState<string | null>(null);
+  const [protectionBusy, setProtectionBusy] = useState(false);
+  const [protectionNotice, setProtectionNotice] = useState<string | null>(null);
+  const [protectionRefreshToken, setProtectionRefreshToken] = useState(0);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const prependAnchorRef = useRef<{
@@ -349,9 +365,126 @@ function ConversationThread({
     };
   }, [conversation.id]);
 
+  useEffect(() => {
+    const controller = new AbortController();
+
+    async function loadProtection() {
+      setProtectionError(null);
+
+      try {
+        const response = await fetch(
+          `/api/whatsapp/conversations/${conversation.id}/protection`,
+          { cache: "no-store", signal: controller.signal },
+        );
+        const data = await readJson(response);
+
+        if (!response.ok) {
+          throw new Error(
+            errorMessage(data, "Could not load conversation protection."),
+          );
+        }
+
+        const parsed = parseConversationProtectionResponse(data);
+
+        if (!parsed) {
+          throw new Error(
+            "The protection service returned an unexpected response.",
+          );
+        }
+
+        if (!controller.signal.aborted) {
+          setProtection(parsed);
+        }
+      } catch (error) {
+        if (controller.signal.aborted) return;
+        setProtectionError(
+          error instanceof Error
+            ? error.message
+            : "Could not load conversation protection.",
+        );
+      }
+    }
+
+    void loadProtection();
+    return () => controller.abort();
+  }, [conversation.id, protectionRefreshToken]);
+
+  async function suppressCustomer() {
+    setProtectionBusy(true);
+    setProtectionError(null);
+    setProtectionNotice(null);
+
+    try {
+      const response = await fetch(
+        `/api/whatsapp/customers/${conversation.customer.id}/suppression`,
+        {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ reason: "opt_out" }),
+        },
+      );
+      const data = await readJson(response);
+
+      if (!response.ok) {
+        throw new Error(errorMessage(data, "Could not suppress this customer."));
+      }
+
+      if (!parseSuppressionResponse(data)) {
+        throw new Error(
+          "The suppression service returned an unexpected response.",
+        );
+      }
+
+      setProtectionNotice(
+        "Customer suppressed. Queued sends are cancelled and no new outbound messages are permitted.",
+      );
+      setProtectionRefreshToken((value) => value + 1);
+    } catch (error) {
+      setProtectionError(
+        error instanceof Error
+          ? error.message
+          : "Could not suppress this customer.",
+      );
+    } finally {
+      setProtectionBusy(false);
+    }
+  }
+
+  async function removeSuppression() {
+    setProtectionBusy(true);
+    setProtectionError(null);
+    setProtectionNotice(null);
+
+    try {
+      const response = await fetch(
+        `/api/whatsapp/customers/${conversation.customer.id}/suppression`,
+        { method: "DELETE" },
+      );
+      const data = await readJson(response);
+
+      if (!response.ok) {
+        throw new Error(
+          errorMessage(data, "Could not remove this suppression."),
+        );
+      }
+
+      setProtectionNotice(
+        "Suppression removed. Sending still requires an approved draft and an open service window.",
+      );
+      setProtectionRefreshToken((value) => value + 1);
+    } catch (error) {
+      setProtectionError(
+        error instanceof Error
+          ? error.message
+          : "Could not remove this suppression.",
+      );
+    } finally {
+      setProtectionBusy(false);
+    }
+  }
+
   useIsomorphicLayoutEffect(() => {
     const container = scrollRef.current;
-
     if (!container || messages.length === 0) {
       return;
     }
@@ -470,6 +603,25 @@ function ConversationThread({
               {conversationDisplayName(conversation)}
             </h2>
             <StatusBadge status={conversation.status} />
+            {protection ? (
+              <span
+                className={
+                  protection.serviceWindow.kind === "open"
+                    ? "badge badge-approved"
+                    : protection.serviceWindow.kind === "expired"
+                      ? "badge bg-warning-soft text-warning-ink"
+                      : "badge badge-neutral"
+                }
+              >
+                24h window: {serviceWindowLabel(protection.serviceWindow)}
+              </span>
+            ) : null}
+            {protection?.suppression ? (
+              <span className="badge bg-danger-soft text-danger-ink">
+                Suppressed ·{" "}
+                {SUPPRESSION_REASON_LABELS[protection.suppression.reason]}
+              </span>
+            ) : null}
             {conversation.leadId ? (
               <span className="badge badge-neutral">Linked lead</span>
             ) : null}
@@ -480,6 +632,58 @@ function ConversationThread({
           </p>
         </div>
       </div>
+
+      {protectionError ? (
+        <div className="border-b border-line px-4 py-2 text-xs text-danger-ink sm:px-5">
+          {protectionError}
+        </div>
+      ) : null}
+
+      {protectionNotice ? (
+        <div
+          role="status"
+          className="border-b border-line bg-success-soft px-4 py-2 text-xs text-success-ink sm:px-5"
+        >
+          {protectionNotice}
+        </div>
+      ) : null}
+
+      {protection ? (
+        <div className="border-b border-line bg-hushed/70 px-4 py-2.5 text-xs text-ink-soft sm:px-5">
+          <div className="flex flex-wrap items-start justify-between gap-2">
+            <p className="max-w-2xl leading-5">
+              <span className="font-semibold text-ink">
+                Service window: {serviceWindowLabel(protection.serviceWindow)}.
+              </span>{" "}
+              {serviceWindowDescription(protection.serviceWindow)}
+              {protection.suppression
+                ? ` Suppressed as ${SUPPRESSION_REASON_LABELS[protection.suppression.reason]}; outbound messages are blocked.`
+                : " No customer suppression is active."}
+            </p>
+            {canManage ? (
+              protection.suppression ? (
+                <button
+                  type="button"
+                  onClick={() => void removeSuppression()}
+                  disabled={protectionBusy}
+                  className="btn btn-secondary shrink-0 text-xs"
+                >
+                  {protectionBusy ? "Restoring…" : "Remove suppression"}
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => void suppressCustomer()}
+                  disabled={protectionBusy}
+                  className="btn btn-secondary shrink-0 text-xs"
+                >
+                  {protectionBusy ? "Suppressing…" : "Opt out customer"}
+                </button>
+              )
+            ) : null}
+          </div>
+        </div>
+      ) : null}
 
       {sessionExpired ? (
         <div
