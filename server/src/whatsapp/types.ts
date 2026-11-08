@@ -1,10 +1,16 @@
 import type { OutboundMessageStatus } from "../messaging/types.js";
 
+/**
+ * Webhook verification secrets plus the optional legacy single-workspace
+ * configuration. New integrations resolve the workspace from the registered
+ * connection for each Meta phone-number ID; the legacy fields remain while
+ * existing deployments migrate.
+ */
 export type WhatsAppIntegrationConfig = Readonly<{
   verifyToken: string;
   appSecret: string;
-  phoneNumberId: string;
-  workspaceId: string;
+  phoneNumberId?: string;
+  workspaceId?: string;
 }>;
 
 export type WhatsAppMessageProcessingStatus = "stored" | "unsupported";

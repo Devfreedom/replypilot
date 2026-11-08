@@ -14,7 +14,12 @@
  * real sending remains unavailable (fail closed).
  */
 
+import type { Pool, PoolClient } from "pg";
 import { z } from "zod";
+import {
+  getConversationProviderHint,
+  workspaceHasCredentialConnection,
+} from "../whatsapp/connections.js";
 import { normalizeWhatsAppPhoneE164 } from "../whatsapp/phone.js";
 
 /**
@@ -201,6 +206,58 @@ export function getOutboundProviderNameForWorkspace(
   return config && isWorkspaceAllowedForMetaSending(config, workspaceId)
     ? "whatsapp"
     : "mock";
+}
+
+/**
+ * Resolves the provider for a queue record using both the workspace's
+ * credential-bearing connections and the legacy single-test-workspace
+ * configuration.
+ *
+ * A connection with encrypted credentials always selects the WhatsApp provider,
+ * even when it is disconnected or expired. That makes the worker reject the
+ * send instead of silently substituting the mock provider for a real customer
+ * message.
+ */
+export async function resolveOutboundProviderName(
+  queryable: Pool | PoolClient,
+  workspaceId: string,
+  conversationId?: string | null,
+  environment: NodeJS.ProcessEnv = process.env,
+): Promise<"mock" | "whatsapp"> {
+  if (conversationId) {
+    const hint = await getConversationProviderHint(
+      queryable,
+      workspaceId,
+      conversationId,
+    );
+
+    if (hint.hasCredentials) {
+      return "whatsapp";
+    }
+  } else if (await workspaceHasCredentialConnection(queryable, workspaceId)) {
+    return "whatsapp";
+  }
+
+  return getOutboundProviderNameForWorkspace(workspaceId, environment);
+}
+
+/**
+ * Returns a validated Graph API version for connection-backed sending. The
+ * legacy configuration takes precedence, then META_GRAPH_API_VERSION, then a
+ * conservative default. The value is always server-controlled.
+ */
+export function loadGraphApiVersion(
+  environment: NodeJS.ProcessEnv = process.env,
+): string {
+  const raw = environment["META_GRAPH_API_VERSION"]?.trim() || "v21.0";
+
+  if (!GRAPH_API_VERSION_PATTERN.test(raw)) {
+    throw new Error(
+      'META_GRAPH_API_VERSION must match the pattern "vNN.N" (e.g. "v21.0")',
+    );
+  }
+
+  return raw;
 }
 
 /**

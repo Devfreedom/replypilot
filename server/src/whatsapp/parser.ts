@@ -157,14 +157,20 @@ function parseMessage(
 }
 
 /**
- * Extracts inbound messages for the one configured business phone number.
+ * Extracts inbound messages from a Meta webhook payload.
+ *
+ * When `configuredPhoneNumberId` is supplied, only that legacy single-business
+ * number is returned. Omitting it returns messages for every phone-number ID so
+ * the webhook can route each event through its registered connection and
+ * ignore unknown numbers explicitly.
+ *
  * Status-only, template, and other unrelated changes are ignored. Structurally
  * invalid message payloads throw so the caller can return a non-200 response
  * and Meta can retry.
  */
 export function parseWhatsAppWebhook(
   payload: unknown,
-  configuredPhoneNumberId: string,
+  configuredPhoneNumberId?: string | null,
 ): InboundWhatsAppMessage[] {
   if (!isRecord(payload) || typeof payload.object !== "string") {
     throw new InvalidWhatsAppPayloadError("Missing webhook object");
@@ -232,7 +238,10 @@ export function parseWhatsAppWebhook(
         );
       }
 
-      if (metadata.phone_number_id !== configuredPhoneNumberId) {
+      if (
+        configuredPhoneNumberId &&
+        metadata.phone_number_id !== configuredPhoneNumberId
+      ) {
         continue;
       }
 
@@ -347,19 +356,22 @@ function parseDeliveryStatus(
 }
 
 /**
- * Extracts delivery-status events for the configured business phone number
- * from the Meta webhook payload.
+ * Extracts delivery-status events from the Meta webhook payload.
  *
  * Each change in the `messages` field may carry either an inbound `messages`
  * array (handled by parseWhatsAppWebhook) or a `statuses` array for delivery
  * events, or both. This function handles only the statuses array.
+ *
+ * When `configuredPhoneNumberId` is supplied, only events for that legacy
+ * business number are returned. Omitting it returns events for every
+ * phone-number ID so the webhook can route them by connection.
  *
  * Structurally invalid entries throw so the caller can return a non-200
  * response and Meta can retry.
  */
 export function parseWhatsAppDeliveryStatuses(
   payload: unknown,
-  configuredPhoneNumberId: string,
+  configuredPhoneNumberId?: string | null,
 ): DeliveryStatusEvent[] {
   if (!isRecord(payload) || typeof payload.object !== "string") {
     throw new InvalidWhatsAppPayloadError("Missing webhook object");
@@ -425,7 +437,10 @@ export function parseWhatsAppDeliveryStatuses(
         );
       }
 
-      if (metadata.phone_number_id !== configuredPhoneNumberId) {
+      if (
+        configuredPhoneNumberId &&
+        metadata.phone_number_id !== configuredPhoneNumberId
+      ) {
         continue;
       }
 
