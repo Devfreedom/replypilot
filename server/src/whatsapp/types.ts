@@ -12,6 +12,17 @@ export type WhatsAppMessageProcessingStatus = "stored" | "unsupported";
 export const CONVERSATION_STATUSES = ["open", "closed", "archived"] as const;
 export type ConversationStatus = (typeof CONVERSATION_STATUSES)[number];
 
+/**
+ * Query filter for conversation lists. `all` is not a stored status; it means
+ * the repository should not restrict rows by status.
+ */
+export const CONVERSATION_STATUS_FILTERS = [
+  ...CONVERSATION_STATUSES,
+  "all",
+] as const;
+export type ConversationStatusFilter =
+  (typeof CONVERSATION_STATUS_FILTERS)[number];
+
 export type ConversationCustomer = Readonly<{
   id: string;
   displayName: string | null;

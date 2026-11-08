@@ -5,6 +5,7 @@ import { normalizeWhatsAppPhoneE164 } from "./phone.js";
 import { suppressCustomer } from "./suppression.js";
 import type {
   ConversationStatus,
+  ConversationStatusFilter,
   ConversationSummary,
   InboundWhatsAppMessage,
   MessagePageDirection,
@@ -770,7 +771,7 @@ export async function listMessagesForConversation(
 export type ListConversationSummariesOptions = Readonly<{
   limit: number;
   offset: number;
-  status?: ConversationStatus;
+  status?: ConversationStatusFilter;
 }>;
 
 export async function listConversationSummaries(
@@ -783,7 +784,7 @@ export async function listConversationSummaries(
   const parameters: unknown[] = [workspaceId];
   let statusFilter = "";
 
-  if (options.status) {
+  if (options.status && options.status !== "all") {
     parameters.push(options.status);
     statusFilter = `AND conversation.status = $${parameters.length}`;
   }
