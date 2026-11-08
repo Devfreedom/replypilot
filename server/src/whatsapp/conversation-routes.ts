@@ -15,7 +15,7 @@ import {
   listMessagesForConversationPage,
 } from "./repository.js";
 import {
-  CONVERSATION_STATUSES,
+  CONVERSATION_STATUS_FILTERS,
   MESSAGE_PAGE_DIRECTIONS,
 } from "./types.js";
 
@@ -37,7 +37,7 @@ const paginationSchema = z.object({
 });
 
 const listQuerySchema = paginationSchema
-  .extend({ status: z.enum(CONVERSATION_STATUSES).optional() })
+  .extend({ status: z.enum(CONVERSATION_STATUS_FILTERS).optional() })
   .strict();
 
 const messagesQuerySchema = z

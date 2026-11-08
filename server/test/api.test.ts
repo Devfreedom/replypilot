@@ -452,6 +452,46 @@ function textWhatsAppMessage({
   };
 }
 
+/**
+ * Test-only fixture that follows the documented local signed-webhook flow with
+ * a current provider timestamp. It never runs in production because it lives
+ * under server/test and always goes through HMAC signature verification.
+ */
+async function postRecentInboundWhatsAppFixture(
+  app: Readonly<{ baseUrl: string }>,
+  options: Readonly<{
+    from?: string;
+    contactName?: string;
+    text?: string;
+  }> = {},
+): Promise<Readonly<{ timestamp: string }>> {
+  const from = options.from ?? TEST_WHATSAPP_CUSTOMER_WA_ID;
+  const timestamp = String(Math.floor(Date.now() / 1_000));
+  const body = whatsappEnvelope([
+    whatsappChange({
+      contacts: [
+        {
+          wa_id: from,
+          profile: { name: options.contactName ?? "Fictional Window Customer" },
+        },
+      ],
+      messages: [
+        textWhatsAppMessage({
+          id: `wamid.recent-${randomUUID()}`,
+          from,
+          text: options.text ?? "Hello from a current-time test fixture",
+          timestamp,
+        }),
+      ],
+    }),
+  ]);
+  const response = await postWhatsApp(app, body);
+  assert.equal(response.status, 200);
+  const payload = await readJson<WhatsAppWebhookPayload>(response);
+  assert.equal(payload.stored, 1);
+  return { timestamp };
+}
+
 function testWhatsAppConfig(
   overrides: Partial<WhatsAppIntegrationConfig> = {},
 ): WhatsAppIntegrationConfig {
@@ -5841,6 +5881,161 @@ test("inbound opt-out suppresses idempotently and cancels queued sends without f
   }
 });
 
+test("signed current-time inbound fixture opens an active service window and respects approval rules", async () => {
+  const lead = await createDraftLead({
+    name: "Fictional Window Customer",
+    whatsappNumber: TEST_WHATSAPP_CUSTOMER_WA_ID,
+  });
+  const app = await startWhatsAppServer();
+
+  try {
+    const { timestamp } = await postRecentInboundWhatsAppFixture(app, {
+      contactName: "Fictional Window Customer",
+      text: "Hello, I would like a quote for an event.",
+    });
+
+    const conversationIds = await conversationIdsForLead(lead.id);
+    assert.equal(conversationIds.length, 1);
+    const conversationId = conversationIds[0];
+    assert.ok(conversationId);
+
+    const protectionResponse = await fetch(
+      `${baseUrl}/api/whatsapp/conversations/${conversationId}/protection`,
+    );
+    assert.equal(protectionResponse.status, 200);
+    const protection = await readJson<ConversationProtectionPayload>(
+      protectionResponse,
+    );
+    assert.equal(protection.protection.serviceWindow.kind, "open");
+    assert.equal(protection.protection.suppression, null);
+
+    const expectedInboundAt = new Date(
+      Number(timestamp) * 1_000,
+    ).toISOString();
+    assert.equal(
+      protection.protection.serviceWindow.lastInboundAt,
+      expectedInboundAt,
+    );
+    assert.ok(protection.protection.serviceWindow.expiresAt);
+    assert.equal(
+      new Date(protection.protection.serviceWindow.expiresAt).getTime() -
+        new Date(expectedInboundAt).getTime(),
+      24 * 60 * 60 * 1_000,
+    );
+
+    // Approval remains a separate, required action. Approving without a send
+    // policy must not queue anything, even though the service window is open.
+    const draft = await createSavedDraftPayload(lead.id);
+    const approvedOnly = await approveSavedDraft(lead.id, draft.id);
+    assert.equal(approvedOnly.status, 200);
+    assert.equal(
+      (await readJson<ReplyDraftApprovalPayload>(approvedOnly)).outboundMessage,
+      null,
+    );
+
+    // An explicit owner send after approval may queue, but the default mock
+    // provider cannot contact Meta.
+    const queued = await sendSavedDraft(draft.id);
+    assert.equal(queued.status, 200);
+    const outbound = (await readJson<OutboundMessagePayload>(queued))
+      .outboundMessage;
+    assert.equal(outbound.status, "queued");
+    assert.equal(outbound.provider, "mock");
+  } finally {
+    await stopServer(app.server);
+  }
+});
+
+test("a suppressed customer with an active service window is never sent to a provider", async () => {
+  const lead = await createDraftLead({
+    name: "Fictional Opt Out Customer",
+    whatsappNumber: TEST_WHATSAPP_CUSTOMER_WA_ID,
+  });
+  const app = await startWhatsAppServer();
+
+  try {
+    await postRecentInboundWhatsAppFixture(app, {
+      contactName: "Fictional Opt Out Customer",
+      text: "Hello, please send me a quote.",
+    });
+
+    const conversationIds = await conversationIdsForLead(lead.id);
+    assert.equal(conversationIds.length, 1);
+    const conversationId = conversationIds[0];
+    assert.ok(conversationId);
+
+    const draft = await createSavedDraftPayload(lead.id);
+    const approved = await withMetaOutboundEnabled(
+      requireSession().workspace.id,
+      () =>
+        approveSavedDraft(lead.id, draft.id, {
+          status: "approved",
+          sendPolicy: "approve_and_send",
+          conversationId,
+        }),
+    );
+    assert.equal(approved.status, 200);
+    const outbound = (await readJson<ReplyDraftApprovalPayload>(approved))
+      .outboundMessage;
+    assert.ok(outbound);
+    assert.equal(outbound.provider, "whatsapp");
+    assert.equal(outbound.status, "queued");
+
+    // A current-time STOP keeps the service window open while creating the
+    // workspace-scoped suppression record.
+    await postRecentInboundWhatsAppFixture(app, {
+      contactName: "Fictional Opt Out Customer",
+      text: "STOP",
+    });
+
+    const protectionResponse = await fetch(
+      `${baseUrl}/api/whatsapp/conversations/${conversationId}/protection`,
+    );
+    assert.equal(protectionResponse.status, 200);
+    const protection = await readJson<ConversationProtectionPayload>(
+      protectionResponse,
+    );
+    assert.equal(protection.protection.serviceWindow.kind, "open");
+    assert.equal(protection.protection.suppression?.reason, "opt_out");
+
+    let providerCalls = 0;
+    const countingProvider: OutboundMessageProvider = {
+      name: "whatsapp",
+      idempotency: "unsupported",
+      async send() {
+        providerCalls += 1;
+        return {
+          providerMessageId: `wamid.should-not-send-${randomUUID()}`,
+          status: "sent",
+        };
+      },
+    };
+
+    const workerResult = await runOutboundWorkerOnce(pool, countingProvider, {
+      staleAfterMs: 60_000,
+    });
+    assert.equal(workerResult.cancelled, 1);
+    assert.equal(workerResult.claimed, 0);
+    assert.equal(providerCalls, 0);
+
+    const history = await pool.query<{
+      status: string;
+      failure_reason: string | null;
+    }>(
+      `
+        SELECT status, failure_reason
+        FROM outbound_messages
+        WHERE workspace_id = $1 AND reply_draft_id = $2
+      `,
+      [requireSession().workspace.id, draft.id],
+    );
+    assert.equal(history.rows[0]?.status, "cancelled");
+    assert.match(history.rows[0]?.failure_reason ?? "", /suppressed/i);
+  } finally {
+    await stopServer(app.server);
+  }
+});
+
 test("WhatsApp webhook rejects a missing configured workspace", async () => {
   const app = await startWhatsAppServer({ workspaceId: randomUUID() });
   const body = whatsappEnvelope([
@@ -7748,15 +7943,82 @@ test("GET /api/conversations supports archived and all status filters", async ()
     ["Archived Customer"],
   );
 
-  const all = await readJson<ConversationsPayload>(
-    await fetch(`${baseUrl}/api/conversations`),
+  const allResponse = await fetch(
+    `${baseUrl}/api/conversations?status=all`,
   );
+  assert.equal(allResponse.status, 200);
+  const all = await readJson<ConversationsPayload>(allResponse);
   assert.equal(all.conversations.length, 3);
   assert.deepEqual(
     all.conversations
       .map((conversation) => conversation.customer.displayName)
       .sort(),
     ["Archived Customer", "Closed Customer", "Open Customer"],
+  );
+  assert.deepEqual(
+    all.conversations.map((conversation) => conversation.status).sort(),
+    ["archived", "closed", "open"],
+  );
+});
+
+test("GET /api/conversations?status=all is workspace-scoped", async () => {
+  const owner = requireSession();
+
+  await persistInboundMessages(pool, owner.workspace.id, [
+    inboundMessage({
+      senderWaId: "16505551234",
+      senderPhoneNumber: "16505551234",
+      contactName: "Owner Customer",
+    }),
+  ]);
+
+  const other = await registerUser();
+  assert.notEqual(other.workspace.id, owner.workspace.id);
+
+  await persistInboundMessages(pool, other.workspace.id, [
+    inboundMessage({
+      senderWaId: "2348031234567",
+      senderPhoneNumber: "2348031234567",
+      contactName: "Other Customer",
+    }),
+  ]);
+  await pool.query(
+    `
+      UPDATE whatsapp_conversations
+      SET status = 'archived'
+      WHERE workspace_id = $1
+    `,
+    [other.workspace.id],
+  );
+
+  const ownerResponse = await requestAs(
+    owner,
+    "/api/conversations?status=all",
+  );
+  assert.equal(ownerResponse.status, 200);
+  const ownerPayload = await readJson<ConversationsPayload>(ownerResponse);
+  assert.deepEqual(
+    ownerPayload.conversations.map(
+      (conversation) => conversation.customer.displayName,
+    ),
+    ["Owner Customer"],
+  );
+
+  const otherResponse = await requestAs(
+    other,
+    "/api/conversations?status=all",
+  );
+  assert.equal(otherResponse.status, 200);
+  const otherPayload = await readJson<ConversationsPayload>(otherResponse);
+  assert.deepEqual(
+    otherPayload.conversations.map(
+      (conversation) => conversation.customer.displayName,
+    ),
+    ["Other Customer"],
+  );
+  assert.deepEqual(
+    otherPayload.conversations.map((conversation) => conversation.status),
+    ["archived"],
   );
 });
 
@@ -9935,7 +10197,11 @@ type SuppressionsPayload = {
 type ConversationProtectionPayload = {
   protection: {
     customer: { id: string };
-    serviceWindow: { kind: string };
+    serviceWindow: {
+      kind: string;
+      lastInboundAt?: string;
+      expiresAt?: string;
+    };
     suppression: { reason: string } | null;
   };
 };
