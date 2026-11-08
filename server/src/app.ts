@@ -17,6 +17,7 @@ import { createOutboundMessagesRouter } from "./outbound/routes.js";
 import { createReplyDraftsRouter } from "./reply-drafts/routes.js";
 import { createSettingsRouter } from "./settings/messaging-routes.js";
 import { createConversationsRouter } from "./whatsapp/conversation-routes.js";
+import { createWhatsAppConnectionsRouter } from "./whatsapp/connections-routes.js";
 import { createWhatsAppInboxRouter } from "./whatsapp/inbox-routes.js";
 import { createWhatsAppOperationsRouter } from "./whatsapp/operations-routes.js";
 import type { WhatsAppIntegrationConfig } from "./whatsapp/types.js";
@@ -92,6 +93,7 @@ export function createApp({
     createOutboundMessagesRouter({ pool, auth }),
   );
   app.use("/api/whatsapp", createWhatsAppInboxRouter({ pool, auth }));
+  app.use("/api/whatsapp", createWhatsAppConnectionsRouter({ pool, auth }));
   app.use(
     "/api/whatsapp",
     createWhatsAppOperationsRouter({ pool, auth, whatsapp }),
