@@ -298,6 +298,12 @@ export class ConnectionAwareMetaProvider implements OutboundMessageProvider {
     enforceRecipientAllowlist: boolean;
     legacyConfig: MetaOutboundConfig | null;
   }> {
+    if (!connection.encryptedToken && connection.status !== "active") {
+      throw new OutboundProviderError(
+        `Outbound send rejected: ${connectionFailureReason(connection)}`,
+      );
+    }
+
     if (connection.encryptedToken) {
       if (connection.status !== "active") {
         throw new OutboundProviderError(

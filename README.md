@@ -397,20 +397,58 @@ failure between the final authorization check and provider execution is an
 unavoidable boundary; provider idempotency or manual reconciliation is needed
 to handle an unknown outcome safely.
 
-The inbound webhook route also receives signed delivery-status events. The
-server-side test integration described above is the only supported Meta
-outbound route.
+The inbound webhook route also receives signed delivery-status events. Outbound
+sending selects the WhatsApp connection owned by the conversation's workspace;
+the restricted legacy test configuration below remains available during
+migration.
+
+#### Multi-workspace WhatsApp connections (Milestone 14A)
+
+Migration `017_multi_workspace_whatsapp_connections.sql` extends the existing
+`whatsapp_connections` table. Each Meta phone-number ID resolves to exactly one
+workspace through a global unique index; inbound events and outbound sends use
+that database ownership rather than a webhook- or browser-supplied workspace.
+
+Access tokens are encrypted with AES-256-GCM before storage. Set a server-only
+32-byte key (base64) and optional version label:
+
+| Variable | Purpose |
+| --- | --- |
+| `WHATSAPP_CREDENTIAL_ENCRYPTION_KEY` | Base64-encoded 32-byte AES-256-GCM key. Generate with `openssl rand -base64 32`; store in a secret manager. |
+| `WHATSAPP_CREDENTIAL_KEY_VERSION` | Short key version label, default `v1`. Must match the version stored with each credential. |
+
+Connections start `pending`, become `active` through a trusted server-side
+onboarding path, and can be disconnected by a workspace owner. Disconnected,
+expired, or undecryptable credentials fail closed before any Meta request.
+Credentials are never returned by the connection API. Workspace members can
+list and read connections; only owners can disconnect. There is no endpoint
+that creates a connection or accepts an arbitrary workspace ID. Embedded
+Signup onboarding is not part of this milestone.
+
+The connection API is:
+
+- `GET /api/whatsapp/connections`
+- `GET /api/whatsapp/connections/:connectionId`
+- `POST /api/whatsapp/connections/:connectionId/disconnect` (owner only)
+
+Unknown or unregistered phone-number IDs are acknowledged but ignored; they
+never create a connection or get assigned to a workspace. The optional legacy
+single-workspace configuration below remains supported during migration.
 
 #### Inbound webhook configuration
 
-Add these server-only values to `.env` (or a secret store). Leave all four empty to disable inbound webhooks. If any is set, all four must be valid or API startup fails; errors name variables but never print values.
+Add these server-only values to `.env` (or a secret store). Leave every
+`WHATSAPP_*` value empty to disable inbound webhooks. When any is set, the
+webhook verification token and app secret must be valid or API startup fails;
+errors name variables but never print values. The legacy phone-number/workspace
+pair is optional and must be set together.
 
 | Variable | Purpose |
 | --- | --- |
 | `WHATSAPP_WEBHOOK_VERIFY_TOKEN` | A string you choose and also enter in Meta's webhook configuration. |
 | `WHATSAPP_APP_SECRET` | Meta App Dashboard → App settings → Basic → App secret. Used to verify webhook signatures. |
-| `WHATSAPP_TEST_PHONE_NUMBER_ID` | The numeric business phone-number ID from WhatsApp → API Setup. This is not the displayed phone number. |
-| `WHATSAPP_TEST_WORKSPACE_ID` | UUID of the one existing ReplyPilot workspace that receives these conversations. |
+| `WHATSAPP_TEST_PHONE_NUMBER_ID` | Optional legacy numeric business phone-number ID from WhatsApp → API Setup. This is not the displayed phone number. |
+| `WHATSAPP_TEST_WORKSPACE_ID` | Optional UUID of the legacy workspace that receives those conversations. Set it together with the phone-number ID. |
 
 The workspace must already exist. Sign in and use `GET /api/workspace` to find its UUID, or query it locally:
 
