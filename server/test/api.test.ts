@@ -53,6 +53,10 @@ import type {
   WhatsAppMessage,
 } from "../src/whatsapp/types.js";
 import { loadWhatsAppConfig } from "../src/whatsapp/config.js";
+import {
+  loadEmbeddedSignupConfig,
+  type EmbeddedSignupConfig,
+} from "../src/whatsapp/embedded-signup-config.js";
 import { normalizeWhatsAppPhoneE164 } from "../src/whatsapp/phone.js";
 import { persistInboundMessages } from "../src/whatsapp/repository.js";
 import {
@@ -245,6 +249,8 @@ async function startServer(
   replyDraftProvider?: ReplyDraftProvider,
   authOptions: TestAuthOptions = {},
   whatsapp: WhatsAppIntegrationConfig | null = null,
+  embeddedSignup: EmbeddedSignupConfig | null = null,
+  metaFetch?: typeof fetch,
 ): Promise<{
   server: Server;
   baseUrl: string;
@@ -254,6 +260,8 @@ async function startServer(
     pool: poolToUse,
     replyDraftProvider,
     whatsapp,
+    embeddedSignup,
+    metaFetch,
     auth: {
       secret: TEST_AUTH_SECRET,
       baseURL: authBaseUrl,

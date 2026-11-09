@@ -541,7 +541,11 @@ export async function completeWhatsAppOnboarding(
     try {
       token = await client.exchangeCode(input.code);
     } catch (error) {
-      if (error instanceof MetaGraphError && error.kind === "rejected") {
+      if (
+        error instanceof MetaGraphError &&
+        error.kind === "rejected" &&
+        (error.status === null || error.status < 500)
+      ) {
         throw new OnboardingError(
           "invalid_code",
           "Meta rejected the authorization code, or it has already been used. Start the connection again.",
