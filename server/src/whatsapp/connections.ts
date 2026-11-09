@@ -659,8 +659,8 @@ export async function upsertVerifiedWhatsAppConnection(
               ELSE disconnected_at
             END,
             updated_at = $11
-        WHERE id = $14
-          AND workspace_id = $15
+        WHERE id = $1
+          AND workspace_id = $14
         RETURNING ${CONNECTION_SUMMARY_COLUMNS}
       `,
       [
@@ -677,7 +677,6 @@ export async function upsertVerifiedWhatsAppConnection(
         verifiedAt,
         input.webhookSubscribed,
         input.lastError ?? null,
-        existingRow.id,
         input.workspaceId,
       ],
     );
