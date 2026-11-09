@@ -11,8 +11,32 @@ import {
   getWhatsAppConnection,
   listWhatsAppConnections,
 } from "./connections.js";
+import {
+  toPublicEmbeddedSignupConfig,
+  type EmbeddedSignupConfig,
+} from "./embedded-signup-config.js";
+import { createMetaGraphClient } from "./meta-graph.js";
+import {
+  completeWhatsAppOnboarding,
+  createOnboardingSession,
+  OnboardingError,
+  verifyWhatsAppConnection,
+} from "./onboarding.js";
 
 const connectionIdSchema = z.uuid();
+const metaIdSchema = z
+  .string()
+  .trim()
+  .regex(/^\d{5,32}$/, "must be a numeric Meta identifier");
+
+const onboardingCompleteSchema = z
+  .object({
+    state: z.string().trim().min(20, "must be the issued onboarding state"),
+    code: z.string().trim().min(8, "must be a Meta authorization code"),
+    wabaId: metaIdSchema,
+    phoneNumberId: metaIdSchema,
+  })
+  .strict();
 
 function sendValidationError(response: Response, error: ZodError): void {
   response.status(400).json({
@@ -24,20 +48,30 @@ function sendValidationError(response: Response, error: ZodError): void {
   });
 }
 
+function sendOnboardingError(response: Response, error: OnboardingError): void {
+  response
+    .status(error.httpStatus)
+    .json({ error: error.message, code: error.code });
+}
+
 /**
- * Read and disconnect APIs for workspace WhatsApp connections.
+ * Workspace WhatsApp connection and Embedded Signup APIs.
  *
- * Reads are available to owners and members of the authenticated workspace.
- * Disconnecting is owner-only. Every query is scoped to the authenticated
- * workspace; there is deliberately no endpoint that accepts a workspace ID or
- * lets a browser claim a phone number. Credentials are never returned.
+ * Reads are available to owners and members. Disconnecting, starting
+ * onboarding, completing onboarding, and re-verifying are owner-only. The
+ * workspace always comes from the authenticated session; no endpoint accepts
+ * a workspace ID. Credentials are never returned.
  */
 export function createWhatsAppConnectionsRouter({
   pool,
   auth,
+  embeddedSignup = null,
+  metaFetch,
 }: {
   pool: Pool;
   auth: AuthInstance;
+  embeddedSignup?: EmbeddedSignupConfig | null;
+  metaFetch?: typeof fetch;
 }): Router {
   const router = Router();
   const requireMember = createRequireWorkspace({
@@ -50,6 +84,12 @@ export function createWhatsAppConnectionsRouter({
     pool,
     roles: ["owner"],
   });
+
+  function metaClient() {
+    return embeddedSignup
+      ? createMetaGraphClient(embeddedSignup, metaFetch)
+      : null;
+  }
 
   router.get("/connections", requireMember, async (_request, response) => {
     const { workspace } = getAuthContext(response);
@@ -112,6 +152,133 @@ export function createWhatsAppConnectionsRouter({
       }
 
       response.status(200).json({ connection });
+    },
+  );
+
+  router.post(
+    "/connections/:connectionId/verify",
+    requireOwner,
+    async (request, response) => {
+      const connectionId = connectionIdSchema.safeParse(
+        request.params.connectionId,
+      );
+
+      if (!connectionId.success) {
+        sendValidationError(response, connectionId.error);
+        return;
+      }
+
+      if (!embeddedSignup) {
+        response.status(503).json({
+          error: "WhatsApp onboarding is not configured.",
+          code: "not_configured",
+        });
+        return;
+      }
+
+      const { workspace } = getAuthContext(response);
+
+      try {
+        const result = await verifyWhatsAppConnection({
+          pool,
+          config: embeddedSignup,
+          workspaceId: workspace.id,
+          connectionId: connectionId.data,
+          metaClient: metaClient() ?? undefined,
+        });
+
+        response.status(200).json(result);
+      } catch (error) {
+        if (error instanceof OnboardingError) {
+          sendOnboardingError(response, error);
+          return;
+        }
+
+        throw error;
+      }
+    },
+  );
+
+  router.get(
+    "/onboarding/config",
+    requireOwner,
+    (_request, response) => {
+      response.status(200).json({
+        config: toPublicEmbeddedSignupConfig(embeddedSignup),
+      });
+    },
+  );
+
+  router.post(
+    "/onboarding/sessions",
+    requireOwner,
+    async (_request, response) => {
+      if (!embeddedSignup) {
+        response.status(503).json({
+          error: "WhatsApp onboarding is not configured.",
+          code: "not_configured",
+        });
+        return;
+      }
+
+      const { user, workspace } = getAuthContext(response);
+      const session = await createOnboardingSession(pool, {
+        workspaceId: workspace.id,
+        userId: user.id,
+      });
+
+      response.status(201).json({
+        state: session.state,
+        expiresAt: session.expiresAt.toISOString(),
+      });
+    },
+  );
+
+  router.post(
+    "/onboarding/complete",
+    requireOwner,
+    async (request, response) => {
+      const body = onboardingCompleteSchema.safeParse(request.body);
+
+      if (!body.success) {
+        sendValidationError(response, body.error);
+        return;
+      }
+
+      if (!embeddedSignup) {
+        response.status(503).json({
+          error: "WhatsApp onboarding is not configured.",
+          code: "not_configured",
+        });
+        return;
+      }
+
+      const { user, workspace } = getAuthContext(response);
+
+      try {
+        const result = await completeWhatsAppOnboarding({
+          pool,
+          config: embeddedSignup,
+          workspaceId: workspace.id,
+          userId: user.id,
+          state: body.data.state,
+          code: body.data.code,
+          wabaId: body.data.wabaId,
+          phoneNumberId: body.data.phoneNumberId,
+          metaClient: metaClient() ?? undefined,
+        });
+
+        response
+          .status(result.verification === "active" ? 200 : 202)
+          .json(result);
+      } catch (error) {
+        if (error instanceof OnboardingError) {
+          sendOnboardingError(response, error);
+          return;
+        }
+
+        throw error;
+      }
     },
   );
 

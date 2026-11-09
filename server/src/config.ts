@@ -1,6 +1,10 @@
 import { z } from "zod";
 import { loadMetaOutboundConfig } from "./outbound/meta-config.js";
 import { loadWhatsAppConfig } from "./whatsapp/config.js";
+import {
+  loadEmbeddedSignupConfig,
+  type EmbeddedSignupConfig,
+} from "./whatsapp/embedded-signup-config.js";
 import type { WhatsAppIntegrationConfig } from "./whatsapp/types.js";
 
 function isPostgresConnectionString(value: string): boolean {
@@ -78,6 +82,7 @@ export type ServerConfig = Readonly<{
   betterAuthUrl: string;
   trustedOrigins: string[];
   whatsapp: WhatsAppIntegrationConfig | null;
+  embeddedSignup: EmbeddedSignupConfig | null;
 }>;
 
 function parseTrustedOrigins(
@@ -104,6 +109,7 @@ export function loadConfig(
   environment: NodeJS.ProcessEnv = process.env,
 ): ServerConfig {
   loadMetaOutboundConfig(environment);
+  const embeddedSignup = loadEmbeddedSignupConfig(environment);
 
   const result = environmentSchema.safeParse(environment);
 
@@ -143,5 +149,6 @@ export function loadConfig(
     betterAuthUrl,
     trustedOrigins: [...new Set(trustedOrigins)],
     whatsapp: loadWhatsAppConfig(environment),
+    embeddedSignup,
   };
 }
