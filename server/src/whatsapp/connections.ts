@@ -20,6 +20,7 @@ export const WHATSAPP_CONNECTION_STATUSES = [
   "pending",
   "active",
   "disconnected",
+  "error",
 ] as const;
 
 export type WhatsAppConnectionStatus =
@@ -38,6 +39,9 @@ export type WhatsAppConnectionSummary = Readonly<{
   updatedAt: string;
   activatedAt: string | null;
   disconnectedAt: string | null;
+  lastVerifiedAt: string | null;
+  webhookSubscribedAt: string | null;
+  lastError: string | null;
 }>;
 
 type ConnectionRow = Readonly<{
@@ -53,6 +57,9 @@ type ConnectionRow = Readonly<{
   updated_at: Date;
   activated_at: Date | null;
   disconnected_at: Date | null;
+  last_verified_at: Date | null;
+  webhook_subscribed_at: Date | null;
+  last_error: string | null;
 }>;
 
 const CONNECTION_SUMMARY_COLUMNS = `
@@ -67,7 +74,10 @@ const CONNECTION_SUMMARY_COLUMNS = `
   created_at,
   updated_at,
   activated_at,
-  disconnected_at
+  disconnected_at,
+  last_verified_at,
+  webhook_subscribed_at,
+  last_error
 `;
 
 function iso(value: Date | null): string | null {
@@ -90,6 +100,9 @@ export function mapConnectionSummary(
     updatedAt: row.updated_at.toISOString(),
     activatedAt: iso(row.activated_at),
     disconnectedAt: iso(row.disconnected_at),
+    lastVerifiedAt: iso(row.last_verified_at),
+    webhookSubscribedAt: iso(row.webhook_subscribed_at),
+    lastError: row.last_error,
   };
 }
 
@@ -477,4 +490,312 @@ export async function activateWhatsAppConnection(
   }
 
   return getWhatsAppConnection(pool, workspaceId, connectionId);
+}
+
+/**
+ * Raised when a Meta phone-number ID already belongs to another workspace.
+ * Callers must not disclose which workspace owns it.
+ */
+export class WhatsAppConnectionConflictError extends Error {
+  constructor() {
+    super(
+      "This WhatsApp phone number is already connected to another workspace.",
+    );
+    this.name = "WhatsAppConnectionConflictError";
+  }
+}
+
+export type WhatsAppConnectionForVerification = Readonly<{
+  id: string;
+  workspaceId: string;
+  phoneNumberId: string;
+  wabaId: string | null;
+  status: WhatsAppConnectionStatus;
+  tokenExpiresAt: Date | null;
+  encryptedToken: EncryptedWhatsAppToken | null;
+}>;
+
+/**
+ * Loads a connection and its encrypted credentials for server-side
+ * re-verification. The ciphertext never leaves server provider code.
+ */
+export async function loadWhatsAppConnectionForVerification(
+  queryable: Pool | PoolClient,
+  workspaceId: string,
+  connectionId: string,
+): Promise<WhatsAppConnectionForVerification | null> {
+  const result = await queryable.query<{
+    id: string;
+    workspace_id: string;
+    phone_number_id: string;
+    waba_id: string | null;
+    status: WhatsAppConnectionStatus;
+    token_expires_at: Date | null;
+    access_token_ciphertext: string | null;
+    access_token_iv: string | null;
+    access_token_auth_tag: string | null;
+    credential_key_version: string | null;
+  }>(
+    `
+      SELECT
+        id,
+        workspace_id,
+        phone_number_id,
+        waba_id,
+        status,
+        token_expires_at,
+        access_token_ciphertext,
+        access_token_iv,
+        access_token_auth_tag,
+        credential_key_version
+      FROM whatsapp_connections
+      WHERE workspace_id = $1
+        AND id = $2
+      LIMIT 1
+    `,
+    [workspaceId, connectionId],
+  );
+
+  const row = result.rows[0];
+
+  if (!row) {
+    return null;
+  }
+
+  const encryptedToken =
+    row.access_token_ciphertext &&
+    row.access_token_iv &&
+    row.access_token_auth_tag &&
+    row.credential_key_version
+      ? {
+          ciphertext: row.access_token_ciphertext,
+          iv: row.access_token_iv,
+          authTag: row.access_token_auth_tag,
+          keyVersion: row.credential_key_version,
+        }
+      : null;
+
+  return {
+    id: row.id,
+    workspaceId: row.workspace_id,
+    phoneNumberId: row.phone_number_id,
+    wabaId: row.waba_id,
+    status: row.status,
+    tokenExpiresAt: row.token_expires_at,
+    encryptedToken,
+  };
+}
+
+export type VerifiedConnectionStatus = "active" | "pending" | "error";
+
+export type UpsertVerifiedWhatsAppConnectionInput = Readonly<{
+  workspaceId: string;
+  phoneNumberId: string;
+  displayPhoneNumber?: string | null;
+  label?: string | null;
+  wabaId: string;
+  status: VerifiedConnectionStatus;
+  accessToken: string;
+  tokenExpiresAt?: Date | null;
+  lastError?: string | null;
+  webhookSubscribed: boolean;
+  verifiedAt?: Date;
+}>;
+
+/**
+ * Creates or updates exactly one connection for a verified Meta phone-number
+ * ID. The global phone-number index is checked first so a second workspace can
+ * never be assigned another workspace's number. Re-onboarding an existing
+ * connection in the same workspace replaces its encrypted credentials and
+ * verification metadata rather than inserting a duplicate row.
+ */
+export async function upsertVerifiedWhatsAppConnection(
+  queryable: Pool | PoolClient,
+  input: UpsertVerifiedWhatsAppConnectionInput,
+  environment: NodeJS.ProcessEnv = process.env,
+): Promise<WhatsAppConnectionSummary> {
+  const encryptedToken = encryptWhatsAppToken(
+    input.accessToken,
+    environment,
+  );
+  const verifiedAt = input.verifiedAt ?? new Date();
+  const existing = await queryable.query<{ id: string; workspace_id: string }>(
+    `
+      SELECT id, workspace_id
+      FROM whatsapp_connections
+      WHERE phone_number_id = $1
+      LIMIT 1
+    `,
+    [input.phoneNumberId],
+  );
+  const existingRow = existing.rows[0];
+
+  if (existingRow && existingRow.workspace_id !== input.workspaceId) {
+    throw new WhatsAppConnectionConflictError();
+  }
+
+  if (existingRow) {
+    const result = await queryable.query<ConnectionRow>(
+      `
+        UPDATE whatsapp_connections
+        SET display_phone_number = $2,
+            label = COALESCE($3, label),
+            waba_id = $4,
+            status = $5,
+            access_token_ciphertext = $6,
+            access_token_iv = $7,
+            access_token_auth_tag = $8,
+            token_expires_at = $9,
+            credential_key_version = $10,
+            last_verified_at = $11,
+            webhook_subscribed_at = CASE WHEN $12 THEN $11 ELSE NULL END,
+            last_error = $13,
+            activated_at = CASE
+              WHEN $5 = 'active' THEN COALESCE(activated_at, $11)
+              ELSE activated_at
+            END,
+            disconnected_at = CASE
+              WHEN $5 = 'active' THEN NULL
+              ELSE disconnected_at
+            END,
+            updated_at = $11
+        WHERE id = $14
+          AND workspace_id = $15
+        RETURNING ${CONNECTION_SUMMARY_COLUMNS}
+      `,
+      [
+        existingRow.id,
+        input.displayPhoneNumber ?? null,
+        input.label ?? null,
+        input.wabaId,
+        input.status,
+        encryptedToken.ciphertext,
+        encryptedToken.iv,
+        encryptedToken.authTag,
+        input.tokenExpiresAt ?? null,
+        encryptedToken.keyVersion,
+        verifiedAt,
+        input.webhookSubscribed,
+        input.lastError ?? null,
+        existingRow.id,
+        input.workspaceId,
+      ],
+    );
+
+    const row = result.rows[0];
+
+    if (!row) {
+      throw new Error(
+        "WhatsApp connection update did not return a row for this workspace.",
+      );
+    }
+
+    return mapConnectionSummary(row);
+  }
+
+  const result = await queryable.query<ConnectionRow>(
+    `
+      INSERT INTO whatsapp_connections (
+        workspace_id,
+        phone_number_id,
+        display_phone_number,
+        label,
+        waba_id,
+        status,
+        access_token_ciphertext,
+        access_token_iv,
+        access_token_auth_tag,
+        token_expires_at,
+        credential_key_version,
+        activated_at,
+        last_verified_at,
+        webhook_subscribed_at,
+        last_error
+      )
+      VALUES (
+        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
+        CASE WHEN $6 = 'active' THEN $12 ELSE NULL END,
+        $12,
+        CASE WHEN $13 THEN $12 ELSE NULL END,
+        $14
+      )
+      RETURNING ${CONNECTION_SUMMARY_COLUMNS}
+    `,
+    [
+      input.workspaceId,
+      input.phoneNumberId,
+      input.displayPhoneNumber ?? null,
+      input.label ?? null,
+      input.wabaId,
+      input.status,
+      encryptedToken.ciphertext,
+      encryptedToken.iv,
+      encryptedToken.authTag,
+      input.tokenExpiresAt ?? null,
+      encryptedToken.keyVersion,
+      verifiedAt,
+      input.webhookSubscribed,
+      input.lastError ?? null,
+    ],
+  );
+
+  const row = result.rows[0];
+
+  if (!row) {
+    throw new Error("WhatsApp connection insert did not return a row.");
+  }
+
+  return mapConnectionSummary(row);
+}
+
+export type ConnectionVerificationStateInput = Readonly<{
+  workspaceId: string;
+  connectionId: string;
+  status: VerifiedConnectionStatus;
+  lastError: string | null;
+  webhookSubscribed: boolean;
+  verifiedAt?: Date;
+}>;
+
+/**
+ * Records the outcome of a re-verification attempt without touching the
+ * encrypted token. Only "active" clears the disconnected marker.
+ */
+export async function setWhatsAppConnectionVerificationState(
+  queryable: Pool | PoolClient,
+  input: ConnectionVerificationStateInput,
+): Promise<WhatsAppConnectionSummary | null> {
+  const verifiedAt = input.verifiedAt ?? new Date();
+  const result = await queryable.query<ConnectionRow>(
+    `
+      UPDATE whatsapp_connections
+      SET status = $3,
+          last_verified_at = $4,
+          webhook_subscribed_at = CASE WHEN $5 THEN $4 ELSE NULL END,
+          last_error = $6,
+          activated_at = CASE
+            WHEN $3 = 'active' THEN COALESCE(activated_at, $4)
+            ELSE activated_at
+          END,
+          disconnected_at = CASE
+            WHEN $3 = 'active' THEN NULL
+            ELSE disconnected_at
+          END,
+          updated_at = $4
+      WHERE workspace_id = $1
+        AND id = $2
+      RETURNING ${CONNECTION_SUMMARY_COLUMNS}
+    `,
+    [
+      input.workspaceId,
+      input.connectionId,
+      input.status,
+      verifiedAt,
+      input.webhookSubscribed,
+      input.lastError,
+    ],
+  );
+
+  const row = result.rows[0];
+  return row ? mapConnectionSummary(row) : null;
 }
