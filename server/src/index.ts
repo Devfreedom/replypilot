@@ -15,6 +15,7 @@ function start(): void {
       trustedOrigins: config.trustedOrigins,
     },
     whatsapp: config.whatsapp,
+    embeddedSignup: config.embeddedSignup,
   });
 
   if (config.whatsapp) {

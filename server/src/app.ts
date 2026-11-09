@@ -18,6 +18,7 @@ import { createReplyDraftsRouter } from "./reply-drafts/routes.js";
 import { createSettingsRouter } from "./settings/messaging-routes.js";
 import { createConversationsRouter } from "./whatsapp/conversation-routes.js";
 import { createWhatsAppConnectionsRouter } from "./whatsapp/connections-routes.js";
+import type { EmbeddedSignupConfig } from "./whatsapp/embedded-signup-config.js";
 import { createWhatsAppInboxRouter } from "./whatsapp/inbox-routes.js";
 import { createWhatsAppOperationsRouter } from "./whatsapp/operations-routes.js";
 import type { WhatsAppIntegrationConfig } from "./whatsapp/types.js";
@@ -38,11 +39,15 @@ export function createApp({
   auth: authOptions,
   replyDraftProvider,
   whatsapp = null,
+  embeddedSignup = null,
+  metaFetch,
 }: {
   pool: Pool;
   auth: AppAuthOptions;
   replyDraftProvider?: ReplyDraftProvider;
   whatsapp?: WhatsAppIntegrationConfig | null;
+  embeddedSignup?: EmbeddedSignupConfig | null;
+  metaFetch?: typeof fetch;
 }): Express {
   const app = express();
   const auth = createAuth({
@@ -93,7 +98,15 @@ export function createApp({
     createOutboundMessagesRouter({ pool, auth }),
   );
   app.use("/api/whatsapp", createWhatsAppInboxRouter({ pool, auth }));
-  app.use("/api/whatsapp", createWhatsAppConnectionsRouter({ pool, auth }));
+  app.use(
+    "/api/whatsapp",
+    createWhatsAppConnectionsRouter({
+      pool,
+      auth,
+      embeddedSignup,
+      metaFetch,
+    }),
+  );
   app.use(
     "/api/whatsapp",
     createWhatsAppOperationsRouter({ pool, auth, whatsapp }),

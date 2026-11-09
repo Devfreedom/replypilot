@@ -91,6 +91,10 @@ function connectionFailureReason(connection: ConversationConnection): string {
     return "WhatsApp connection is disconnected.";
   }
 
+  if (connection.status === "error") {
+    return "WhatsApp connection needs attention; verify it again before sending.";
+  }
+
   return "WhatsApp connection is not usable.";
 }
 
