@@ -423,17 +423,136 @@ expired, or undecryptable credentials fail closed before any Meta request.
 Credentials are never returned by the connection API. Workspace members can
 list and read connections; only owners can disconnect. There is no endpoint
 that creates a connection or accepts an arbitrary workspace ID. Embedded
-Signup onboarding is not part of this milestone.
+Signup onboarding is added by Milestone 14B below.
 
 The connection API is:
 
 - `GET /api/whatsapp/connections`
 - `GET /api/whatsapp/connections/:connectionId`
 - `POST /api/whatsapp/connections/:connectionId/disconnect` (owner only)
+- `POST /api/whatsapp/connections/:connectionId/verify` (owner only, Milestone 14B)
 
 Unknown or unregistered phone-number IDs are acknowledged but ignored; they
 never create a connection or get assigned to a workspace. The optional legacy
 single-workspace configuration below remains supported during migration.
+
+#### WhatsApp Embedded Signup v4 onboarding (Milestone 14B)
+
+Milestone 14B adds the Meta Embedded Signup v4 flow. A workspace owner clicks
+**Connect WhatsApp** in **Settings → WhatsApp connections**, Meta collects the
+business phone number and authorization, and the API exchanges and verifies the
+result before a connection becomes usable.
+
+Migration `018_whatsapp_embedded_signup_onboarding.sql` is additive. It adds
+the `error` connection status (a connection that failed re-verification),
+`last_verified_at`, `webhook_subscribed_at`, and `last_error` to
+`whatsapp_connections`, and creates `whatsapp_onboarding_sessions`. That table
+stores only a SHA-256 hash of the onboarding nonce: the raw value is returned
+once to the initiating browser and is never persisted.
+
+Add these server-only values to `.env` (or a secret store). Leave every value
+empty to keep onboarding disabled; the settings page then states that WhatsApp
+onboarding is not configured instead of showing a fake connection.
+
+| Variable | Purpose |
+| --- | --- |
+| `META_APP_ID` | Meta App ID from App settings → Basic. Public; sent to the browser SDK. |
+| `META_APP_SECRET` | Meta App Secret from App settings → Basic. Server-only; used to exchange the authorization code. Must match `WHATSAPP_APP_SECRET`. |
+| `META_EMBEDDED_SIGNUP_CONFIG_ID` | Facebook Login for Business configuration ID created with the WhatsApp Embedded Signup variation. |
+| `META_GRAPH_API_VERSION` | Graph API version used for verification, e.g. `v27.0`. Must match the dashboard. |
+| `META_ONBOARDING_ALLOWED_ORIGIN` | Optional public application origin allowed to start onboarding. Must use `https` in production. |
+
+If only some of `META_APP_ID`, `META_APP_SECRET`, and
+`META_EMBEDDED_SIGNUP_CONFIG_ID` are set, the API refuses to start. If
+`META_APP_SECRET` and `WHATSAPP_APP_SECRET` disagree, the API refuses to
+start, because both refer to the same Meta app.
+
+The onboarding API is:
+
+- `GET /api/whatsapp/onboarding/config` (owner only) — whether onboarding is
+  configured, plus the public app ID, configuration ID, and Graph version. It
+  never returns the app secret.
+- `POST /api/whatsapp/onboarding/sessions` (owner only) — creates a short-lived,
+  single-use onboarding session bound to the authenticated user and workspace
+  and returns the nonce and its expiry.
+- `POST /api/whatsapp/onboarding/complete` (owner only) — consumes the nonce
+  and exchanges and verifies the authorization code server-side.
+- `POST /api/whatsapp/connections/:connectionId/verify` (owner only) — re-runs
+  token, permission, asset, and webhook-subscription checks for a stored
+  connection.
+
+No endpoint accepts a workspace ID. The workspace always comes from the
+authenticated session, and a browser cannot claim a phone number for another
+workspace.
+
+What the server does with a completed signup:
+
+1. Consumes the onboarding nonce. Expired, reused, or foreign nonces are
+   rejected; a repeated callback for a recently completed session returns the
+   existing connection instead of creating a second one.
+2. Exchanges the authorization code for a customer access token
+   (`GET /{version}/oauth/access_token`). The code, the app secret, and the
+   token never leave the server, appear in a response, or reach a log.
+3. Inspects the token (`GET /{version}/debug_token`) and requires the
+   `whatsapp_business_management` and `whatsapp_business_messaging`
+   permissions, a valid token issued to this app, and a grant that covers the
+   selected Messaging account.
+4. Confirms the Messaging account (`GET /{version}/{wabaId}`) and that the
+   phone number belongs to it (`GET /{version}/{wabaId}/phone_numbers`).
+5. Subscribes the app to the account's webhooks
+   (`POST /{version}/{wabaId}/subscribed_apps`) and confirms it with
+   `GET /{version}/{wabaId}/subscribed_apps`.
+6. Encrypts the token with the existing AES-256-GCM credential layer and
+   stores the connection as `active` only when every check succeeded.
+
+If only the webhook subscription is unconfirmed, the connection is stored as
+`pending` with a safe explanation and the **Verify** button retries the
+checks. A failed token, permission, or asset check never creates an active
+connection. Registering a phone number that already belongs to another
+workspace is refused with `409` and does not disclose the owning workspace.
+
+Phone-number registration (the six-digit PIN step) is not automated in this
+milestone; it stays a Meta dashboard action.
+
+##### Meta-side prerequisites ReplyPilot cannot implement
+
+These are external requirements. They are **not** satisfied or verified by this
+repository, and no automated test covers them:
+
+- A Meta app with the WhatsApp Business Platform use case, and a **Facebook
+  Login for Business** configuration created with the WhatsApp Embedded Signup
+  variation. That configuration ID is `META_EMBEDDED_SIGNUP_CONFIG_ID`.
+- **Tech Provider** or **Solution Partner** status for the app, as required by
+  the current Embedded Signup documentation.
+- **App Review** advanced access for `whatsapp_business_management` and
+  `whatsapp_business_messaging` before production use.
+- Business verification, a billing method, and a payment method where the
+  account model requires them.
+- A public HTTPS callback URL, valid OAuth redirect URIs, and the app's allowed
+  domains, configured in the Meta App Dashboard.
+- The webhook callback URL and verify token configured as described under
+  [Inbound webhook configuration](#inbound-webhook-configuration).
+
+##### Manual acceptance checklist for Embedded Signup
+
+These steps require a real Meta business account and have not been executed
+against Meta by this repository:
+
+1. Configure the variables above, restart the API, and confirm **Settings →
+   WhatsApp connections** shows **Connect WhatsApp** (or a clear
+   "not configured" explanation when the variables are missing).
+2. Sign in as a workspace owner, click **Connect WhatsApp**, and complete
+   Meta's flow in the popup.
+3. Confirm the connection list shows the real business phone number, status
+   **Active**, and a verification timestamp.
+4. Sign in as a member of the same workspace and confirm the connect and
+   disconnect controls are not offered.
+5. Sign in as a second workspace and confirm the connection is not listed.
+6. Send an inbound WhatsApp message to the connected number and confirm it
+   appears in the inbox, which proves the webhook subscription works.
+7. Remove the Meta webhook subscription, click **Verify**, and confirm the
+   connection reports a pending state instead of claiming success.
+
 
 #### Inbound webhook configuration
 
@@ -672,7 +791,7 @@ The Next.js `/api/*` rewrite can forward the public callback to the local Expres
 
 #### WhatsApp test integration limitations
 
-- Exactly one configured inbound test phone-number ID/workspace and one outbound sender/test workspace/recipient allowlist. There is no Embedded Signup, multi-number management, or workspace-selection UI.
+- Embedded Signup v4 onboarding is implemented and covered by mocked tests, but it has never been completed against Meta in this repository, and no real WhatsApp delivery has been verified. There is no multi-number management or workspace-selection UI.
 - No templates, automatic replies, or production-wide sending. Outbound Meta delivery is restricted test functionality and remains disabled in production.
 - No media download or transcription. Unsupported types are stored with their provider type and shown as unsupported.
 - No automatic lead creation or name-based matching. A conversation links only by exact saved WhatsApp number; otherwise it stays unassociated.

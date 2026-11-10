@@ -11179,3 +11179,1096 @@ test("M14A legacy single-test-workspace sending still works and all protections 
     });
   });
 });
+
+// ─── M14B WhatsApp Embedded Signup v4 onboarding ─────────────────────────────
+
+const TEST_META_APP_ID = "123456789012345";
+const TEST_META_APP_SECRET = "replypilot-test-meta-app-secret-0123456789";
+const TEST_META_CONFIG_ID = "987654321098765";
+const TEST_META_GRAPH_VERSION = "v27.0";
+const TEST_META_ACCESS_TOKEN =
+  "EAABc0EmbeddedSignupTokenThatMustStaySecret123456";
+const TEST_META_AUTH_CODE = "AQDembeddedSignupTestAuthorizationCode0123456789";
+const TEST_META_WABA_ID = "102290129340398";
+const TEST_META_PHONE_NUMBER_ID = "106540000000900";
+
+type FakeMetaState = {
+  exchangeStatus?: number;
+  exchangeNetworkFail?: boolean;
+  accessToken?: string;
+  tokenValid?: boolean;
+  tokenAppId?: string;
+  scopes?: string[];
+  granularTargetIds?: Record<string, string[]>;
+  debugStatus?: number;
+  wabaStatus?: number;
+  phoneStatus?: number;
+  phoneNumbers?: Array<{
+    id: string;
+    display_phone_number: string;
+    verified_name: string;
+  }>;
+  subscribeStatus?: number;
+  subscriptionListStatus?: number;
+  subscribedAppIds?: string[];
+};
+
+type FakeMetaCall = Readonly<{
+  method: string;
+  path: string;
+  authorization: string | null;
+  query: URLSearchParams;
+}>;
+
+function fakeJson(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "content-type": "application/json" },
+  });
+}
+
+/**
+ * Mocked Meta Graph API. Every documented onboarding call is served here so
+ * the suite never touches the network and never sends a WhatsApp message.
+ */
+function createFakeMetaFetch(state: FakeMetaState = {}): {
+  calls: FakeMetaCall[];
+  fetchImplementation: typeof fetch;
+} {
+  const calls: FakeMetaCall[] = [];
+
+  const fetchImplementation: typeof fetch = async (input, init) => {
+    const url = new URL(typeof input === "string" ? input : String(input));
+    const method = (init?.method ?? "GET").toUpperCase();
+
+    calls.push({
+      method,
+      path: url.pathname,
+      authorization: new Headers(init?.headers).get("authorization"),
+      query: url.searchParams,
+    });
+
+    const prefix = `/${TEST_META_GRAPH_VERSION}/`;
+
+    if (!url.pathname.startsWith(prefix)) {
+      return fakeJson({ error: { message: "unexpected path" } }, 404);
+    }
+
+    const path = url.pathname.slice(prefix.length);
+
+    if (path === "oauth/access_token") {
+      if (state.exchangeNetworkFail) {
+        throw new Error("simulated Meta network failure");
+      }
+
+      if (state.exchangeStatus) {
+        return fakeJson(
+          { error: { message: "Invalid authorization code", code: 100 } },
+          state.exchangeStatus,
+        );
+      }
+
+      return fakeJson({
+        access_token: state.accessToken ?? TEST_META_ACCESS_TOKEN,
+        token_type: "bearer",
+        expires_in: 5_184_000,
+      });
+    }
+
+    if (path === "debug_token") {
+      if (state.debugStatus) {
+        return fakeJson(
+          { error: { message: "token inspection failed", code: 190 } },
+          state.debugStatus,
+        );
+      }
+
+      const granular = state.granularTargetIds ?? {
+        whatsapp_business_management: [TEST_META_WABA_ID],
+        whatsapp_business_messaging: [TEST_META_WABA_ID],
+      };
+
+      return fakeJson({
+        data: {
+          app_id: state.tokenAppId ?? TEST_META_APP_ID,
+          type: "USER",
+          is_valid: state.tokenValid ?? true,
+          scopes: state.scopes ?? [
+            "whatsapp_business_management",
+            "whatsapp_business_messaging",
+          ],
+          granular_scopes: Object.entries(granular).map(
+            ([scope, target_ids]) => ({ scope, target_ids }),
+          ),
+          expires_at: 0,
+        },
+      });
+    }
+
+    if (path === TEST_META_WABA_ID && method === "GET") {
+      if (state.wabaStatus) {
+        return fakeJson(
+          { error: { message: "unsupported get request", code: 100 } },
+          state.wabaStatus,
+        );
+      }
+
+      return fakeJson({
+        id: TEST_META_WABA_ID,
+        name: "Fictional Messaging Account",
+      });
+    }
+
+    if (path === `${TEST_META_WABA_ID}/phone_numbers` && method === "GET") {
+      if (state.phoneStatus) {
+        return fakeJson(
+          { error: { message: "unsupported get request", code: 100 } },
+          state.phoneStatus,
+        );
+      }
+
+      return fakeJson({
+        data: state.phoneNumbers ?? [
+          {
+            id: TEST_META_PHONE_NUMBER_ID,
+            display_phone_number: "15550783881",
+            verified_name: "Fictional Studio",
+          },
+        ],
+      });
+    }
+
+    if (path === `${TEST_META_WABA_ID}/subscribed_apps` && method === "POST") {
+      if (state.subscribeStatus) {
+        return fakeJson(
+          { error: { message: "subscription failed", code: 1 } },
+          state.subscribeStatus,
+        );
+      }
+
+      return fakeJson({ success: true });
+    }
+
+    if (path === `${TEST_META_WABA_ID}/subscribed_apps` && method === "GET") {
+      if (state.subscriptionListStatus) {
+        return fakeJson(
+          { error: { message: "subscription list failed", code: 1 } },
+          state.subscriptionListStatus,
+        );
+      }
+
+      return fakeJson({
+        data: (state.subscribedAppIds ?? [TEST_META_APP_ID]).map((id) => ({
+          whatsapp_business_api_data: { id, name: "ReplyPilot" },
+        })),
+      });
+    }
+
+    return fakeJson({ error: { message: "unknown endpoint" } }, 404);
+  };
+
+  return { calls, fetchImplementation };
+}
+
+function testEmbeddedSignupConfig(
+  overrides: Partial<EmbeddedSignupConfig> = {},
+): EmbeddedSignupConfig {
+  return {
+    appId: TEST_META_APP_ID,
+    appSecret: TEST_META_APP_SECRET,
+    configId: TEST_META_CONFIG_ID,
+    graphApiVersion: TEST_META_GRAPH_VERSION,
+    allowedOrigin: "https://app.example.test",
+    ...overrides,
+  };
+}
+
+async function startOnboardingServer(
+  options: Readonly<{
+    state?: FakeMetaState;
+    config?: EmbeddedSignupConfig | null;
+  }> = {},
+): Promise<{
+  server: Server;
+  baseUrl: string;
+  state: FakeMetaState;
+  calls: FakeMetaCall[];
+}> {
+  const state = options.state ?? {};
+  const fake = createFakeMetaFetch(state);
+  const started = await startServer(
+    pool,
+    undefined,
+    {},
+    null,
+    options.config === undefined ? testEmbeddedSignupConfig() : options.config,
+    fake.fetchImplementation,
+  );
+
+  return { ...started, state, calls: fake.calls };
+}
+
+function requestOn(
+  app: Readonly<{ baseUrl: string }>,
+  session: TestSession,
+  path: string,
+  method = "GET",
+  body?: unknown,
+): Promise<Response> {
+  const headers = new Headers({
+    cookie: session.cookie,
+    "x-forwarded-for": TEST_CLIENT_IP,
+  });
+
+  if (body !== undefined) {
+    headers.set("content-type", "application/json");
+  }
+
+  return nativeFetch(`${app.baseUrl}${path}`, {
+    method,
+    headers,
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+}
+
+async function createOnboardingState(
+  app: Readonly<{ baseUrl: string }>,
+  session: TestSession,
+): Promise<{ state: string; expiresAt: string }> {
+  const response = await requestOn(
+    app,
+    session,
+    "/api/whatsapp/onboarding/sessions",
+    "POST",
+    {},
+  );
+  assert.equal(response.status, 201);
+  return readJson<{ state: string; expiresAt: string }>(response);
+}
+
+function completeOnboarding(
+  app: Readonly<{ baseUrl: string }>,
+  session: TestSession,
+  state: string,
+  overrides: Readonly<{
+    code?: string;
+    wabaId?: string;
+    phoneNumberId?: string;
+    extra?: Record<string, unknown>;
+  }> = {},
+): Promise<Response> {
+  return requestOn(
+    app,
+    session,
+    "/api/whatsapp/onboarding/complete",
+    "POST",
+    {
+      state,
+      code: overrides.code ?? TEST_META_AUTH_CODE,
+      wabaId: overrides.wabaId ?? TEST_META_WABA_ID,
+      phoneNumberId: overrides.phoneNumberId ?? TEST_META_PHONE_NUMBER_ID,
+      ...(overrides.extra ?? {}),
+    },
+  );
+}
+
+type OnboardingConnectionPayload = {
+  id: string;
+  phoneNumberId: string;
+  wabaId: string | null;
+  status: string;
+  credentialsConfigured: boolean;
+  lastVerifiedAt: string | null;
+  webhookSubscribedAt: string | null;
+  lastError: string | null;
+};
+
+type OnboardingCompletePayload = {
+  connection: OnboardingConnectionPayload;
+  verification: "active" | "pending";
+  replayed: boolean;
+};
+
+type OnboardingErrorPayload = { error: string; code?: string };
+
+async function registerWorkspaceMember(
+  workspaceId: string,
+): Promise<TestSession> {
+  const member = await registerUser({
+    email: `m14b-member-${randomUUID()}@example.test`,
+    name: "M14B Member",
+  });
+
+  await pool.query(
+    "UPDATE workspace_memberships SET is_default = false, updated_at = now() WHERE user_id = $1",
+    [member.user.id],
+  );
+  await pool.query(
+    "INSERT INTO workspace_memberships (user_id, workspace_id, role, is_default) VALUES ($1, $2, 'member', true)",
+    [member.user.id, workspaceId],
+  );
+
+  return member;
+}
+
+test("M14B onboarding configuration is owner-only, hides the app secret, and reports missing configuration", async () => {
+  const owner = requireSession();
+  const app = await startOnboardingServer();
+
+  try {
+    const config = await requestOn(
+      app,
+      owner,
+      "/api/whatsapp/onboarding/config",
+    );
+    assert.equal(config.status, 200);
+    const payload = await readJson<{
+      config: {
+        configured: boolean;
+        appId: string | null;
+        configId: string | null;
+        graphApiVersion: string | null;
+      };
+    }>(config);
+    assert.equal(payload.config.configured, true);
+    assert.equal(payload.config.appId, TEST_META_APP_ID);
+    assert.equal(payload.config.configId, TEST_META_CONFIG_ID);
+    assert.equal(payload.config.graphApiVersion, TEST_META_GRAPH_VERSION);
+    assert.equal(
+      JSON.stringify(payload).includes(TEST_META_APP_SECRET),
+      false,
+      "The app secret must never be returned to the browser",
+    );
+
+    const member = await registerWorkspaceMember(owner.workspace.id);
+    const memberConfig = await requestOn(
+      app,
+      member,
+      "/api/whatsapp/onboarding/config",
+    );
+    assert.equal(memberConfig.status, 403);
+
+    const memberSession = await requestOn(
+      app,
+      member,
+      "/api/whatsapp/onboarding/sessions",
+      "POST",
+      {},
+    );
+    assert.equal(memberSession.status, 403);
+
+    const memberComplete = await completeOnboarding(app, member, "a".repeat(43));
+    assert.equal(memberComplete.status, 403);
+  } finally {
+    await stopServer(app.server);
+  }
+
+  const unconfigured = await startOnboardingServer({ config: null });
+
+  try {
+    const missing = await requestOn(
+      unconfigured,
+      owner,
+      "/api/whatsapp/onboarding/config",
+    );
+    assert.equal(missing.status, 200);
+    const missingPayload = await readJson<{
+      config: { configured: boolean };
+    }>(missing);
+    assert.equal(missingPayload.config.configured, false);
+
+    const missingSession = await requestOn(
+      unconfigured,
+      owner,
+      "/api/whatsapp/onboarding/sessions",
+      "POST",
+      {},
+    );
+    assert.equal(missingSession.status, 503);
+    const missingError = await readJson<OnboardingErrorPayload>(missingSession);
+    assert.equal(missingError.code, "not_configured");
+
+    const missingComplete = await completeOnboarding(
+      unconfigured,
+      owner,
+      "a".repeat(43),
+    );
+    assert.equal(missingComplete.status, 503);
+  } finally {
+    await stopServer(unconfigured.server);
+  }
+});
+
+test("M14B onboarding registers an active workspace connection and stores credentials encrypted", async () => {
+  const owner = requireSession();
+
+  await withCredentialEncryption(async () => {
+    const app = await startOnboardingServer();
+
+    try {
+      const session = await createOnboardingState(app, owner);
+      const response = await completeOnboarding(app, owner, session.state);
+      const payload = await readJson<
+        OnboardingCompletePayload & OnboardingErrorPayload
+      >(response);
+      assert.equal(
+        response.status,
+        200,
+        `onboarding failed: ${JSON.stringify(payload)}`,
+      );
+
+      assert.equal(payload.verification, "active");
+      assert.equal(payload.replayed, false);
+      assert.equal(payload.connection.status, "active");
+      assert.equal(payload.connection.phoneNumberId, TEST_META_PHONE_NUMBER_ID);
+      assert.equal(payload.connection.wabaId, TEST_META_WABA_ID);
+      assert.equal(payload.connection.credentialsConfigured, true);
+      assert.ok(payload.connection.lastVerifiedAt);
+      assert.ok(payload.connection.webhookSubscribedAt);
+      assert.equal(payload.connection.lastError, null);
+
+      const stored = await pool.query<{
+        workspace_id: string;
+        status: string;
+        access_token_ciphertext: string;
+        access_token_iv: string;
+        access_token_auth_tag: string;
+        credential_key_version: string;
+        webhook_subscribed_at: Date | null;
+        last_verified_at: Date | null;
+      }>(
+        `
+          SELECT
+            workspace_id,
+            status,
+            access_token_ciphertext,
+            access_token_iv,
+            access_token_auth_tag,
+            credential_key_version,
+            webhook_subscribed_at,
+            last_verified_at
+          FROM whatsapp_connections
+          WHERE phone_number_id = $1
+        `,
+        [TEST_META_PHONE_NUMBER_ID],
+      );
+      assert.equal(stored.rows.length, 1);
+      assert.equal(stored.rows[0]?.workspace_id, owner.workspace.id);
+      assert.equal(stored.rows[0]?.status, "active");
+      assert.equal(stored.rows[0]?.credential_key_version, TEST_CREDENTIAL_KEY_VERSION);
+      assert.ok(stored.rows[0]?.access_token_iv);
+      assert.ok(stored.rows[0]?.access_token_auth_tag);
+      assert.ok(stored.rows[0]?.last_verified_at);
+      assert.ok(stored.rows[0]?.webhook_subscribed_at);
+      assert.notEqual(
+        stored.rows[0]?.access_token_ciphertext,
+        TEST_META_ACCESS_TOKEN,
+      );
+      assert.equal(
+        String(stored.rows[0]?.access_token_ciphertext).includes(
+          TEST_META_ACCESS_TOKEN,
+        ),
+        false,
+        "The access token must never be stored in plaintext",
+      );
+
+      const sessions = await pool.query<{
+        consumed_at: Date | null;
+        completed_at: Date | null;
+        connection_id: string | null;
+        state_hash: string;
+        failure_code: string | null;
+      }>(
+        `
+          SELECT
+            consumed_at,
+            completed_at,
+            connection_id,
+            state_hash,
+            failure_code
+          FROM whatsapp_onboarding_sessions
+          WHERE workspace_id = $1
+        `,
+        [owner.workspace.id],
+      );
+      assert.equal(sessions.rows.length, 1);
+      assert.ok(sessions.rows[0]?.consumed_at);
+      assert.ok(sessions.rows[0]?.completed_at);
+      assert.equal(sessions.rows[0]?.connection_id, payload.connection.id);
+      assert.equal(sessions.rows[0]?.failure_code, null);
+      assert.notEqual(sessions.rows[0]?.state_hash, session.state);
+      assert.equal(
+        String(sessions.rows[0]?.state_hash).includes(session.state),
+        false,
+        "The raw onboarding state must never be stored",
+      );
+
+      const list = await requestOn(app, owner, "/api/whatsapp/connections");
+      assert.equal(list.status, 200);
+      const listed = await readJson<ConnectionsPayload>(list);
+      const serialized = JSON.stringify(listed);
+
+      for (const secret of [
+        TEST_META_ACCESS_TOKEN,
+        TEST_META_APP_SECRET,
+        TEST_META_AUTH_CODE,
+        "accessToken",
+        "ciphertext",
+        "authTag",
+      ]) {
+        assert.equal(
+          serialized.toLowerCase().includes(secret.toLowerCase()),
+          false,
+          `The connection API must not expose ${secret}`,
+        );
+      }
+
+      const exchange = app.calls.find((call) =>
+        call.path.endsWith("/oauth/access_token"),
+      );
+      assert.ok(exchange, "The authorization code must be exchanged");
+      assert.equal(exchange?.method, "GET");
+      assert.equal(exchange?.authorization, null);
+      assert.equal(exchange?.query.get("client_id"), TEST_META_APP_ID);
+      assert.equal(exchange?.query.get("code"), TEST_META_AUTH_CODE);
+
+      const debug = app.calls.find((call) =>
+        call.path.endsWith("/debug_token"),
+      );
+      assert.equal(
+        debug?.authorization,
+        `Bearer ${TEST_META_APP_ID}|${TEST_META_APP_SECRET}`,
+      );
+
+      const phoneList = app.calls.find((call) =>
+        call.path.endsWith(`/${TEST_META_WABA_ID}/phone_numbers`),
+      );
+      assert.equal(phoneList?.authorization, `Bearer ${TEST_META_ACCESS_TOKEN}`);
+
+      const subscribe = app.calls.find(
+        (call) =>
+          call.method === "POST" &&
+          call.path.endsWith(`/${TEST_META_WABA_ID}/subscribed_apps`),
+      );
+      assert.ok(subscribe, "The app must subscribe to the webhook");
+      assert.equal(subscribe?.authorization, `Bearer ${TEST_META_ACCESS_TOKEN}`);
+    } finally {
+      await stopServer(app.server);
+    }
+  });
+});
+
+test("M14B onboarding state is bound to the initiating user and workspace", async () => {
+  const owner = requireSession();
+  const other = await registerUser({
+    email: `m14b-other-${randomUUID()}@example.test`,
+    name: "M14B Other Workspace",
+  });
+
+  await withCredentialEncryption(async () => {
+    const app = await startOnboardingServer();
+
+    try {
+      const session = await createOnboardingState(app, owner);
+
+      const injected = await completeOnboarding(app, owner, session.state, {
+        extra: { workspaceId: other.workspace.id },
+      });
+      assert.equal(injected.status, 400);
+
+      const foreign = await completeOnboarding(app, other, session.state);
+      assert.equal(foreign.status, 400);
+      const foreignError = await readJson<OnboardingErrorPayload>(foreign);
+      assert.equal(foreignError.code, "invalid_state");
+
+      const response = await completeOnboarding(app, owner, session.state);
+      assert.equal(response.status, 200);
+      const payload = await readJson<OnboardingCompletePayload>(response);
+
+      const ownerRows = await pool.query<{ workspace_id: string }>(
+        "SELECT workspace_id FROM whatsapp_connections WHERE phone_number_id = $1",
+        [TEST_META_PHONE_NUMBER_ID],
+      );
+      assert.equal(ownerRows.rows.length, 1);
+      assert.equal(ownerRows.rows[0]?.workspace_id, owner.workspace.id);
+
+      const otherRows = await pool.query<{ count: number }>(
+        "SELECT count(*)::int AS count FROM whatsapp_connections WHERE workspace_id = $1",
+        [other.workspace.id],
+      );
+      assert.equal(otherRows.rows[0]?.count, 0);
+      assert.ok(payload.connection.id);
+    } finally {
+      await stopServer(app.server);
+    }
+  });
+});
+
+test("M14B onboarding rejects invalid, expired, and reused state and replays a completed callback idempotently", async () => {
+  const owner = requireSession();
+
+  await withCredentialEncryption(async () => {
+    const app = await startOnboardingServer();
+
+    try {
+      const invalid = await completeOnboarding(app, owner, "b".repeat(43));
+      assert.equal(invalid.status, 400);
+      const invalidError = await readJson<OnboardingErrorPayload>(invalid);
+      assert.equal(invalidError.code, "invalid_state");
+
+      const expiredSession = await createOnboardingState(app, owner);
+      await pool.query(
+        `
+          UPDATE whatsapp_onboarding_sessions
+          SET expires_at = now() - interval '1 minute'
+          WHERE workspace_id = $1
+            AND user_id = $2
+        `,
+        [owner.workspace.id, owner.user.id],
+      );
+      const expired = await completeOnboarding(app, owner, expiredSession.state);
+      assert.equal(expired.status, 400);
+      const expiredError = await readJson<OnboardingErrorPayload>(expired);
+      assert.equal(expiredError.code, "expired_state");
+
+      const reusedSession = await createOnboardingState(app, owner);
+      await pool.query(
+        `
+          UPDATE whatsapp_onboarding_sessions
+          SET consumed_at = now()
+          WHERE workspace_id = $1
+            AND user_id = $2
+        `,
+        [owner.workspace.id, owner.user.id],
+      );
+      const reused = await completeOnboarding(app, owner, reusedSession.state);
+      assert.equal(reused.status, 409);
+      const reusedError = await readJson<OnboardingErrorPayload>(reused);
+      assert.equal(reusedError.code, "state_reused");
+
+      const replaySession = await createOnboardingState(app, owner);
+      const first = await completeOnboarding(app, owner, replaySession.state);
+      assert.equal(first.status, 200);
+      const firstPayload = await readJson<OnboardingCompletePayload>(first);
+
+      const second = await completeOnboarding(app, owner, replaySession.state);
+      assert.equal(second.status, 200);
+      const secondPayload = await readJson<OnboardingCompletePayload>(second);
+      assert.equal(secondPayload.replayed, true);
+      assert.equal(secondPayload.connection.id, firstPayload.connection.id);
+
+      const rows = await pool.query<{ count: number }>(
+        "SELECT count(*)::int AS count FROM whatsapp_connections WHERE phone_number_id = $1",
+        [TEST_META_PHONE_NUMBER_ID],
+      );
+      assert.equal(
+        rows.rows[0]?.count,
+        1,
+        "A repeated callback must not create a second connection",
+      );
+    } finally {
+      await stopServer(app.server);
+    }
+  });
+});
+
+test("M14B onboarding rejects a failed token exchange without creating a connection", async () => {
+  const owner = requireSession();
+  const rejected = await startOnboardingServer({
+    state: { exchangeStatus: 400 },
+  });
+
+  try {
+    const session = await createOnboardingState(rejected, owner);
+    const response = await completeOnboarding(rejected, owner, session.state);
+    assert.equal(response.status, 400);
+    const payload = await readJson<OnboardingErrorPayload>(response);
+    assert.equal(payload.code, "invalid_code");
+    assert.equal(
+      payload.error.includes(TEST_META_AUTH_CODE),
+      false,
+      "The error must not echo the authorization code",
+    );
+  } finally {
+    await stopServer(rejected.server);
+  }
+
+  const outage = await startOnboardingServer({
+    state: { exchangeNetworkFail: true },
+  });
+
+  try {
+    const session = await createOnboardingState(outage, owner);
+    const response = await completeOnboarding(outage, owner, session.state);
+    assert.equal(response.status, 502);
+    const payload = await readJson<OnboardingErrorPayload>(response);
+    assert.equal(payload.code, "token_exchange_failed");
+  } finally {
+    await stopServer(outage.server);
+  }
+
+  const rows = await pool.query<{ count: number }>(
+    "SELECT count(*)::int AS count FROM whatsapp_connections WHERE phone_number_id = $1",
+    [TEST_META_PHONE_NUMBER_ID],
+  );
+  assert.equal(
+    rows.rows[0]?.count,
+    0,
+    "A failed token exchange must not create a connection",
+  );
+});
+
+test("M14B onboarding rejects an invalid token and insufficient permissions", async () => {
+  const owner = requireSession();
+  const state: FakeMetaState = {};
+  const app = await startOnboardingServer({ state });
+
+  try {
+    state.tokenValid = false;
+    const invalidTokenSession = await createOnboardingState(app, owner);
+    const invalidToken = await completeOnboarding(
+      app,
+      owner,
+      invalidTokenSession.state,
+    );
+    assert.equal(invalidToken.status, 401);
+    const invalidTokenError = await readJson<OnboardingErrorPayload>(invalidToken);
+    assert.equal(invalidTokenError.code, "invalid_token");
+
+    state.tokenValid = true;
+    state.tokenAppId = "999999999999999";
+    const foreignAppSession = await createOnboardingState(app, owner);
+    const foreignApp = await completeOnboarding(
+      app,
+      owner,
+      foreignAppSession.state,
+    );
+    assert.equal(foreignApp.status, 401);
+    const foreignAppError = await readJson<OnboardingErrorPayload>(foreignApp);
+    assert.equal(foreignAppError.code, "invalid_token");
+
+    state.tokenAppId = undefined;
+    state.scopes = ["whatsapp_business_management"];
+    const missingScopeSession = await createOnboardingState(app, owner);
+    const missingScope = await completeOnboarding(
+      app,
+      owner,
+      missingScopeSession.state,
+    );
+    assert.equal(missingScope.status, 403);
+    const missingScopeError = await readJson<OnboardingErrorPayload>(
+      missingScope,
+    );
+    assert.equal(missingScopeError.code, "missing_permissions");
+    assert.match(
+      missingScopeError.error,
+      /whatsapp_business_messaging/,
+      "The error should name the missing permission",
+    );
+  } finally {
+    await stopServer(app.server);
+  }
+
+  const rows = await pool.query<{ count: number }>(
+    "SELECT count(*)::int AS count FROM whatsapp_connections WHERE phone_number_id = $1",
+    [TEST_META_PHONE_NUMBER_ID],
+  );
+  assert.equal(
+    rows.rows[0]?.count,
+    0,
+    "A failed verification must not create a connection",
+  );
+});
+
+test("M14B onboarding rejects an ungranted Messaging account and a mismatched phone number", async () => {
+  const owner = requireSession();
+  const state: FakeMetaState = {};
+  const app = await startOnboardingServer({ state });
+
+  try {
+    state.granularTargetIds = {
+      whatsapp_business_management: ["111111111111111"],
+      whatsapp_business_messaging: ["111111111111111"],
+    };
+    const ungrantedSession = await createOnboardingState(app, owner);
+    const ungranted = await completeOnboarding(
+      app,
+      owner,
+      ungrantedSession.state,
+    );
+    assert.equal(ungranted.status, 403);
+    const ungrantedError = await readJson<OnboardingErrorPayload>(ungranted);
+    assert.equal(ungrantedError.code, "waba_not_accessible");
+
+    state.granularTargetIds = undefined;
+    state.wabaStatus = 403;
+    const inaccessibleSession = await createOnboardingState(app, owner);
+    const inaccessible = await completeOnboarding(
+      app,
+      owner,
+      inaccessibleSession.state,
+    );
+    assert.equal(inaccessible.status, 403);
+    const inaccessibleError = await readJson<OnboardingErrorPayload>(
+      inaccessible,
+    );
+    assert.equal(inaccessibleError.code, "waba_not_accessible");
+
+    state.wabaStatus = undefined;
+    state.phoneNumbers = [
+      {
+        id: "106540000000999",
+        display_phone_number: "15550789999",
+        verified_name: "Other Number",
+      },
+    ];
+    const mismatchedSession = await createOnboardingState(app, owner);
+    const mismatched = await completeOnboarding(
+      app,
+      owner,
+      mismatchedSession.state,
+    );
+    assert.equal(mismatched.status, 422);
+    const mismatchedError = await readJson<OnboardingErrorPayload>(mismatched);
+    assert.equal(mismatchedError.code, "phone_not_in_waba");
+  } finally {
+    await stopServer(app.server);
+  }
+
+  const rows = await pool.query<{ count: number }>(
+    "SELECT count(*)::int AS count FROM whatsapp_connections WHERE phone_number_id = $1",
+    [TEST_META_PHONE_NUMBER_ID],
+  );
+  assert.equal(
+    rows.rows[0]?.count,
+    0,
+    "A failed asset check must not create a connection",
+  );
+});
+
+test("M14B onboarding refuses a phone number that already belongs to another workspace", async () => {
+  const owner = requireSession();
+  const other = await registerUser({
+    email: `m14b-duplicate-${randomUUID()}@example.test`,
+    name: "M14B Duplicate Owner",
+  });
+
+  await withCredentialEncryption(async () => {
+    await registerTestConnection({
+      workspaceId: other.workspace.id,
+      phoneNumberId: TEST_META_PHONE_NUMBER_ID,
+      accessToken: "EAABc0OtherWorkspaceTokenMustStaySecret1234",
+    });
+
+    const app = await startOnboardingServer();
+
+    try {
+      const session = await createOnboardingState(app, owner);
+      const response = await completeOnboarding(app, owner, session.state);
+      assert.equal(response.status, 409);
+      const payload = await readJson<OnboardingErrorPayload>(response);
+      assert.equal(payload.code, "duplicate_phone");
+      assert.equal(
+        payload.error.includes(other.workspace.id),
+        false,
+        "The error must not disclose the owning workspace",
+      );
+    } finally {
+      await stopServer(app.server);
+    }
+
+    const rows = await pool.query<{
+      workspace_id: string;
+      count: number;
+    }>(
+      `
+        SELECT workspace_id, count(*)::int AS count
+        FROM whatsapp_connections
+        WHERE phone_number_id = $1
+        GROUP BY workspace_id
+      `,
+      [TEST_META_PHONE_NUMBER_ID],
+    );
+    assert.equal(rows.rows.length, 1);
+    assert.equal(rows.rows[0]?.workspace_id, other.workspace.id);
+    assert.equal(rows.rows[0]?.count, 1);
+  });
+});
+
+test("M14B verification persists a pending state when the webhook subscription fails and activates only after a successful retry", async () => {
+  const owner = requireSession();
+
+  await withCredentialEncryption(async () => {
+    const state: FakeMetaState = { subscribeStatus: 500 };
+    const app = await startOnboardingServer({ state });
+
+    try {
+      const session = await createOnboardingState(app, owner);
+      const response = await completeOnboarding(app, owner, session.state);
+      assert.equal(response.status, 202);
+      const payload = await readJson<OnboardingCompletePayload>(response);
+      assert.equal(payload.verification, "pending");
+      assert.equal(payload.connection.status, "pending");
+      assert.equal(payload.connection.webhookSubscribedAt, null);
+      assert.ok(payload.connection.lastError);
+      assert.match(payload.connection.lastError ?? "", /webhook/i);
+
+      const stored = await pool.query<{
+        status: string;
+        webhook_subscribed_at: Date | null;
+      }>(
+        "SELECT status, webhook_subscribed_at FROM whatsapp_connections WHERE id = $1",
+        [payload.connection.id],
+      );
+      assert.equal(stored.rows[0]?.status, "pending");
+      assert.equal(stored.rows[0]?.webhook_subscribed_at, null);
+
+      // A failed verification must not be reported as active.
+      state.subscribeStatus = undefined;
+      state.subscribedAppIds = [];
+      const stillPending = await requestOn(
+        app,
+        owner,
+        `/api/whatsapp/connections/${payload.connection.id}/verify`,
+        "POST",
+      );
+      assert.equal(stillPending.status, 200);
+      const pendingPayload = await readJson<{
+        connection: OnboardingConnectionPayload;
+        verification: string;
+      }>(stillPending);
+      assert.equal(pendingPayload.verification, "pending");
+      assert.equal(pendingPayload.connection.status, "pending");
+
+      state.subscribedAppIds = [TEST_META_APP_ID];
+      const verified = await requestOn(
+        app,
+        owner,
+        `/api/whatsapp/connections/${payload.connection.id}/verify`,
+        "POST",
+      );
+      assert.equal(verified.status, 200);
+      const verifiedPayload = await readJson<{
+        connection: OnboardingConnectionPayload;
+        verification: string;
+      }>(verified);
+      assert.equal(verifiedPayload.verification, "active");
+      assert.equal(verifiedPayload.connection.status, "active");
+      assert.equal(verifiedPayload.connection.lastError, null);
+      assert.ok(verifiedPayload.connection.webhookSubscribedAt);
+
+      state.tokenValid = false;
+      const failed = await requestOn(
+        app,
+        owner,
+        `/api/whatsapp/connections/${payload.connection.id}/verify`,
+        "POST",
+      );
+      assert.equal(failed.status, 200);
+      const failedPayload = await readJson<{
+        connection: OnboardingConnectionPayload;
+        verification: string;
+      }>(failed);
+      assert.equal(failedPayload.verification, "error");
+      assert.equal(failedPayload.connection.status, "error");
+      assert.ok(failedPayload.connection.lastError);
+
+      const finalState = await pool.query<{ status: string }>(
+        "SELECT status FROM whatsapp_connections WHERE id = $1",
+        [payload.connection.id],
+      );
+      assert.equal(finalState.rows[0]?.status, "error");
+    } finally {
+      await stopServer(app.server);
+    }
+  });
+});
+
+test("M14B onboarding and verification never write secrets to logs", async () => {
+  const owner = requireSession();
+  const logs: string[] = [];
+  const originalLog = console.log;
+  const originalError = console.error;
+  const originalWarn = console.warn;
+  const capture = (...args: unknown[]) => {
+    logs.push(
+      args
+        .map((value) =>
+          typeof value === "string" ? value : JSON.stringify(value),
+        )
+        .join(" "),
+    );
+  };
+
+  console.log = capture;
+  console.error = capture;
+  console.warn = capture;
+
+  try {
+    const app = await startOnboardingServer({
+      state: { exchangeStatus: 400 },
+    });
+
+    try {
+      const session = await createOnboardingState(app, owner);
+      const response = await completeOnboarding(app, owner, session.state);
+      assert.equal(response.status, 400);
+    } finally {
+      await stopServer(app.server);
+    }
+  } finally {
+    console.log = originalLog;
+    console.error = originalError;
+    console.warn = originalWarn;
+  }
+
+  const captured = logs.join("\n");
+
+  for (const secret of [
+    TEST_META_APP_SECRET,
+    TEST_META_ACCESS_TOKEN,
+    TEST_META_AUTH_CODE,
+  ]) {
+    assert.equal(
+      captured.includes(secret),
+      false,
+      `Logs must never contain ${secret}`,
+    );
+  }
+});
+
+test("M14B Embedded Signup configuration fails closed on partial or mismatched secrets", () => {
+  assert.equal(loadEmbeddedSignupConfig({}), null);
+
+  assert.throws(
+    () => loadEmbeddedSignupConfig({ META_APP_ID: TEST_META_APP_ID }),
+    /META_APP_SECRET/,
+    "A partial configuration must be rejected",
+  );
+
+  assert.throws(
+    () =>
+      loadEmbeddedSignupConfig({
+        META_APP_ID: TEST_META_APP_ID,
+        META_APP_SECRET: TEST_META_APP_SECRET,
+        META_EMBEDDED_SIGNUP_CONFIG_ID: TEST_META_CONFIG_ID,
+        WHATSAPP_APP_SECRET: "a-different-meta-app-secret-0123456789",
+      }),
+    /must match WHATSAPP_APP_SECRET/,
+    "Two different app secrets must be rejected",
+  );
+
+  const config = loadEmbeddedSignupConfig({
+    META_APP_ID: TEST_META_APP_ID,
+    META_APP_SECRET: TEST_META_APP_SECRET,
+    META_EMBEDDED_SIGNUP_CONFIG_ID: TEST_META_CONFIG_ID,
+    META_GRAPH_API_VERSION: TEST_META_GRAPH_VERSION,
+    WHATSAPP_APP_SECRET: TEST_META_APP_SECRET,
+  });
+
+  assert.ok(config);
+  assert.equal(config.appId, TEST_META_APP_ID);
+  assert.equal(config.configId, TEST_META_CONFIG_ID);
+  assert.equal(config.graphApiVersion, TEST_META_GRAPH_VERSION);
+  assert.equal(config.allowedOrigin, null);
+});

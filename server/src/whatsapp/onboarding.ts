@@ -632,6 +632,16 @@ export async function completeWhatsAppOnboarding(
       db.release();
     }
   } catch (error) {
+    if (!(error instanceof OnboardingError)) {
+      // Unexpected internal failures are logged without any token, code, or
+      // payload so the cause can be diagnosed without leaking credentials.
+      // Expected, user-facing rejections stay out of the logs.
+      console.error(
+        "WhatsApp onboarding failed:",
+        error instanceof Error ? `${error.name}: ${error.message}` : "unknown",
+      );
+    }
+
     const onboardingError =
       error instanceof WhatsAppConnectionConflictError
         ? new OnboardingError(
@@ -700,6 +710,8 @@ export async function verifyWhatsAppConnection(
     );
   }
 
+  const existingSummary: WhatsAppConnectionSummary = current;
+
   async function recordFailure(
     message: string,
     status: "pending" | "error",
@@ -714,7 +726,7 @@ export async function verifyWhatsAppConnection(
     });
 
     return {
-      connection: updated ?? current,
+      connection: updated ?? existingSummary,
       verification: status,
       error: message,
     };

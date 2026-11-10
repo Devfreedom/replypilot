@@ -232,6 +232,11 @@ export function isAllowedMetaOrigin(origin: string): boolean {
     return false;
   }
 
+  // Meta posts the event from the standard HTTPS origin only.
+  if (url.port !== "" && url.port !== "443") {
+    return false;
+  }
+
   const hostname = url.hostname.toLowerCase();
   return hostname === "facebook.com" || hostname.endsWith(".facebook.com");
 }

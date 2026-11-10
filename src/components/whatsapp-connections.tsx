@@ -70,6 +70,9 @@ export function WhatsAppConnections() {
   const [configLoading, setConfigLoading] = useState(false);
   const [configError, setConfigError] = useState<string | null>(null);
   const [configAttempt, setConfigAttempt] = useState(0);
+  // Only an owner may onboard, so the configuration is never surfaced to a
+  // member even if a previous owner session loaded it.
+  const effectiveConfig = canManage ? config : null;
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [reloadToken, setReloadToken] = useState(0);
@@ -126,16 +129,15 @@ export function WhatsAppConnections() {
 
   useEffect(() => {
     if (!canManage) {
-      setConfig(null);
-      setConfigError(null);
       return;
     }
 
     let active = true;
-    setConfigLoading(true);
-    setConfigError(null);
 
     async function loadConfig() {
+      setConfigLoading(true);
+      setConfigError(null);
+
       try {
         const response = await fetch("/api/whatsapp/onboarding/config", {
           cache: "no-store",
@@ -200,10 +202,10 @@ export function WhatsAppConnections() {
   async function connectWhatsApp() {
     if (
       !canManage ||
-      !config ||
+      !effectiveConfig ||
       !canStartEmbeddedSignup({
         role,
-        configured: config.configured,
+        configured: effectiveConfig.configured,
         configLoading,
         connecting,
       })
@@ -211,7 +213,11 @@ export function WhatsAppConnections() {
       return;
     }
 
-    if (!config.appId || !config.configId || !config.graphApiVersion) {
+    if (
+      !effectiveConfig.appId ||
+      !effectiveConfig.configId ||
+      !effectiveConfig.graphApiVersion
+    ) {
       setError("WhatsApp onboarding is not fully configured on this server.");
       return;
     }
@@ -246,8 +252,8 @@ export function WhatsAppConnections() {
       }
 
       const sdk = await initializeMetaSdk({
-        appId: config.appId,
-        version: config.graphApiVersion,
+        appId: effectiveConfig.appId,
+        version: effectiveConfig.graphApiVersion,
       });
 
       let authCode: string | null = null;
@@ -373,7 +379,9 @@ export function WhatsAppConnections() {
         });
       }, 120_000);
 
-      const loginResponse = await sdk.login({ configId: config.configId });
+      const loginResponse = await sdk.login({
+        configId: effectiveConfig.configId,
+      });
 
       if (!settled && !submitted) {
         if (loginResponse.status === "connected" && loginResponse.code) {
@@ -529,7 +537,7 @@ export function WhatsAppConnections() {
 
   const connectEnabled = canStartEmbeddedSignup({
     role,
-    configured: config?.configured === true,
+    configured: effectiveConfig?.configured === true,
     configLoading,
     connecting,
   });
@@ -558,7 +566,7 @@ export function WhatsAppConnections() {
         </Alert>
       ) : null}
 
-      {canManage && configLoading && !config ? (
+      {canManage && configLoading && !effectiveConfig ? (
         <p role="status" className="py-3 text-sm text-ink-soft">
           Checking WhatsApp onboarding configuration…
         </p>
@@ -577,7 +585,7 @@ export function WhatsAppConnections() {
         </Alert>
       ) : null}
 
-      {canManage && config && !config.configured ? (
+      {canManage && effectiveConfig && !effectiveConfig.configured ? (
         <Alert tone="warning" role="status">
           WhatsApp onboarding is not configured on this server. Set{" "}
           <code>META_APP_ID</code>, <code>META_APP_SECRET</code>, and{" "}
@@ -586,7 +594,7 @@ export function WhatsAppConnections() {
         </Alert>
       ) : null}
 
-      {canManage && config?.configured ? (
+      {canManage && effectiveConfig?.configured ? (
         <div className="mt-4 flex flex-wrap items-center gap-3">
           <button
             type="button"
@@ -629,7 +637,7 @@ export function WhatsAppConnections() {
       ) : connections.length === 0 ? (
         <p className="py-6 text-sm text-ink-soft">
           No WhatsApp numbers are connected to this workspace yet.
-          {canManage && config?.configured
+          {canManage && effectiveConfig?.configured
             ? " Use Connect WhatsApp to add one through Meta."
             : ""}
         </p>

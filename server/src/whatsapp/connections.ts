@@ -647,11 +647,14 @@ export async function upsertVerifiedWhatsAppConnection(
             access_token_auth_tag = $8,
             token_expires_at = $9,
             credential_key_version = $10,
-            last_verified_at = $11,
-            webhook_subscribed_at = CASE WHEN $12 THEN $11 ELSE NULL END,
+            last_verified_at = $11::timestamptz,
+            webhook_subscribed_at = CASE
+              WHEN $12::boolean THEN $11::timestamptz
+              ELSE NULL
+            END,
             last_error = $13,
             activated_at = CASE
-              WHEN $5 = 'active' THEN COALESCE(activated_at, $11)
+              WHEN $5 = 'active' THEN COALESCE(activated_at, $11::timestamptz)
               ELSE activated_at
             END,
             disconnected_at = CASE
@@ -713,9 +716,9 @@ export async function upsertVerifiedWhatsAppConnection(
       )
       VALUES (
         $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
-        CASE WHEN $6 = 'active' THEN $12 ELSE NULL END,
-        $12,
-        CASE WHEN $13 THEN $12 ELSE NULL END,
+        CASE WHEN $6 = 'active' THEN $12::timestamptz ELSE NULL END,
+        $12::timestamptz,
+        CASE WHEN $13::boolean THEN $12::timestamptz ELSE NULL END,
         $14
       )
       RETURNING ${CONNECTION_SUMMARY_COLUMNS}
@@ -769,11 +772,14 @@ export async function setWhatsAppConnectionVerificationState(
     `
       UPDATE whatsapp_connections
       SET status = $3,
-          last_verified_at = $4,
-          webhook_subscribed_at = CASE WHEN $5 THEN $4 ELSE NULL END,
+          last_verified_at = $4::timestamptz,
+          webhook_subscribed_at = CASE
+            WHEN $5::boolean THEN $4::timestamptz
+            ELSE NULL
+          END,
           last_error = $6,
           activated_at = CASE
-            WHEN $3 = 'active' THEN COALESCE(activated_at, $4)
+            WHEN $3 = 'active' THEN COALESCE(activated_at, $4::timestamptz)
             ELSE activated_at
           END,
           disconnected_at = CASE
