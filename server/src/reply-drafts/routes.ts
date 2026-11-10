@@ -8,6 +8,10 @@ import {
 } from "../auth/middleware.js";
 import { queueManualSend } from "../outbound/service.js";
 import {
+  WHATSAPP_CONNECTION_DISCONNECTED_CODE,
+  WHATSAPP_CONNECTION_DISCONNECTED_MESSAGE,
+} from "../outbound/errors.js";
+import {
   replyDraftIdSchema,
   sendReplyDraftSchema,
 } from "./schemas.js";
@@ -127,6 +131,14 @@ export function createReplyDraftsRouter({
       response.status(409).json({
         error:
           "The draft content changed after this outbound message was created. Start a new draft to send the revised reply.",
+      });
+      return;
+    }
+
+    if (result.kind === "connection-disconnected") {
+      response.status(409).json({
+        error: WHATSAPP_CONNECTION_DISCONNECTED_MESSAGE,
+        code: WHATSAPP_CONNECTION_DISCONNECTED_CODE,
       });
       return;
     }

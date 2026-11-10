@@ -8,6 +8,7 @@ import {
   resetFailedOutboundForRetry,
   resolveConversationForLead,
 } from "./repository.js";
+import { getConversationConnectionStatus } from "../whatsapp/connections.js";
 import type { OutboundMessageRecord } from "./types.js";
 
 export type QueueManualSendInput = Readonly<{
@@ -132,6 +133,19 @@ export async function queueManualSend(
       }
 
       return { kind: "conversation-not-found" };
+    }
+
+    // A disconnected connection cannot deliver. Refuse before queueing so the
+    // owner learns immediately instead of seeing a row that later fails.
+    const connectionStatus = await getConversationConnectionStatus(
+      client,
+      input.workspaceId,
+      conversation.conversationId,
+    );
+
+    if (connectionStatus === "disconnected") {
+      await client.query("ROLLBACK");
+      return { kind: "connection-disconnected" };
     }
 
     let outboundMessage = await insertQueuedOutboundMessage(client, {

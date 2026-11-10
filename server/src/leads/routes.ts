@@ -12,6 +12,10 @@ import {
 } from "../auth/middleware.js";
 import { approveReplyDraft } from "../reply-drafts/approval.js";
 import {
+  WHATSAPP_CONNECTION_DISCONNECTED_CODE,
+  WHATSAPP_CONNECTION_DISCONNECTED_MESSAGE,
+} from "../outbound/errors.js";
+import {
   createReplyDraft,
   getReplyDraftForLead,
   listReplyDraftsForLead,
@@ -418,6 +422,14 @@ export function createLeadsRouter({
         response.status(409).json({
           error:
             "The selected conversation is not an active conversation linked to this lead.",
+        });
+        return;
+      }
+
+      if (result.kind === "connection-disconnected") {
+        response.status(409).json({
+          error: WHATSAPP_CONNECTION_DISCONNECTED_MESSAGE,
+          code: WHATSAPP_CONNECTION_DISCONNECTED_CODE,
         });
         return;
       }
