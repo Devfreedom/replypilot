@@ -371,6 +371,33 @@ export async function getConversationConnectionStatus(
   return result.rows[0]?.status ?? null;
 }
 
+/**
+ * Explains why a connection cannot deliver an outbound message right now.
+ * The wording is shared by the provider and by the worker so a failed send
+ * reports the same reason regardless of which layer refused it.
+ */
+export function describeConnectionSendFailure(
+  status: WhatsAppConnectionStatus | null,
+): string {
+  if (status === null) {
+    return "conversation has no WhatsApp connection in this workspace.";
+  }
+
+  if (status === "pending") {
+    return "WhatsApp connection has not been activated.";
+  }
+
+  if (status === "disconnected") {
+    return "WhatsApp connection is disconnected.";
+  }
+
+  if (status === "error") {
+    return "WhatsApp connection needs attention; verify it again before sending.";
+  }
+
+  return "WhatsApp connection is not usable.";
+}
+
 export async function workspaceHasCredentialConnection(
   queryable: Pool | PoolClient,
   workspaceId: string,

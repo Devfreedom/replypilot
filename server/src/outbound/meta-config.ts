@@ -217,6 +217,13 @@ export function getOutboundProviderNameForWorkspace(
  * even when it is disconnected or expired. That makes the worker reject the
  * send instead of silently substituting the mock provider for a real customer
  * message.
+ *
+ * A conversation whose connection exists but is disconnected also selects the
+ * WhatsApp provider, even when that connection has no credentials. The mock
+ * provider cannot observe the connection at all, so routing a disconnected
+ * conversation to it would record a false "sent" for a number that cannot
+ * deliver. The WhatsApp provider rejects the send with the connection's own
+ * reason instead.
  */
 export async function resolveOutboundProviderName(
   queryable: Pool | PoolClient,
@@ -232,6 +239,10 @@ export async function resolveOutboundProviderName(
     );
 
     if (hint.hasCredentials) {
+      return "whatsapp";
+    }
+
+    if (hint.hasConnection && hint.status === "disconnected") {
       return "whatsapp";
     }
   } else if (await workspaceHasCredentialConnection(queryable, workspaceId)) {

@@ -26,6 +26,7 @@ export type QueueManualSendResult =
   | Readonly<{ kind: "conversation-ambiguous" }>
   | Readonly<{ kind: "conversation-not-found" }>
   | Readonly<{ kind: "conversation-mismatch" }>
+  | Readonly<{ kind: "connection-disconnected" }>
   | Readonly<{ kind: "manual-review" }>;
 
 /**

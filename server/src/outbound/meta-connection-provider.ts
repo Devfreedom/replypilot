@@ -39,6 +39,7 @@ import {
   type OutboundProviderSendResult,
 } from "./provider.js";
 import {
+  describeConnectionSendFailure,
   resolveConversationConnection,
   type ConversationConnection,
 } from "../whatsapp/connections.js";
@@ -83,19 +84,7 @@ async function resolveConversationCustomer(
 }
 
 function connectionFailureReason(connection: ConversationConnection): string {
-  if (connection.status === "pending") {
-    return "WhatsApp connection has not been activated.";
-  }
-
-  if (connection.status === "disconnected") {
-    return "WhatsApp connection is disconnected.";
-  }
-
-  if (connection.status === "error") {
-    return "WhatsApp connection needs attention; verify it again before sending.";
-  }
-
-  return "WhatsApp connection is not usable.";
+  return describeConnectionSendFailure(connection.status);
 }
 
 export type ConnectionAwareMetaProviderOptions = Readonly<{
