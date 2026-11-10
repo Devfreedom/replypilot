@@ -288,6 +288,8 @@ export async function resolveConversationConnection(
 export type ConnectionProviderHint = Readonly<{
   hasConnection: boolean;
   hasCredentials: boolean;
+  /** Status of the connection attached to the conversation, null when absent. */
+  status: WhatsAppConnectionStatus | null;
 }>;
 
 /**
@@ -295,6 +297,10 @@ export type ConnectionProviderHint = Readonly<{
  * A credential-bearing connection always selects the WhatsApp provider, even
  * when it is disconnected or expired, so the worker fails the send instead of
  * silently substituting the mock provider.
+ *
+ * A connection that is not usable for sending is reported through `status` so
+ * the caller can refuse the work rather than routing it to a provider that
+ * cannot honour the connection state.
  */
 export async function getConversationProviderHint(
   queryable: Pool | PoolClient,
@@ -303,6 +309,7 @@ export async function getConversationProviderHint(
 ): Promise<ConnectionProviderHint> {
   const result = await queryable.query<{
     has_credentials: boolean;
+    status: WhatsAppConnectionStatus;
   }>(
     `
       SELECT
@@ -311,7 +318,8 @@ export async function getConversationProviderHint(
           AND connection.access_token_iv IS NOT NULL
           AND connection.access_token_auth_tag IS NOT NULL
           AND connection.credential_key_version IS NOT NULL
-        ) AS has_credentials
+        ) AS has_credentials,
+        connection.status
       FROM whatsapp_conversations AS conversation
       JOIN whatsapp_connections AS connection
         ON connection.id = conversation.whatsapp_connection_id
@@ -326,10 +334,41 @@ export async function getConversationProviderHint(
   const row = result.rows[0];
 
   if (!row) {
-    return { hasConnection: false, hasCredentials: false };
+    return { hasConnection: false, hasCredentials: false, status: null };
   }
 
-  return { hasConnection: true, hasCredentials: row.has_credentials };
+  return {
+    hasConnection: true,
+    hasCredentials: row.has_credentials,
+    status: row.status,
+  };
+}
+
+/**
+ * Reads the status of the connection attached to a conversation. Callers use it
+ * to refuse outbound work for a connection that cannot deliver, without
+ * loading any credential material.
+ */
+export async function getConversationConnectionStatus(
+  queryable: Pool | PoolClient,
+  workspaceId: string,
+  conversationId: string,
+): Promise<WhatsAppConnectionStatus | null> {
+  const result = await queryable.query<{ status: WhatsAppConnectionStatus }>(
+    `
+      SELECT connection.status
+      FROM whatsapp_conversations AS conversation
+      JOIN whatsapp_connections AS connection
+        ON connection.id = conversation.whatsapp_connection_id
+       AND connection.workspace_id = conversation.workspace_id
+      WHERE conversation.workspace_id = $1
+        AND conversation.id = $2
+      LIMIT 1
+    `,
+    [workspaceId, conversationId],
+  );
+
+  return result.rows[0]?.status ?? null;
 }
 
 export async function workspaceHasCredentialConnection(
