@@ -2,6 +2,7 @@ import type { Pool } from "pg";
 import {
   OutboundProviderAmbiguousError,
   OutboundProviderError,
+  MOCK_OUTBOUND_PROVIDER_NAME,
   type OutboundMessageProvider,
 } from "./provider.js";
 import {
@@ -12,8 +13,13 @@ import {
   markOutboundFailed,
   markOutboundManualReview,
   markOutboundSent,
+  markOutboundSentWhileConnectionActive,
   recoverStaleSending,
 } from "./repository.js";
+import {
+  describeConnectionSendFailure,
+  getConversationConnectionStatus,
+} from "../whatsapp/connections.js";
 
 export const DEFAULT_WORKER_BATCH_SIZE = 10;
 export const DEFAULT_WORKER_RETRY_DELAY_MS = 2_000;
@@ -99,6 +105,38 @@ export async function runOutboundWorkerOnce(
       continue;
     }
 
+    const retryDelayMs = Math.min(
+      baseRetryDelayMs * 2 ** Math.max(0, row.attempts - 1),
+      MAX_RETRY_DELAY_MS,
+    );
+
+    // Independent connection check. The provider is not called at all when the
+    // conversation's connection cannot deliver, so no request reaches Meta and
+    // no simulated delivery can be recorded as sent.
+    const connectionStatus = await getConversationConnectionStatus(
+      pool,
+      row.workspace_id,
+      row.conversation_id,
+    );
+
+    if (connectionStatus !== "active") {
+      const reason = boundedFailureReason(
+        `Outbound send rejected: ${describeConnectionSendFailure(connectionStatus)}`,
+      );
+
+      const updated = await markOutboundFailed(pool, row, reason, retryDelayMs);
+
+      if (!updated) {
+        skipped += 1;
+      } else if (updated.status === "failed") {
+        failed += 1;
+      } else {
+        retried += 1;
+      }
+
+      continue;
+    }
+
     try {
       const result = await provider.send({
         conversationId: row.conversation_id,
@@ -108,16 +146,55 @@ export async function runOutboundWorkerOnce(
         workspaceId: row.workspace_id,
       });
 
-      const updated = await markOutboundSent(
-        pool,
-        row,
-        result.providerMessageId,
-      );
+      if (provider.name === MOCK_OUTBOUND_PROVIDER_NAME) {
+        // A simulated delivery cannot observe the connection, so the sent
+        // transition is guarded by the connection state itself. A disconnect
+        // that lands between the check above and this transition must not be
+        // recorded as a successful send.
+        const transition = await markOutboundSentWhileConnectionActive(
+          pool,
+          row,
+          result.providerMessageId,
+        );
 
-      if (updated) {
-        sent += 1;
+        if (transition.kind === "sent") {
+          sent += 1;
+        } else if (transition.kind === "connection-unusable") {
+          const reason = boundedFailureReason(
+            `Outbound send rejected: ${describeConnectionSendFailure(
+              transition.status,
+            )}`,
+          );
+
+          const updated = await markOutboundFailed(
+            pool,
+            row,
+            reason,
+            retryDelayMs,
+          );
+
+          if (!updated) {
+            skipped += 1;
+          } else if (updated.status === "failed") {
+            failed += 1;
+          } else {
+            retried += 1;
+          }
+        } else {
+          skipped += 1;
+        }
       } else {
-        skipped += 1;
+        const updated = await markOutboundSent(
+          pool,
+          row,
+          result.providerMessageId,
+        );
+
+        if (updated) {
+          sent += 1;
+        } else {
+          skipped += 1;
+        }
       }
     } catch (error) {
       const ambiguous =
@@ -127,11 +204,6 @@ export async function runOutboundWorkerOnce(
         error instanceof Error
           ? error.message
           : "Outbound provider returned an unknown failure.",
-      );
-
-      const retryDelayMs = Math.min(
-        baseRetryDelayMs * 2 ** Math.max(0, row.attempts - 1),
-        MAX_RETRY_DELAY_MS,
       );
 
       const updated =

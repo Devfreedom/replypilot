@@ -65,7 +65,14 @@ import {
   resolveActiveConnectionByPhoneNumberId,
 } from "../src/whatsapp/connections.js";
 import { ConnectionAwareMetaProvider } from "../src/outbound/meta-connection-provider.js";
-import { loadMetaOutboundConfig } from "../src/outbound/meta-config.js";
+import {
+  loadMetaOutboundConfig,
+  resolveOutboundProviderName,
+} from "../src/outbound/meta-config.js";
+import {
+  WHATSAPP_CONNECTION_DISCONNECTED_CODE,
+  WHATSAPP_CONNECTION_DISCONNECTED_MESSAGE,
+} from "../src/outbound/errors.js";
 import { suppressCustomer } from "../src/whatsapp/suppression.js";
 import {
   getTestDatabaseUrl,
@@ -12472,4 +12479,483 @@ test("M14B onboarding rate limits repeated onboarding requests", async () => {
   } finally {
     await stopServer(app.server);
   }
+});
+
+// ─── M14C Disconnected WhatsApp connection reliability ─────────────────────────
+//
+// A disconnected connection must never produce a queued outbound message, and
+// the worker must never record a simulated delivery as sent. The worker check
+// is independent of the provider so it also holds for providers that cannot
+// observe the connection themselves.
+
+type M14COutboundRow = {
+  id: string;
+  status: string;
+  attempts: number;
+  max_attempts: number;
+  provider: string;
+  provider_message_id: string | null;
+  failure_reason: string | null;
+};
+
+const M14C_DISCONNECTED_PHONE_NUMBER_ID = "106540000000501";
+const M14C_DISCONNECTED_SENDER_WA_ID = "16505550501";
+
+async function readOutboundRow(id: string): Promise<M14COutboundRow> {
+  const result = await pool.query<M14COutboundRow>(
+    `
+      SELECT
+        id,
+        status,
+        attempts,
+        max_attempts,
+        provider,
+        provider_message_id,
+        failure_reason
+      FROM outbound_messages
+      WHERE id = $1
+    `,
+    [id],
+  );
+
+  const row = result.rows[0];
+  assert.ok(row, "Expected an outbound message row to exist");
+  return row;
+}
+
+/**
+ * Creates a lead with a conversation whose WhatsApp connection is
+ * disconnected. The connection is disconnected through the same owner-only
+ * route the application uses, so the test exercises the real flow.
+ */
+async function createDisconnectedLeadConversation(options: {
+  withCredentials: boolean;
+}): Promise<Readonly<{ lead: Lead; conversationId: string }>> {
+  const owner = requireSession();
+
+  const register = async (): Promise<string> =>
+    registerTestConnection({
+      workspaceId: owner.workspace.id,
+      phoneNumberId: M14C_DISCONNECTED_PHONE_NUMBER_ID,
+      accessToken: options.withCredentials
+        ? "EAABc0M14CConnectionTokenThatMustStaySecret1234"
+        : "",
+    });
+
+  const connectionId = options.withCredentials
+    ? await withCredentialEncryption(register)
+    : await register();
+
+  const { lead, conversationId } = await createLeadWithConversation(
+    { name: "M14C Disconnected Lead" },
+    {
+      phoneNumberId: M14C_DISCONNECTED_PHONE_NUMBER_ID,
+      senderWaId: M14C_DISCONNECTED_SENDER_WA_ID,
+      senderPhoneNumber: M14C_DISCONNECTED_SENDER_WA_ID,
+    },
+  );
+
+  const disconnected = await jsonRequest(
+    `/api/whatsapp/connections/${connectionId}/disconnect`,
+    "POST",
+  );
+  assert.equal(disconnected.status, 200);
+
+  return { lead, conversationId };
+}
+
+test("M14C approve_and_send refuses a disconnected WhatsApp connection", async () => {
+  const { lead, conversationId } = await createDisconnectedLeadConversation({
+    withCredentials: true,
+  });
+
+  const draft = await createSavedDraftPayload(lead.id);
+
+  const response = await approveSavedDraft(lead.id, draft.id, {
+    status: "approved",
+    sendPolicy: "approve_and_send",
+    conversationId,
+  });
+
+  assert.equal(response.status, 409);
+
+  const payload = await readJson<{ error: string; code?: string }>(response);
+  assert.equal(payload.code, WHATSAPP_CONNECTION_DISCONNECTED_CODE);
+  assert.equal(payload.error, WHATSAPP_CONNECTION_DISCONNECTED_MESSAGE);
+
+  // The rejection happens before the queue insert, so nothing was queued.
+  const queued = await pool.query<{ count: number }>(
+    `
+      SELECT count(*)::int AS count
+      FROM outbound_messages
+      WHERE workspace_id = $1
+        AND reply_draft_id = $2
+    `,
+    [requireSession().workspace.id, draft.id],
+  );
+  assert.equal(queued.rows[0]?.count, 0);
+});
+
+test("M14C manual send refuses a disconnected WhatsApp connection", async () => {
+  const { lead, conversationId } = await createDisconnectedLeadConversation({
+    withCredentials: false,
+  });
+
+  const draft = await createSavedDraftPayload(lead.id);
+
+  // Approve without sending so the draft is approved but nothing is queued.
+  const approved = await approveSavedDraft(lead.id, draft.id, {
+    status: "approved",
+    sendPolicy: "approve_only",
+    conversationId,
+  });
+  assert.equal(approved.status, 200);
+
+  const response = await sendSavedDraft(draft.id);
+
+  assert.equal(response.status, 409);
+
+  const payload = await readJson<{ error: string; code?: string }>(response);
+  assert.equal(payload.code, WHATSAPP_CONNECTION_DISCONNECTED_CODE);
+  assert.equal(payload.error, WHATSAPP_CONNECTION_DISCONNECTED_MESSAGE);
+
+  const queued = await pool.query<{ count: number }>(
+    `
+      SELECT count(*)::int AS count
+      FROM outbound_messages
+      WHERE workspace_id = $1
+        AND reply_draft_id = $2
+    `,
+    [requireSession().workspace.id, draft.id],
+  );
+  assert.equal(queued.rows[0]?.count, 0);
+});
+
+test("M14C both send routes report the same disconnected-connection error", async () => {
+  const { lead, conversationId } = await createDisconnectedLeadConversation({
+    withCredentials: true,
+  });
+
+  const approveDraft = await createSavedDraftPayload(lead.id);
+  const approveResponse = await approveSavedDraft(
+    lead.id,
+    approveDraft.id,
+    {
+      status: "approved",
+      sendPolicy: "approve_and_send",
+      conversationId,
+    },
+  );
+  assert.equal(approveResponse.status, 409);
+  const approvePayload = await readJson<{ error: string; code?: string }>(
+    approveResponse,
+  );
+
+  const sendDraft = await createSavedDraftPayload(lead.id);
+  const sendApproved = await approveSavedDraft(lead.id, sendDraft.id, {
+    status: "approved",
+    sendPolicy: "approve_only",
+    conversationId,
+  });
+  assert.equal(sendApproved.status, 200);
+
+  const sendResponse = await sendSavedDraft(sendDraft.id);
+  assert.equal(sendResponse.status, 409);
+  const sendPayload = await readJson<{ error: string; code?: string }>(
+    sendResponse,
+  );
+
+  assert.equal(approvePayload.code, sendPayload.code);
+  assert.equal(approvePayload.error, sendPayload.error);
+  assert.equal(approvePayload.code, WHATSAPP_CONNECTION_DISCONNECTED_CODE);
+});
+
+test("M14C a disconnected credential-less connection never resolves to the mock provider", async () => {
+  const owner = requireSession();
+  const { conversationId } = await createDisconnectedLeadConversation({
+    withCredentials: false,
+  });
+
+  const provider = await resolveOutboundProviderName(
+    pool,
+    owner.workspace.id,
+    conversationId,
+  );
+
+  assert.equal(
+    provider,
+    "whatsapp",
+    "A disconnected connection must not fall back to the simulated provider",
+  );
+});
+
+test("M14C the worker refuses a disconnected connection without contacting the provider", async () => {
+  const { lead, conversationId } = await createDisconnectedLeadConversation({
+    withCredentials: false,
+  });
+
+  const draft = await createSavedDraftPayload(lead.id);
+
+  // Approve without sending so the draft is approved but nothing is queued.
+  const approved = await approveSavedDraft(lead.id, draft.id, {
+    status: "approved",
+    sendPolicy: "approve_only",
+    conversationId,
+  });
+  assert.equal(approved.status, 200);
+
+  const approvedDraft = await readJson<ReplyDraftPayload>(approved);
+
+  // Queue the outbound row directly so the worker faces a disconnected
+  // connection that was queued before the disconnect happened.
+  const inserted = await pool.query<{ id: string }>(
+    `
+      INSERT INTO outbound_messages (
+        workspace_id,
+        conversation_id,
+        reply_draft_id,
+        provider,
+        content,
+        status,
+        idempotency_key,
+        max_attempts
+      )
+      VALUES ($1, $2, $3, 'mock', $4, 'queued', $5, 3)
+      RETURNING id
+    `,
+    [
+      requireSession().workspace.id,
+      conversationId,
+      draft.id,
+      approvedDraft.draft.draftReply,
+      `m14c-queued-${randomUUID()}`,
+    ],
+  );
+  const outboundId = inserted.rows[0]?.id;
+  assert.ok(outboundId);
+
+  let providerCalls = 0;
+  const provider: OutboundMessageProvider = {
+    name: "mock",
+    idempotency: "guaranteed",
+    async send() {
+      providerCalls += 1;
+      return {
+        providerMessageId: "should-not-be-used",
+        status: "sent",
+      };
+    },
+  };
+
+  const first = await runOutboundWorkerOnce(pool, provider, {
+    batchSize: 10,
+    baseRetryDelayMs: 0,
+    staleAfterMs: 60_000,
+  });
+
+  assert.equal(first.claimed, 1);
+  assert.equal(first.sent, 0);
+  assert.equal(
+    providerCalls,
+    0,
+    "A disconnected connection must not reach the provider at all",
+  );
+
+  const row = await readOutboundRow(outboundId);
+  assert.notEqual(row.status, "sent");
+  assert.equal(row.provider_message_id, null);
+  assert.match(row.failure_reason ?? "", /disconnected/i);
+
+  // The failure is bounded: the row retries a fixed number of times and then
+  // fails terminally instead of being marked as sent.
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    await runOutboundWorkerOnce(pool, provider, {
+      batchSize: 10,
+      baseRetryDelayMs: 0,
+      staleAfterMs: 60_000,
+    });
+  }
+
+  const finalRow = await readOutboundRow(outboundId);
+  assert.equal(finalRow.status, "failed");
+  assert.equal(
+    finalRow.attempts,
+    finalRow.max_attempts,
+    "Retries must stop at the configured maximum",
+  );
+  assert.equal(finalRow.provider_message_id, null);
+  assert.match(finalRow.failure_reason ?? "", /disconnected/i);
+  assert.equal(
+    providerCalls,
+    0,
+    "A disconnected connection must never reach the provider",
+  );
+});
+
+test("M14C the worker makes no Meta HTTP request for a disconnected connection", async () => {
+  const { lead, conversationId } = await createDisconnectedLeadConversation({
+    withCredentials: true,
+  });
+
+  const draft = await createSavedDraftPayload(lead.id);
+
+  const approved = await approveSavedDraft(lead.id, draft.id, {
+    status: "approved",
+    sendPolicy: "approve_only",
+    conversationId,
+  });
+  assert.equal(approved.status, 200);
+
+  const approvedDraft = await readJson<ReplyDraftPayload>(approved);
+
+  const inserted = await pool.query<{ id: string }>(
+    `
+      INSERT INTO outbound_messages (
+        workspace_id,
+        conversation_id,
+        reply_draft_id,
+        provider,
+        content,
+        status,
+        idempotency_key,
+        max_attempts
+      )
+      VALUES ($1, $2, $3, 'whatsapp', $4, 'queued', $5, 3)
+      RETURNING id
+    `,
+    [
+      requireSession().workspace.id,
+      conversationId,
+      draft.id,
+      approvedDraft.draft.draftReply,
+      `m14c-queued-${randomUUID()}`,
+    ],
+  );
+  const outboundId = inserted.rows[0]?.id;
+  assert.ok(outboundId);
+
+  let fetchCalls = 0;
+  const provider = new ConnectionAwareMetaProvider(pool, {
+    environment: process.env,
+    fetchImplementation: async () => {
+      fetchCalls += 1;
+      return new Response(
+        JSON.stringify({ messages: [{ id: "wamid.should-not-happen" }] }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    },
+  });
+
+  const result = await runOutboundWorkerOnce(pool, provider, {
+    batchSize: 10,
+    baseRetryDelayMs: 0,
+    staleAfterMs: 60_000,
+  });
+
+  assert.equal(result.claimed, 1);
+  assert.equal(result.sent, 0);
+  assert.equal(
+    fetchCalls,
+    0,
+    "A disconnected connection must not reach the Meta API",
+  );
+
+  const row = await readOutboundRow(outboundId);
+  assert.notEqual(row.status, "sent");
+  assert.equal(row.provider_message_id, null);
+});
+
+test("M14C a disconnect that lands mid-send is not recorded as a successful send", async () => {
+  const owner = requireSession();
+
+  const connectionId = await registerTestConnection({
+    workspaceId: owner.workspace.id,
+    phoneNumberId: M14C_DISCONNECTED_PHONE_NUMBER_ID,
+    accessToken: "",
+  });
+
+  const { lead, conversationId } = await createLeadWithConversation(
+    { name: "M14C Race Lead" },
+    {
+      phoneNumberId: M14C_DISCONNECTED_PHONE_NUMBER_ID,
+      senderWaId: M14C_DISCONNECTED_SENDER_WA_ID,
+      senderPhoneNumber: M14C_DISCONNECTED_SENDER_WA_ID,
+    },
+  );
+
+  const draft = await createSavedDraftPayload(lead.id);
+  const approved = await approveSavedDraft(lead.id, draft.id, {
+    status: "approved",
+    sendPolicy: "approve_only",
+    conversationId,
+  });
+  assert.equal(approved.status, 200);
+  const approvedDraft = await readJson<ReplyDraftPayload>(approved);
+
+  const inserted = await pool.query<{ id: string }>(
+    `
+      INSERT INTO outbound_messages (
+        workspace_id,
+        conversation_id,
+        reply_draft_id,
+        provider,
+        content,
+        status,
+        idempotency_key,
+        max_attempts
+      )
+      VALUES ($1, $2, $3, 'mock', $4, 'queued', $5, 3)
+      RETURNING id
+    `,
+    [
+      owner.workspace.id,
+      conversationId,
+      draft.id,
+      approvedDraft.draft.draftReply,
+      `m14c-race-${randomUUID()}`,
+    ],
+  );
+  const outboundId = inserted.rows[0]?.id;
+  assert.ok(outboundId);
+
+  // The provider call disconnects the connection. This is the race the
+  // worker's connection check alone cannot see: the check already passed and
+  // the simulated delivery already happened. The sent transition itself must
+  // still refuse to record a success for a connection that is now gone.
+  const provider: OutboundMessageProvider = {
+    name: "mock",
+    idempotency: "guaranteed",
+    async send() {
+      await pool.query(
+        `
+          UPDATE whatsapp_connections
+          SET status = 'disconnected', disconnected_at = now(), updated_at = now()
+          WHERE id = $1
+        `,
+        [connectionId],
+      );
+
+      return {
+        providerMessageId: "wamid.simulated-race",
+        status: "sent",
+      };
+    },
+  };
+
+  const result = await runOutboundWorkerOnce(pool, provider, {
+    batchSize: 10,
+    baseRetryDelayMs: 0,
+    staleAfterMs: 60_000,
+  });
+
+  assert.equal(result.claimed, 1);
+  assert.equal(result.sent, 0);
+
+  const row = await readOutboundRow(outboundId);
+  assert.notEqual(
+    row.status,
+    "sent",
+    "A send that raced with a disconnect must not be recorded as sent",
+  );
+  assert.equal(row.provider_message_id, null);
 });

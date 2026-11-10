@@ -11,6 +11,7 @@ import type {
   OutboundMessageRow,
 } from "./types.js";
 import type { DeliveryStatusEvent } from "../whatsapp/types.js";
+import type { WhatsAppConnectionStatus } from "../whatsapp/connections.js";
 
 const OUTBOUND_MESSAGE_COLUMNS = `
   id,
@@ -588,6 +589,94 @@ export async function markOutboundSent(
 
   const updated = result.rows[0];
   return updated ? mapOutboundMessageRow(updated) : null;
+}
+
+/**
+ * Marks a message as sent only while its conversation's WhatsApp connection
+ * is still active.
+ *
+ * This closes the window between the worker's connection check and the
+ * sent-transition. A provider that simulates delivery (the mock provider)
+ * cannot observe the connection, so without this guard a connection that was
+ * disconnected in that window would still be recorded as sent. The connection
+ * row is locked for the transition, so a concurrent disconnect is ordered
+ * against it instead of racing past it.
+ *
+ * Providers that really deliver must not use this function: their delivery
+ * already happened and has to be recorded as sent.
+ */
+export async function markOutboundSentWhileConnectionActive(
+  pool: Pool,
+  row: OutboundMessageRow,
+  providerMessageId: string,
+): Promise<
+  | Readonly<{ kind: "sent"; message: OutboundMessageRecord }>
+  | Readonly<{
+      kind: "connection-unusable";
+      status: WhatsAppConnectionStatus | null;
+    }>
+  | Readonly<{ kind: "not-updated" }>
+> {
+  const client = await pool.connect();
+
+  try {
+    await client.query("BEGIN");
+
+    const connection = await client.query<{ status: WhatsAppConnectionStatus }>(
+      `
+        SELECT conn.status
+        FROM whatsapp_conversations AS conversation
+        JOIN whatsapp_connections AS conn
+          ON conn.id = conversation.whatsapp_connection_id
+         AND conn.workspace_id = conversation.workspace_id
+        WHERE conversation.workspace_id = $1
+          AND conversation.id = $2
+        FOR UPDATE OF conn
+      `,
+      [row.workspace_id, row.conversation_id],
+    );
+
+    const status = connection.rows[0]?.status ?? null;
+
+    if (status !== "active") {
+      await client.query("ROLLBACK");
+      return { kind: "connection-unusable", status };
+    }
+
+    const result = await client.query<OutboundMessageRow>(
+      `
+        UPDATE outbound_messages
+        SET status = 'sent',
+            provider_message_id = $3,
+            sent_at = now(),
+            failure_reason = NULL,
+            next_attempt_at = NULL,
+            updated_at = now()
+        WHERE id = $1
+          AND status = 'sending'
+          AND attempts = $2
+        RETURNING ${OUTBOUND_MESSAGE_COLUMNS}
+      `,
+      [row.id, row.attempts, providerMessageId],
+    );
+
+    await client.query("COMMIT");
+
+    const updated = result.rows[0];
+
+    return updated
+      ? { kind: "sent", message: mapOutboundMessageRow(updated) }
+      : { kind: "not-updated" };
+  } catch (error) {
+    try {
+      await client.query("ROLLBACK");
+    } catch {
+      // Preserve the original failure.
+    }
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 export async function markOutboundFailed(
