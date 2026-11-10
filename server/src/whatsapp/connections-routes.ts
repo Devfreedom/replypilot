@@ -102,40 +102,36 @@ export function createWhatsAppConnectionsRouter({
   /**
    * Rejects onboarding actions that do not come from the configured
    * application origin. The check is server-side and fail-closed; the browser
-   * never chooses its own origin.
+   * never chooses its own origin. Returns the configuration when the request
+   * may proceed.
    */
   function requireOnboardingOrigin(
     request: Request,
     response: Response,
-  ): boolean {
-    if (!embeddedSignup) {
+  ): EmbeddedSignupConfig | null {
+    const config = embeddedSignup;
+
+    if (!config) {
       response.status(503).json({
         error: "WhatsApp onboarding is not configured.",
         code: "not_configured",
       });
-      return false;
+      return null;
     }
 
-    if (
-      !isOnboardingOriginAllowed(
-        embeddedSignup.originPolicy,
-        request.get("origin"),
-      )
-    ) {
+    if (!isOnboardingOriginAllowed(config.originPolicy, request.get("origin"))) {
       response.status(403).json({
-        error: describeOnboardingOriginRejection(embeddedSignup.originPolicy),
+        error: describeOnboardingOriginRejection(config.originPolicy),
         code: "origin_not_allowed",
       });
-      return false;
+      return null;
     }
 
-    return true;
+    return config;
   }
 
-  function metaClient() {
-    return embeddedSignup
-      ? createMetaGraphClient(embeddedSignup, metaFetch)
-      : null;
+  function metaClient(config: EmbeddedSignupConfig) {
+    return createMetaGraphClient(config, metaFetch);
   }
 
   router.get("/connections", requireMember, async (_request, response) => {
@@ -216,7 +212,9 @@ export function createWhatsAppConnectionsRouter({
         return;
       }
 
-      if (!requireOnboardingOrigin(request, response)) {
+      const signupConfig = requireOnboardingOrigin(request, response);
+
+      if (!signupConfig) {
         return;
       }
 
@@ -225,10 +223,10 @@ export function createWhatsAppConnectionsRouter({
       try {
         const result = await verifyWhatsAppConnection({
           pool,
-          config: embeddedSignup,
+          config: signupConfig,
           workspaceId: workspace.id,
           connectionId: connectionId.data,
-          metaClient: metaClient() ?? undefined,
+          metaClient: metaClient(signupConfig),
         });
 
         response.status(200).json(result);
@@ -258,7 +256,9 @@ export function createWhatsAppConnectionsRouter({
     requireOwner,
     rateLimiter.middleware,
     async (request, response) => {
-      if (!requireOnboardingOrigin(request, response)) {
+      const signupConfig = requireOnboardingOrigin(request, response);
+
+      if (!signupConfig) {
         return;
       }
 
@@ -287,7 +287,9 @@ export function createWhatsAppConnectionsRouter({
         return;
       }
 
-      if (!requireOnboardingOrigin(request, response)) {
+      const signupConfig = requireOnboardingOrigin(request, response);
+
+      if (!signupConfig) {
         return;
       }
 
@@ -296,14 +298,14 @@ export function createWhatsAppConnectionsRouter({
       try {
         const result = await completeWhatsAppOnboarding({
           pool,
-          config: embeddedSignup,
+          config: signupConfig,
           workspaceId: workspace.id,
           userId: user.id,
           state: body.data.state,
           code: body.data.code,
           wabaId: body.data.wabaId,
           phoneNumberId: body.data.phoneNumberId,
-          metaClient: metaClient() ?? undefined,
+          metaClient: metaClient(signupConfig),
         });
 
         response

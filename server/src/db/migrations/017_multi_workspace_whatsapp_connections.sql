@@ -74,34 +74,23 @@ CREATE INDEX whatsapp_connections_status_idx
 -- 2. Global phone-number ownership ------------------------------------------
 --
 -- One Meta phone-number ID may resolve to at most one ReplyPilot workspace.
--- Existing duplicate data would make inbound routing ambiguous, so fail the
--- whole transaction instead of deleting or reassigning a connection. The
--- operator must resolve the conflict manually.
-DO $$
-DECLARE
-  duplicate_count INTEGER;
-BEGIN
-  SELECT count(*)::int
-  INTO duplicate_count
-  FROM (
-    SELECT phone_number_id
-    FROM whatsapp_connections
-    GROUP BY phone_number_id
-    HAVING count(*) > 1
-  ) AS duplicates;
-
-  IF duplicate_count > 0 THEN
-    RAISE EXCEPTION
-      'Cannot add global WhatsApp phone-number uniqueness: % phone-number ID(s) are connected to more than one workspace. Resolve the duplicate connections manually before applying this migration.',
-      duplicate_count;
-  END IF;
-END $$;
-
-CREATE UNIQUE INDEX whatsapp_connections_phone_number_id_uidx
-  ON whatsapp_connections (phone_number_id);
+--
+-- The index that enforces this is created by migration
+-- 019_enforce_global_whatsapp_phone_number_ownership.sql, not here. Before
+-- this milestone, the webhook created one connection row per (workspace,
+-- phone number) pair, so an existing database can legitimately contain the
+-- same Meta phone-number ID in more than one workspace. That data is not
+-- wrong enough to delete, and its conversations must be preserved, so this
+-- migration only adds the schema and leaves the ownership decision to an
+-- explicit, operator-reviewed remediation step:
+--
+--   server/src/db/remediation/demote_duplicate_whatsapp_connections.sql
+--
+-- The remediation demotes the losing rows to 'disconnected' instead of
+-- deleting them, so every conversation and message stays intact and the
+-- remaining non-disconnected row per phone number keeps the number.
 
 -- Rollback (manual; this migration runner has no down migrations):
---   DROP INDEX IF EXISTS whatsapp_connections_phone_number_id_uidx;
 --   DROP INDEX IF EXISTS whatsapp_connections_status_idx;
 --   ALTER TABLE whatsapp_connections
 --     DROP CONSTRAINT IF EXISTS whatsapp_connections_credentials_complete_check,

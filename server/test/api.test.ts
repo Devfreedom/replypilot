@@ -57,6 +57,7 @@ import {
   loadEmbeddedSignupConfig,
   type EmbeddedSignupConfig,
 } from "../src/whatsapp/embedded-signup-config.js";
+import type { OnboardingRateLimitConfig } from "../src/whatsapp/onboarding-rate-limit.js";
 import { normalizeWhatsAppPhoneE164 } from "../src/whatsapp/phone.js";
 import { persistInboundMessages } from "../src/whatsapp/repository.js";
 import {
@@ -251,6 +252,7 @@ async function startServer(
   whatsapp: WhatsAppIntegrationConfig | null = null,
   embeddedSignup: EmbeddedSignupConfig | null = null,
   metaFetch?: typeof fetch,
+  onboardingRateLimit?: OnboardingRateLimitConfig | null,
 ): Promise<{
   server: Server;
   baseUrl: string;
@@ -262,6 +264,7 @@ async function startServer(
     whatsapp,
     embeddedSignup,
     metaFetch,
+    onboardingRateLimit,
     auth: {
       secret: TEST_AUTH_SECRET,
       baseURL: authBaseUrl,
@@ -11370,6 +11373,8 @@ function createFakeMetaFetch(state: FakeMetaState = {}): {
   return { calls, fetchImplementation };
 }
 
+const TEST_ONBOARDING_ALLOWED_ORIGIN = "http://127.0.0.1:3000";
+
 function testEmbeddedSignupConfig(
   overrides: Partial<EmbeddedSignupConfig> = {},
 ): EmbeddedSignupConfig {
@@ -11378,7 +11383,15 @@ function testEmbeddedSignupConfig(
     appSecret: TEST_META_APP_SECRET,
     configId: TEST_META_CONFIG_ID,
     graphApiVersion: TEST_META_GRAPH_VERSION,
-    allowedOrigin: "https://app.example.test",
+    allowedOrigin: TEST_ONBOARDING_ALLOWED_ORIGIN,
+    originPolicy: {
+      allowedOrigin: TEST_ONBOARDING_ALLOWED_ORIGIN,
+      requireExplicitOrigin: false,
+      developmentFallbackOrigins: [
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+      ],
+    },
     ...overrides,
   };
 }
@@ -11387,6 +11400,7 @@ async function startOnboardingServer(
   options: Readonly<{
     state?: FakeMetaState;
     config?: EmbeddedSignupConfig | null;
+    rateLimit?: OnboardingRateLimitConfig | null;
   }> = {},
 ): Promise<{
   server: Server;
@@ -11403,6 +11417,7 @@ async function startOnboardingServer(
     null,
     options.config === undefined ? testEmbeddedSignupConfig() : options.config,
     fake.fetchImplementation,
+    options.rateLimit,
   );
 
   return { ...started, state, calls: fake.calls };
@@ -11414,11 +11429,18 @@ function requestOn(
   path: string,
   method = "GET",
   body?: unknown,
+  options: Readonly<{ origin?: string | null }> = {},
 ): Promise<Response> {
   const headers = new Headers({
     cookie: session.cookie,
     "x-forwarded-for": TEST_CLIENT_IP,
   });
+  const origin =
+    options.origin === undefined ? TEST_ONBOARDING_ALLOWED_ORIGIN : options.origin;
+
+  if (origin !== null) {
+    headers.set("origin", origin);
+  }
 
   if (body !== undefined) {
     headers.set("content-type", "application/json");
@@ -12271,4 +12293,183 @@ test("M14B Embedded Signup configuration fails closed on partial or mismatched s
   assert.equal(config.configId, TEST_META_CONFIG_ID);
   assert.equal(config.graphApiVersion, TEST_META_GRAPH_VERSION);
   assert.equal(config.allowedOrigin, null);
+});
+
+test("M14B onboarding only accepts requests from the configured application origin", async () => {
+  const owner = requireSession();
+
+  await withCredentialEncryption(async () => {
+    const app = await startOnboardingServer();
+
+    try {
+      // The configured origin is accepted.
+      const allowed = await requestOn(
+        app,
+        owner,
+        "/api/whatsapp/onboarding/sessions",
+        "POST",
+        {},
+      );
+      assert.equal(allowed.status, 201);
+      const session = await readJson<{ state: string }>(allowed);
+
+      // A different origin is rejected.
+      const rejected = await requestOn(
+        app,
+        owner,
+        "/api/whatsapp/onboarding/sessions",
+        "POST",
+        {},
+        { origin: "https://attacker.example" },
+      );
+      assert.equal(rejected.status, 403);
+      const rejectedPayload = await readJson<OnboardingErrorPayload>(rejected);
+      assert.equal(rejectedPayload.code, "origin_not_allowed");
+
+      // A missing Origin header is rejected.
+      const missing = await requestOn(
+        app,
+        owner,
+        "/api/whatsapp/onboarding/sessions",
+        "POST",
+        {},
+        { origin: null },
+      );
+      assert.equal(missing.status, 403);
+      const missingPayload = await readJson<OnboardingErrorPayload>(missing);
+      assert.equal(missingPayload.code, "origin_not_allowed");
+
+      // The same check protects completion, and a rejected request must not
+      // consume the onboarding session.
+      const rejectedComplete = await requestOn(
+        app,
+        owner,
+        "/api/whatsapp/onboarding/complete",
+        "POST",
+        {
+          state: session.state,
+          code: TEST_META_AUTH_CODE,
+          wabaId: TEST_META_WABA_ID,
+          phoneNumberId: TEST_META_PHONE_NUMBER_ID,
+        },
+        { origin: "https://attacker.example" },
+      );
+      assert.equal(rejectedComplete.status, 403);
+
+      const completed = await completeOnboarding(app, owner, session.state);
+      assert.equal(completed.status, 200);
+      const payload = await readJson<OnboardingCompletePayload>(completed);
+
+      // Verification is protected as well.
+      const rejectedVerify = await requestOn(
+        app,
+        owner,
+        `/api/whatsapp/connections/${payload.connection.id}/verify`,
+        "POST",
+        {},
+        { origin: "https://attacker.example" },
+      );
+      assert.equal(rejectedVerify.status, 403);
+
+      const allowedVerify = await requestOn(
+        app,
+        owner,
+        `/api/whatsapp/connections/${payload.connection.id}/verify`,
+        "POST",
+        {},
+      );
+      assert.equal(allowedVerify.status, 200);
+    } finally {
+      await stopServer(app.server);
+    }
+  });
+});
+
+test("M14B onboarding fails closed when no application origin is configured", async () => {
+  const owner = requireSession();
+  const app = await startOnboardingServer({
+    config: testEmbeddedSignupConfig({
+      allowedOrigin: null,
+      originPolicy: {
+        allowedOrigin: null,
+        requireExplicitOrigin: true,
+        developmentFallbackOrigins: [
+          "http://localhost:3000",
+          "http://127.0.0.1:3000",
+        ],
+      },
+    }),
+  });
+
+  try {
+    const response = await requestOn(
+      app,
+      owner,
+      "/api/whatsapp/onboarding/sessions",
+      "POST",
+      {},
+    );
+    assert.equal(response.status, 403);
+    const payload = await readJson<OnboardingErrorPayload>(response);
+    assert.equal(payload.code, "origin_not_allowed");
+    assert.match(payload.error, /META_ONBOARDING_ALLOWED_ORIGIN/);
+  } finally {
+    await stopServer(app.server);
+  }
+});
+
+test("M14B onboarding rate limits repeated onboarding requests", async () => {
+  const owner = requireSession();
+  const app = await startOnboardingServer({
+    rateLimit: { windowMs: 60_000, max: 2 },
+  });
+
+  try {
+    const first = await requestOn(
+      app,
+      owner,
+      "/api/whatsapp/onboarding/sessions",
+      "POST",
+      {},
+    );
+    assert.equal(first.status, 201);
+
+    const second = await requestOn(
+      app,
+      owner,
+      "/api/whatsapp/onboarding/sessions",
+      "POST",
+      {},
+    );
+    assert.equal(second.status, 201);
+
+    const limited = await requestOn(
+      app,
+      owner,
+      "/api/whatsapp/onboarding/sessions",
+      "POST",
+      {},
+    );
+    assert.equal(limited.status, 429);
+    const limitedPayload = await readJson<OnboardingErrorPayload>(limited);
+    assert.equal(limitedPayload.code, "rate_limited");
+    assert.ok(limited.headers.get("retry-after"));
+
+    // The same budget covers completion and verification.
+    const limitedComplete = await requestOn(
+      app,
+      owner,
+      "/api/whatsapp/onboarding/complete",
+      "POST",
+      {
+        state: "a".repeat(43),
+        code: TEST_META_AUTH_CODE,
+        wabaId: TEST_META_WABA_ID,
+        phoneNumberId: TEST_META_PHONE_NUMBER_ID,
+      },
+    );
+    assert.equal(limitedComplete.status, 429);
+  } finally {
+    await stopServer(app.server);
+  }
 });
