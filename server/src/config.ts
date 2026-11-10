@@ -5,6 +5,10 @@ import {
   loadEmbeddedSignupConfig,
   type EmbeddedSignupConfig,
 } from "./whatsapp/embedded-signup-config.js";
+import {
+  loadOnboardingRateLimitConfig,
+  type OnboardingRateLimitConfig,
+} from "./whatsapp/onboarding-rate-limit.js";
 import type { WhatsAppIntegrationConfig } from "./whatsapp/types.js";
 
 function isPostgresConnectionString(value: string): boolean {
@@ -83,6 +87,7 @@ export type ServerConfig = Readonly<{
   trustedOrigins: string[];
   whatsapp: WhatsAppIntegrationConfig | null;
   embeddedSignup: EmbeddedSignupConfig | null;
+  onboardingRateLimit: OnboardingRateLimitConfig;
 }>;
 
 function parseTrustedOrigins(
@@ -110,6 +115,7 @@ export function loadConfig(
 ): ServerConfig {
   loadMetaOutboundConfig(environment);
   const embeddedSignup = loadEmbeddedSignupConfig(environment);
+  const onboardingRateLimit = loadOnboardingRateLimitConfig(environment);
 
   const result = environmentSchema.safeParse(environment);
 
@@ -150,5 +156,6 @@ export function loadConfig(
     trustedOrigins: [...new Set(trustedOrigins)],
     whatsapp: loadWhatsAppConfig(environment),
     embeddedSignup,
+    onboardingRateLimit,
   };
 }

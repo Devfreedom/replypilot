@@ -215,9 +215,26 @@ export class WhatsAppWorkspaceNotFoundError extends Error {
 }
 
 /**
+ * Raised when a Meta phone-number ID is already owned by another workspace.
+ * The event is acknowledged and ignored instead of being stored, because a
+ * number may resolve to only one workspace.
+ */
+export class WhatsAppPhoneNumberOwnedByAnotherWorkspaceError extends Error {
+  constructor() {
+    super("This WhatsApp phone number is connected to another workspace.");
+    this.name = "WhatsAppPhoneNumberOwnedByAnotherWorkspaceError";
+  }
+}
+
+/**
  * Resolves the provider phone-number ID to a connection row for this
  * workspace, creating it on first use. The unique key makes concurrent webhook
  * deliveries converge on one connection.
+ *
+ * The insert uses an unqualified `ON CONFLICT DO NOTHING` so it also respects
+ * the global phone-number ownership index. When the number already belongs to
+ * another workspace, no row is created and the event is rejected rather than
+ * duplicated across tenants.
  */
 async function ensureWhatsAppConnection(
   client: PoolClient,
@@ -233,8 +250,7 @@ async function ensureWhatsAppConnection(
         activated_at
       )
       VALUES ($1, $2, 'active', now())
-      ON CONFLICT (workspace_id, phone_number_id)
-      DO NOTHING
+      ON CONFLICT DO NOTHING
       RETURNING id
     `,
     [workspaceId, phoneNumberId],
@@ -257,7 +273,7 @@ async function ensureWhatsAppConnection(
   const row = existing.rows[0];
 
   if (!row) {
-    throw new Error("WhatsApp connection insert did not return a row.");
+    throw new WhatsAppPhoneNumberOwnedByAnotherWorkspaceError();
   }
 
   return row.id;

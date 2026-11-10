@@ -7,6 +7,7 @@ import {
 } from "./parser.js";
 import {
   persistInboundMessages,
+  WhatsAppPhoneNumberOwnedByAnotherWorkspaceError,
   WhatsAppWorkspaceNotFoundError,
 } from "./repository.js";
 import { resolveActiveConnectionByPhoneNumberId } from "./connections.js";
@@ -215,13 +216,26 @@ export function createWhatsAppWebhookRouter({
         let deliveryIgnored = 0;
 
         for (const [workspaceId, group] of inboundGroups) {
-          const inboundResult = await persistInboundMessages(
-            pool,
-            workspaceId,
-            group,
-          );
-          stored += inboundResult.stored;
-          duplicates += inboundResult.duplicates;
+          try {
+            const inboundResult = await persistInboundMessages(
+              pool,
+              workspaceId,
+              group,
+            );
+            stored += inboundResult.stored;
+            duplicates += inboundResult.duplicates;
+          } catch (error) {
+            if (
+              error instanceof WhatsAppPhoneNumberOwnedByAnotherWorkspaceError
+            ) {
+              // The number belongs to another workspace, so the event is
+              // acknowledged and ignored instead of being stored twice.
+              ignoredMessages += group.length;
+              continue;
+            }
+
+            throw error;
+          }
         }
 
         for (const [workspaceId, group] of deliveryGroups) {

@@ -16,6 +16,7 @@ function start(): void {
     },
     whatsapp: config.whatsapp,
     embeddedSignup: config.embeddedSignup,
+    onboardingRateLimit: config.onboardingRateLimit,
   });
 
   if (config.whatsapp) {
