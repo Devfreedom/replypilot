@@ -21,6 +21,7 @@ import { createWhatsAppConnectionsRouter } from "./whatsapp/connections-routes.j
 import type { EmbeddedSignupConfig } from "./whatsapp/embedded-signup-config.js";
 import { createWhatsAppInboxRouter } from "./whatsapp/inbox-routes.js";
 import { createWhatsAppOperationsRouter } from "./whatsapp/operations-routes.js";
+import type { OnboardingRateLimitConfig } from "./whatsapp/onboarding-rate-limit.js";
 import type { WhatsAppIntegrationConfig } from "./whatsapp/types.js";
 import { createWhatsAppWebhookRouter } from "./whatsapp/webhook-routes.js";
 import { createWorkspaceRouter } from "./workspaces/routes.js";
@@ -41,6 +42,7 @@ export function createApp({
   whatsapp = null,
   embeddedSignup = null,
   metaFetch,
+  onboardingRateLimit,
 }: {
   pool: Pool;
   auth: AppAuthOptions;
@@ -48,6 +50,7 @@ export function createApp({
   whatsapp?: WhatsAppIntegrationConfig | null;
   embeddedSignup?: EmbeddedSignupConfig | null;
   metaFetch?: typeof fetch;
+  onboardingRateLimit?: OnboardingRateLimitConfig | null;
 }): Express {
   const app = express();
   const auth = createAuth({
@@ -105,6 +108,7 @@ export function createApp({
       auth,
       embeddedSignup,
       metaFetch,
+      onboardingRateLimit,
     }),
   );
   app.use(

@@ -14,6 +14,11 @@
 
 import { z } from "zod";
 import { loadGraphApiVersion } from "../outbound/meta-config.js";
+import {
+  normalizeOrigin,
+  resolveOnboardingOriginPolicy,
+  type OnboardingOriginPolicy,
+} from "./onboarding-origin.js";
 
 export const EMBEDDED_SIGNUP_REQUIRED_ENV_KEYS = [
   "META_APP_ID",
@@ -38,6 +43,8 @@ export type EmbeddedSignupConfig = Readonly<{
   graphApiVersion: string;
   /** Optional public application origin allowed to run onboarding. */
   allowedOrigin: string | null;
+  /** Server-side origin policy enforced on state-changing onboarding routes. */
+  originPolicy: OnboardingOriginPolicy;
 }>;
 
 export type EmbeddedSignupPublicConfig = Readonly<{
@@ -60,18 +67,8 @@ const appSecretSchema = z
   .max(256, "must be 256 characters or fewer");
 
 function isValidOrigin(value: string): boolean {
-  try {
-    const url = new URL(value);
-    return (
-      (url.protocol === "https:" || url.protocol === "http:") &&
-      url.hostname.length > 0 &&
-      url.pathname === "/" &&
-      !url.search &&
-      !url.hash
-    );
-  } catch {
-    return false;
-  }
+  const normalized = normalizeOrigin(value);
+  return normalized !== null;
 }
 
 /**
@@ -171,6 +168,7 @@ export function loadEmbeddedSignupConfig(
     configId: configId.success ? configId.data : "",
     graphApiVersion: loadGraphApiVersion(environment),
     allowedOrigin: allowedOriginRaw,
+    originPolicy: resolveOnboardingOriginPolicy(environment),
   };
 }
 

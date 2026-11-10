@@ -1,4 +1,4 @@
-import { Router, type Response } from "express";
+import { Router, type Request, type Response } from "express";
 import type { Pool } from "pg";
 import { z, type ZodError } from "zod";
 import type { AuthInstance } from "../auth/config.js";
@@ -16,6 +16,15 @@ import {
   type EmbeddedSignupConfig,
 } from "./embedded-signup-config.js";
 import { createMetaGraphClient } from "./meta-graph.js";
+import {
+  describeOnboardingOriginRejection,
+  isOnboardingOriginAllowed,
+} from "./onboarding-origin.js";
+import {
+  createOnboardingRateLimiter,
+  loadOnboardingRateLimitConfig,
+  type OnboardingRateLimitConfig,
+} from "./onboarding-rate-limit.js";
 import {
   completeWhatsAppOnboarding,
   createOnboardingSession,
@@ -67,11 +76,13 @@ export function createWhatsAppConnectionsRouter({
   auth,
   embeddedSignup = null,
   metaFetch,
+  onboardingRateLimit,
 }: {
   pool: Pool;
   auth: AuthInstance;
   embeddedSignup?: EmbeddedSignupConfig | null;
   metaFetch?: typeof fetch;
+  onboardingRateLimit?: OnboardingRateLimitConfig | null;
 }): Router {
   const router = Router();
   const requireMember = createRequireWorkspace({
@@ -84,6 +95,42 @@ export function createWhatsAppConnectionsRouter({
     pool,
     roles: ["owner"],
   });
+  const rateLimiter = createOnboardingRateLimiter({
+    config: onboardingRateLimit ?? loadOnboardingRateLimitConfig(),
+  });
+
+  /**
+   * Rejects onboarding actions that do not come from the configured
+   * application origin. The check is server-side and fail-closed; the browser
+   * never chooses its own origin.
+   */
+  function requireOnboardingOrigin(
+    request: Request,
+    response: Response,
+  ): boolean {
+    if (!embeddedSignup) {
+      response.status(503).json({
+        error: "WhatsApp onboarding is not configured.",
+        code: "not_configured",
+      });
+      return false;
+    }
+
+    if (
+      !isOnboardingOriginAllowed(
+        embeddedSignup.originPolicy,
+        request.get("origin"),
+      )
+    ) {
+      response.status(403).json({
+        error: describeOnboardingOriginRejection(embeddedSignup.originPolicy),
+        code: "origin_not_allowed",
+      });
+      return false;
+    }
+
+    return true;
+  }
 
   function metaClient() {
     return embeddedSignup
@@ -158,6 +205,7 @@ export function createWhatsAppConnectionsRouter({
   router.post(
     "/connections/:connectionId/verify",
     requireOwner,
+    rateLimiter.middleware,
     async (request, response) => {
       const connectionId = connectionIdSchema.safeParse(
         request.params.connectionId,
@@ -168,11 +216,7 @@ export function createWhatsAppConnectionsRouter({
         return;
       }
 
-      if (!embeddedSignup) {
-        response.status(503).json({
-          error: "WhatsApp onboarding is not configured.",
-          code: "not_configured",
-        });
+      if (!requireOnboardingOrigin(request, response)) {
         return;
       }
 
@@ -212,12 +256,9 @@ export function createWhatsAppConnectionsRouter({
   router.post(
     "/onboarding/sessions",
     requireOwner,
-    async (_request, response) => {
-      if (!embeddedSignup) {
-        response.status(503).json({
-          error: "WhatsApp onboarding is not configured.",
-          code: "not_configured",
-        });
+    rateLimiter.middleware,
+    async (request, response) => {
+      if (!requireOnboardingOrigin(request, response)) {
         return;
       }
 
@@ -237,6 +278,7 @@ export function createWhatsAppConnectionsRouter({
   router.post(
     "/onboarding/complete",
     requireOwner,
+    rateLimiter.middleware,
     async (request, response) => {
       const body = onboardingCompleteSchema.safeParse(request.body);
 
@@ -245,11 +287,7 @@ export function createWhatsAppConnectionsRouter({
         return;
       }
 
-      if (!embeddedSignup) {
-        response.status(503).json({
-          error: "WhatsApp onboarding is not configured.",
-          code: "not_configured",
-        });
+      if (!requireOnboardingOrigin(request, response)) {
         return;
       }
 
