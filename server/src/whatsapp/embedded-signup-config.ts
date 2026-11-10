@@ -49,6 +49,11 @@ export type EmbeddedSignupConfig = Readonly<{
 
 export type EmbeddedSignupPublicConfig = Readonly<{
   configured: boolean;
+  /**
+   * False when the server cannot accept onboarding from any origin, for
+   * example a production deployment without META_ONBOARDING_ALLOWED_ORIGIN.
+   */
+  originConfigured: boolean;
   appId: string | null;
   configId: string | null;
   graphApiVersion: string | null;
@@ -182,6 +187,7 @@ export function toPublicEmbeddedSignupConfig(
   if (!config) {
     return {
       configured: false,
+      originConfigured: false,
       appId: null,
       configId: null,
       graphApiVersion: null,
@@ -191,6 +197,9 @@ export function toPublicEmbeddedSignupConfig(
 
   return {
     configured: true,
+    originConfigured:
+      config.originPolicy.allowedOrigin !== null ||
+      !config.originPolicy.requireExplicitOrigin,
     appId: config.appId,
     configId: config.configId,
     graphApiVersion: config.graphApiVersion,

@@ -594,7 +594,15 @@ export function WhatsAppConnections() {
         </Alert>
       ) : null}
 
-      {canManage && effectiveConfig?.configured ? (
+      {canManage && effectiveConfig && effectiveConfig.configured && !effectiveConfig.originConfigured ? (
+        <Alert tone="warning" role="status">
+          WhatsApp onboarding is disabled because this server has no configured
+          application origin. Set <code>META_ONBOARDING_ALLOWED_ORIGIN</code>{" "}
+          to the public origin of this app, then restart the API.
+        </Alert>
+      ) : null}
+
+      {canManage && effectiveConfig?.configured && effectiveConfig.originConfigured ? (
         <div className="mt-4 flex flex-wrap items-center gap-3">
           <button
             type="button"

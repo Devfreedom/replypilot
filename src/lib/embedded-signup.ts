@@ -44,6 +44,11 @@ export const CONNECTION_STATUS_LABELS: Record<WhatsAppConnectionStatus, string> 
 
 export type EmbeddedSignupPublicConfig = Readonly<{
   configured: boolean;
+  /**
+   * False when the server cannot accept onboarding from any origin, for
+   * example a production deployment without a configured application origin.
+   */
+  originConfigured: boolean;
   appId: string | null;
   configId: string | null;
   graphApiVersion: string | null;
@@ -160,6 +165,7 @@ export function parseEmbeddedSignupConfigResponse(
 
   return {
     configured: config.configured,
+    originConfigured: config.originConfigured !== false,
     appId: stringOrNull(config.appId),
     configId: stringOrNull(config.configId),
     graphApiVersion: stringOrNull(config.graphApiVersion),

@@ -169,6 +169,7 @@ test("onboarding configuration responses separate configured and missing states"
     parseEmbeddedSignupConfigResponse({
       config: {
         configured: true,
+        originConfigured: true,
         appId: "123456789012345",
         configId: "987654321098765",
         graphApiVersion: "v27.0",
@@ -177,6 +178,7 @@ test("onboarding configuration responses separate configured and missing states"
     }),
     {
       configured: true,
+      originConfigured: true,
       appId: "123456789012345",
       configId: "987654321098765",
       graphApiVersion: "v27.0",
@@ -188,6 +190,7 @@ test("onboarding configuration responses separate configured and missing states"
     parseEmbeddedSignupConfigResponse({
       config: {
         configured: false,
+        originConfigured: false,
         appId: null,
         configId: null,
         graphApiVersion: null,
@@ -196,6 +199,7 @@ test("onboarding configuration responses separate configured and missing states"
     }),
     {
       configured: false,
+      originConfigured: false,
       appId: null,
       configId: null,
       graphApiVersion: null,
@@ -204,6 +208,23 @@ test("onboarding configuration responses separate configured and missing states"
   );
 
   assert.equal(parseEmbeddedSignupConfigResponse({}), null);
+});
+
+test("a configured server without an application origin is reported as unusable", () => {
+  const parsed = parseEmbeddedSignupConfigResponse({
+    config: {
+      configured: true,
+      originConfigured: false,
+      appId: "123456789012345",
+      configId: "987654321098765",
+      graphApiVersion: "v27.0",
+      allowedOrigin: null,
+    },
+  });
+
+  assert.ok(parsed);
+  assert.equal(parsed.configured, true);
+  assert.equal(parsed.originConfigured, false);
 });
 
 test("connection parsing accepts the M14B error state and verification fields", () => {

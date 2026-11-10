@@ -405,9 +405,38 @@ migration.
 #### Multi-workspace WhatsApp connections (Milestone 14A)
 
 Migration `017_multi_workspace_whatsapp_connections.sql` extends the existing
-`whatsapp_connections` table. Each Meta phone-number ID resolves to exactly one
-workspace through a global unique index; inbound events and outbound sends use
-that database ownership rather than a webhook- or browser-supplied workspace.
+`whatsapp_connections` table with the status, credential, and verification
+columns. Migration `019_enforce_global_whatsapp_phone_number_ownership.sql`
+adds the global ownership index, so each Meta phone-number ID resolves to
+exactly one workspace; inbound events and outbound sends use that database
+ownership rather than a webhook- or browser-supplied workspace.
+
+The ownership index is partial: it covers every connection that can own
+inbound routing (any status other than `disconnected`). Before Milestone 14A
+the webhook created one connection row per (workspace, phone number) pair, so
+an existing database can hold the same Meta number in more than one workspace.
+That data carries real conversation history, so migration `019` refuses to
+apply while the conflict exists and changes nothing. It names the conflicting
+connections, their workspaces, and their statuses. The operator then reviews
+and runs:
+
+```bash
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 \
+  -f server/src/db/remediation/demote_duplicate_whatsapp_connections.sql
+npm run db:migrate
+```
+
+The remediation script never deletes, reassigns, or moves a conversation, lead,
+or customer. For each duplicated phone-number ID it keeps the oldest
+connection and sets the other rows to `disconnected`, which preserves the
+rows, their conversations, and their messages while making inbound routing
+unambiguous again. Read its pre-flight report before running it, and confirm
+that the oldest row is the workspace that legitimately owns the Meta number.
+
+Before Milestone 14A, the inbound webhook created a connection row on first
+use. That path now respects the global ownership index and fails closed: an
+event for a number owned by another workspace is acknowledged and ignored
+instead of being stored twice.
 
 Access tokens are encrypted with AES-256-GCM before storage. Set a server-only
 32-byte key (base64) and optional version label:
@@ -460,12 +489,46 @@ onboarding is not configured instead of showing a fake connection.
 | `META_APP_SECRET` | Meta App Secret from App settings → Basic. Server-only; used to exchange the authorization code. Must match `WHATSAPP_APP_SECRET`. |
 | `META_EMBEDDED_SIGNUP_CONFIG_ID` | Facebook Login for Business configuration ID created with the WhatsApp Embedded Signup variation. |
 | `META_GRAPH_API_VERSION` | Graph API version used for verification, e.g. `v27.0`. Must match the dashboard. |
-| `META_ONBOARDING_ALLOWED_ORIGIN` | Optional public application origin allowed to start onboarding. Must use `https` in production. |
+| `META_ONBOARDING_ALLOWED_ORIGIN` | The public application origin allowed to start or complete onboarding, e.g. `https://app.example.com`. Must use `https` in production. |
+| `WHATSAPP_ONBOARDING_RATE_LIMIT_WINDOW_SECONDS` | Rate-limit window for the onboarding endpoints, default `60`. |
+| `WHATSAPP_ONBOARDING_RATE_LIMIT_MAX` | Onboarding requests allowed per user and workspace per window, default `20`. |
 
 If only some of `META_APP_ID`, `META_APP_SECRET`, and
 `META_EMBEDDED_SIGNUP_CONFIG_ID` are set, the API refuses to start. If
 `META_APP_SECRET` and `WHATSAPP_APP_SECRET` disagree, the API refuses to
 start, because both refer to the same Meta app.
+
+##### Onboarding request origin
+
+The three state-changing onboarding routes (`POST /onboarding/sessions`,
+`POST /onboarding/complete`, and `POST /connections/:connectionId/verify`)
+only accept requests whose `Origin` header matches the configured application
+origin:
+
+- When `META_ONBOARDING_ALLOWED_ORIGIN` is set, that origin is the only one
+  that is accepted. The comparison is made on the normalised
+  scheme/host/port, so `https://App.Example.com` matches
+  `https://app.example.com` while a different scheme, host, or port does not.
+- A request with no `Origin` header, or with the opaque `null` origin, is
+  always rejected with `403 origin_not_allowed`.
+- In production an origin must be configured. Without
+  `META_ONBOARDING_ALLOWED_ORIGIN`, every onboarding request is rejected and
+  the settings page says that onboarding is disabled.
+- Outside production the loopback origins `http://localhost:3000` and
+  `http://127.0.0.1:3000` are accepted so local development keeps working.
+  The production check is not weakened by this fallback.
+
+The browser sends `Origin` automatically on same-origin `POST` requests, and
+the Next.js `/api` rewrite forwards the header to the API. This was verified
+against the installed Next.js version.
+
+##### Onboarding rate limiting
+
+Session creation, completion, and verification share one fixed-window budget
+per authenticated user and workspace. Exceeding it returns `429` with a
+`Retry-After` header and the code `rate_limited`. The counters live in the API
+process, which matches the current single-process deployment; a shared store
+is required before running several API instances.
 
 The onboarding API is:
 
