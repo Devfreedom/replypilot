@@ -12,10 +12,6 @@ import {
 } from "../auth/middleware.js";
 import { approveReplyDraft } from "../reply-drafts/approval.js";
 import {
-  WHATSAPP_CONNECTION_DISCONNECTED_CODE,
-  WHATSAPP_CONNECTION_DISCONNECTED_MESSAGE,
-} from "../outbound/errors.js";
-import {
   createReplyDraft,
   getReplyDraftForLead,
   listReplyDraftsForLead,
@@ -426,10 +422,10 @@ export function createLeadsRouter({
         return;
       }
 
-      if (result.kind === "connection-disconnected") {
+      if (result.kind === "connection-unusable") {
         response.status(409).json({
-          error: WHATSAPP_CONNECTION_DISCONNECTED_MESSAGE,
-          code: WHATSAPP_CONNECTION_DISCONNECTED_CODE,
+          error: result.message,
+          code: result.code,
         });
         return;
       }

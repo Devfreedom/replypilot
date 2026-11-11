@@ -7,6 +7,7 @@ import {
   resolveConversationForLead,
 } from "../outbound/repository.js";
 import { getConversationConnectionStatus } from "../whatsapp/connections.js";
+import { describeConnectionRejection } from "../outbound/errors.js";
 import type { OutboundMessageRecord } from "../outbound/types.js";
 import { getWorkspaceDefaultApprovalPolicy } from "../settings/messaging-repository.js";
 import {
@@ -34,7 +35,11 @@ export type ApproveReplyDraftResult =
   | Readonly<{ kind: "conversation-required" }>
   | Readonly<{ kind: "conversation-ambiguous" }>
   | Readonly<{ kind: "conversation-not-found" }>
-  | Readonly<{ kind: "connection-disconnected" }>;
+  | Readonly<{
+      kind: "connection-unusable";
+      code: string;
+      message: string;
+    }>;
 
 /**
  * Approval and queue creation are one transaction. The draft row lock makes
@@ -112,17 +117,21 @@ export async function approveReplyDraft(
         return { kind: "conversation-not-found" };
       }
 
-      // A disconnected connection cannot deliver. Refuse before queueing so the
-      // owner learns immediately instead of seeing a row that later fails.
+      // A connection that cannot deliver must not be queued. The worker refuses
+      // every state that is not "active", so the API refuses the same states.
+      // The draft is not approved and no outbound row is created.
       const connectionStatus = await getConversationConnectionStatus(
         client,
         input.workspaceId,
         conversation.conversationId,
       );
 
-      if (connectionStatus === "disconnected") {
+      if (connectionStatus !== "active") {
         await client.query("ROLLBACK");
-        return { kind: "connection-disconnected" };
+        return {
+          kind: "connection-unusable",
+          ...describeConnectionRejection(connectionStatus),
+        };
       }
 
       outboundMessage = await insertQueuedOutboundMessage(client, {

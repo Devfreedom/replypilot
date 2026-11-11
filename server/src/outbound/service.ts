@@ -9,6 +9,7 @@ import {
   resolveConversationForLead,
 } from "./repository.js";
 import { getConversationConnectionStatus } from "../whatsapp/connections.js";
+import { describeConnectionRejection } from "./errors.js";
 import type { OutboundMessageRecord } from "./types.js";
 
 export type QueueManualSendInput = Readonly<{
@@ -27,7 +28,11 @@ export type QueueManualSendResult =
   | Readonly<{ kind: "conversation-ambiguous" }>
   | Readonly<{ kind: "conversation-not-found" }>
   | Readonly<{ kind: "conversation-mismatch" }>
-  | Readonly<{ kind: "connection-disconnected" }>
+  | Readonly<{
+      kind: "connection-unusable";
+      code: string;
+      message: string;
+    }>
   | Readonly<{ kind: "manual-review" }>;
 
 /**
@@ -135,17 +140,18 @@ export async function queueManualSend(
       return { kind: "conversation-not-found" };
     }
 
-    // A disconnected connection cannot deliver. Refuse before queueing so the
-    // owner learns immediately instead of seeing a row that later fails.
+    // A connection that cannot deliver must not be queued. The worker refuses
+    // every state that is not "active", so the API refuses the same states:
+    // a queued row must always be a row the worker can act on.
     const connectionStatus = await getConversationConnectionStatus(
       client,
       input.workspaceId,
       conversation.conversationId,
     );
 
-    if (connectionStatus === "disconnected") {
+    if (connectionStatus !== "active") {
       await client.query("ROLLBACK");
-      return { kind: "connection-disconnected" };
+      return { kind: "connection-unusable", ...describeConnectionRejection(connectionStatus) };
     }
 
     let outboundMessage = await insertQueuedOutboundMessage(client, {
