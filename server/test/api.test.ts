@@ -72,6 +72,12 @@ import {
 import {
   WHATSAPP_CONNECTION_DISCONNECTED_CODE,
   WHATSAPP_CONNECTION_DISCONNECTED_MESSAGE,
+  WHATSAPP_CONNECTION_ERROR_CODE,
+  WHATSAPP_CONNECTION_ERROR_MESSAGE,
+  WHATSAPP_CONNECTION_MISSING_CODE,
+  WHATSAPP_CONNECTION_PENDING_CODE,
+  WHATSAPP_CONNECTION_PENDING_MESSAGE,
+  describeConnectionRejection,
 } from "../src/outbound/errors.js";
 import { suppressCustomer } from "../src/whatsapp/suppression.js";
 import {
@@ -12958,4 +12964,560 @@ test("M14C a disconnect that lands mid-send is not recorded as a successful send
     "A send that raced with a disconnect must not be recorded as sent",
   );
   assert.equal(row.provider_message_id, null);
+});
+
+// ─── M14D Connection-state policy parity and worker database faults ─────────
+//
+// The API and the worker must agree on which connection states may be
+// queued: the worker delivers only on an "active" connection, so the API
+// refuses every other state with its own stable code. A worker fault must
+// fail closed: the provider is never called when the connection state cannot
+// be verified, the row stays recoverable through a bounded retry, and no raw
+// database error is stored in the failure reason.
+
+const M14D_SIMULATED_STATUS_ERROR = "simulated connection status read failure";
+const M14D_SIMULATED_TRANSITION_ERROR =
+  "simulated guarded transition failure";
+
+/**
+ * A pool whose connection-status read fails a fixed number of times.
+ *
+ * Only the connection-status read is affected, so the worker still claims
+ * rows and still processes the rest of the batch.
+ */
+function poolWithFailingConnectionStatusRead(
+  pool: Pool,
+  failures: number,
+): Pool {
+  let remaining = failures;
+
+  return new Proxy(pool, {
+    get(target, property, receiver) {
+      if (property === "query") {
+        return (text: unknown, ...rest: unknown[]) => {
+          const sql =
+            typeof text === "string"
+              ? text
+              : ((text as { text?: string } | null)?.text ?? "");
+
+          if (sql.includes("SELECT connection.status") && remaining > 0) {
+            remaining -= 1;
+            throw new Error(M14D_SIMULATED_STATUS_ERROR);
+          }
+
+          const query = target.query as unknown as (
+            ...args: unknown[]
+          ) => unknown;
+          return query.call(target, text, ...rest);
+        };
+      }
+
+      const value = Reflect.get(target, property, receiver) as unknown;
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  }) as Pool;
+}
+
+/**
+ * A pool whose guarded sent transition fails with a database error.
+ *
+ * Only the locked connection read inside the guarded transition is affected.
+ */
+function poolWithFailingGuardedTransition(pool: Pool): Pool {
+  return new Proxy(pool, {
+    get(target, property, receiver) {
+      if (property === "connect") {
+        return async () => {
+          const client = await target.connect();
+
+          return new Proxy(client, {
+            get(clientTarget, clientProperty, clientReceiver) {
+              if (clientProperty === "query") {
+                return (text: unknown, ...rest: unknown[]) => {
+                  const sql =
+                    typeof text === "string"
+                      ? text
+                      : ((text as { text?: string } | null)?.text ?? "");
+
+                  if (sql.includes("FOR UPDATE OF conn")) {
+                    throw new Error(M14D_SIMULATED_TRANSITION_ERROR);
+                  }
+
+                  const query = clientTarget.query as unknown as (
+                    ...args: unknown[]
+                  ) => unknown;
+                  return query.call(clientTarget, text, ...rest);
+                };
+              }
+
+              const value = Reflect.get(
+                clientTarget,
+                clientProperty,
+                clientReceiver,
+              ) as unknown;
+              return typeof value === "function"
+                ? value.bind(clientTarget)
+                : value;
+            },
+          });
+        };
+      }
+
+      const value = Reflect.get(target, property, receiver) as unknown;
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  }) as Pool;
+}
+
+/**
+ * Creates a lead whose conversation is attached to a WhatsApp connection in
+ * the given state. The connection is the one the conversation resolves to, so
+ * the API and the worker see the same state.
+ */
+async function createLeadConversationWithConnectionStatus(
+  status: "pending" | "error",
+): Promise<Readonly<{ lead: Lead; conversationId: string }>> {
+  const owner = requireSession();
+
+  const connectionId = await registerTestConnection({
+    workspaceId: owner.workspace.id,
+    phoneNumberId: M14C_DISCONNECTED_PHONE_NUMBER_ID,
+    accessToken: "",
+    status: status === "pending" ? "pending" : "active",
+  });
+
+  if (status === "error") {
+    await pool.query(
+      `
+        UPDATE whatsapp_connections
+        SET status = 'error', updated_at = now()
+        WHERE id = $1
+      `,
+      [connectionId],
+    );
+  }
+
+  const { lead, conversationId } = await createLeadWithConversation(
+    { name: "M14D Lead" },
+    {
+      phoneNumberId: M14C_DISCONNECTED_PHONE_NUMBER_ID,
+      senderWaId: M14C_DISCONNECTED_SENDER_WA_ID,
+      senderPhoneNumber: M14C_DISCONNECTED_SENDER_WA_ID,
+    },
+  );
+
+  return { lead, conversationId };
+}
+
+async function countOutboundRowsForDraft(draftId: string): Promise<number> {
+  const result = await pool.query<{ count: number }>(
+    `
+      SELECT count(*)::int AS count
+      FROM outbound_messages
+      WHERE workspace_id = $1
+        AND reply_draft_id = $2
+    `,
+    [requireSession().workspace.id, draftId],
+  );
+
+  return result.rows[0]?.count ?? 0;
+}
+
+test("M14D every unusable connection state maps to a stable rejection", () => {
+  assert.equal(
+    describeConnectionRejection("disconnected").code,
+    WHATSAPP_CONNECTION_DISCONNECTED_CODE,
+  );
+  assert.equal(
+    describeConnectionRejection("pending").code,
+    WHATSAPP_CONNECTION_PENDING_CODE,
+  );
+  assert.equal(
+    describeConnectionRejection("error").code,
+    WHATSAPP_CONNECTION_ERROR_CODE,
+  );
+  assert.equal(
+    describeConnectionRejection(null).code,
+    WHATSAPP_CONNECTION_MISSING_CODE,
+  );
+});
+
+test("M14D approve_and_send refuses a pending WhatsApp connection", async () => {
+  const { lead, conversationId } =
+    await createLeadConversationWithConnectionStatus("pending");
+
+  const draft = await createSavedDraftPayload(lead.id);
+
+  const response = await approveSavedDraft(lead.id, draft.id, {
+    status: "approved",
+    sendPolicy: "approve_and_send",
+    conversationId,
+  });
+
+  assert.equal(response.status, 409);
+
+  const payload = await readJson<{ error: string; code?: string }>(response);
+  assert.equal(payload.code, WHATSAPP_CONNECTION_PENDING_CODE);
+  assert.equal(payload.error, WHATSAPP_CONNECTION_PENDING_MESSAGE);
+
+  assert.equal(await countOutboundRowsForDraft(draft.id), 0);
+
+  const stored = await pool.query<{ status: string }>(
+    `
+      SELECT status
+      FROM reply_drafts
+      WHERE id = $1
+    `,
+    [draft.id],
+  );
+  assert.notEqual(
+    stored.rows[0]?.status,
+    "approved",
+    "A refused approve_and_send must not approve the draft",
+  );
+});
+
+test("M14D approve_and_send refuses an error-status WhatsApp connection", async () => {
+  const { lead, conversationId } =
+    await createLeadConversationWithConnectionStatus("error");
+
+  const draft = await createSavedDraftPayload(lead.id);
+
+  const response = await approveSavedDraft(lead.id, draft.id, {
+    status: "approved",
+    sendPolicy: "approve_and_send",
+    conversationId,
+  });
+
+  assert.equal(response.status, 409);
+
+  const payload = await readJson<{ error: string; code?: string }>(response);
+  assert.equal(payload.code, WHATSAPP_CONNECTION_ERROR_CODE);
+  assert.equal(payload.error, WHATSAPP_CONNECTION_ERROR_MESSAGE);
+
+  assert.equal(await countOutboundRowsForDraft(draft.id), 0);
+});
+
+test("M14D manual send refuses a pending WhatsApp connection", async () => {
+  const { lead, conversationId } =
+    await createLeadConversationWithConnectionStatus("pending");
+
+  const draft = await createSavedDraftPayload(lead.id);
+
+  // approve_only is unchanged: the draft is approved and nothing is queued.
+  const approved = await approveSavedDraft(lead.id, draft.id, {
+    status: "approved",
+    sendPolicy: "approve_only",
+    conversationId,
+  });
+  assert.equal(approved.status, 200);
+  assert.equal(await countOutboundRowsForDraft(draft.id), 0);
+
+  const response = await sendSavedDraft(draft.id);
+
+  assert.equal(response.status, 409);
+
+  const payload = await readJson<{ error: string; code?: string }>(response);
+  assert.equal(payload.code, WHATSAPP_CONNECTION_PENDING_CODE);
+  assert.equal(payload.error, WHATSAPP_CONNECTION_PENDING_MESSAGE);
+
+  assert.equal(await countOutboundRowsForDraft(draft.id), 0);
+});
+
+test("M14D both send routes report the same pending-connection rejection", async () => {
+  const { lead, conversationId } =
+    await createLeadConversationWithConnectionStatus("pending");
+
+  const approveDraft = await createSavedDraftPayload(lead.id);
+  const approveResponse = await approveSavedDraft(
+    lead.id,
+    approveDraft.id,
+    {
+      status: "approved",
+      sendPolicy: "approve_and_send",
+      conversationId,
+    },
+  );
+  assert.equal(approveResponse.status, 409);
+  const approvePayload = await readJson<{ error: string; code?: string }>(
+    approveResponse,
+  );
+
+  const sendDraft = await createSavedDraftPayload(lead.id);
+  const sendApproved = await approveSavedDraft(lead.id, sendDraft.id, {
+    status: "approved",
+    sendPolicy: "approve_only",
+    conversationId,
+  });
+  assert.equal(sendApproved.status, 200);
+
+  const sendResponse = await sendSavedDraft(sendDraft.id);
+  assert.equal(sendResponse.status, 409);
+  const sendPayload = await readJson<{ error: string; code?: string }>(
+    sendResponse,
+  );
+
+  assert.equal(approvePayload.code, sendPayload.code);
+  assert.equal(approvePayload.error, sendPayload.error);
+  assert.equal(approvePayload.code, WHATSAPP_CONNECTION_PENDING_CODE);
+});
+
+test("M14D the worker fails closed when the connection status cannot be read", async () => {
+  const owner = requireSession();
+
+  await registerTestConnection({
+    workspaceId: owner.workspace.id,
+    phoneNumberId: M14C_DISCONNECTED_PHONE_NUMBER_ID,
+    accessToken: "",
+  });
+
+  const { lead, conversationId } = await createLeadWithConversation(
+    { name: "M14D Fail Closed Lead" },
+    {
+      phoneNumberId: M14C_DISCONNECTED_PHONE_NUMBER_ID,
+      senderWaId: M14C_DISCONNECTED_SENDER_WA_ID,
+      senderPhoneNumber: M14C_DISCONNECTED_SENDER_WA_ID,
+    },
+  );
+
+  const draft = await createSavedDraftPayload(lead.id);
+  const approved = await approveSavedDraft(lead.id, draft.id, {
+    status: "approved",
+    sendPolicy: "approve_only",
+    conversationId,
+  });
+  assert.equal(approved.status, 200);
+  const approvedDraft = await readJson<ReplyDraftPayload>(approved);
+
+  // A second draft gives the worker a second row: one outbound record is
+  // allowed per draft.
+  const secondDraft = await createSavedDraftPayload(lead.id);
+  const secondApproved = await approveSavedDraft(lead.id, secondDraft.id, {
+    status: "approved",
+    sendPolicy: "approve_only",
+    conversationId,
+  });
+  assert.equal(secondApproved.status, 200);
+  const secondApprovedDraft = await readJson<ReplyDraftPayload>(secondApproved);
+
+  const insertQueuedRow = async (
+    label: string,
+    draftId: string,
+    content: string,
+  ): Promise<string> => {
+    const inserted = await pool.query<{ id: string }>(
+      `
+        INSERT INTO outbound_messages (
+          workspace_id,
+          conversation_id,
+          reply_draft_id,
+          provider,
+          content,
+          status,
+          idempotency_key,
+          max_attempts
+        )
+        VALUES ($1, $2, $3, 'mock', $4, 'queued', $5, 3)
+        RETURNING id
+      `,
+      [
+        owner.workspace.id,
+        conversationId,
+        draftId,
+        content,
+        `m14d-${label}-${randomUUID()}`,
+      ],
+    );
+
+    const id = inserted.rows[0]?.id;
+    assert.ok(id);
+    return id;
+  };
+
+  const firstId = await insertQueuedRow(
+    "first",
+    draft.id,
+    approvedDraft.draft.draftReply,
+  );
+  const secondId = await insertQueuedRow(
+    "second",
+    secondDraft.id,
+    secondApprovedDraft.draft.draftReply,
+  );
+
+  let providerCalls = 0;
+  const provider: OutboundMessageProvider = {
+    name: "mock",
+    idempotency: "guaranteed",
+    async send() {
+      providerCalls += 1;
+      return {
+        providerMessageId: `m14d.mock-${providerCalls}`,
+        status: "sent",
+      };
+    },
+  };
+
+  // The connection state cannot be read for the first row only.
+  const failingPool = poolWithFailingConnectionStatusRead(pool, 1);
+
+  const result = await runOutboundWorkerOnce(failingPool, provider, {
+    batchSize: 10,
+    baseRetryDelayMs: 0,
+    staleAfterMs: 60_000,
+  });
+
+  assert.equal(result.claimed, 2);
+  assert.equal(
+    providerCalls,
+    1,
+    "A row whose connection state cannot be verified must not reach the provider",
+  );
+  assert.equal(result.sent, 1);
+  assert.equal(result.retried, 1);
+  assert.equal(result.failed, 0);
+
+  const rows = await Promise.all([
+    readOutboundRow(firstId),
+    readOutboundRow(secondId),
+  ]);
+  const delivered = rows.filter((row) => row.status === "sent");
+  const failedClosed = rows.filter((row) => row.status !== "sent");
+
+  assert.equal(delivered.length, 1);
+  assert.equal(failedClosed.length, 1);
+  assert.equal(failedClosed[0]?.provider_message_id, null);
+  assert.match(
+    failedClosed[0]?.failure_reason ?? "",
+    /could not be verified/,
+    "A failed-closed row explains itself without a raw database error",
+  );
+  assert.doesNotMatch(
+    failedClosed[0]?.failure_reason ?? "",
+    /simulated connection status read failure/,
+    "A raw database error must never be stored in the failure reason",
+  );
+
+  // The failed-closed row stays recoverable: a later tick verifies the
+  // connection and delivers it.
+  const recovery = await runOutboundWorkerOnce(pool, provider, {
+    batchSize: 10,
+    baseRetryDelayMs: 0,
+    staleAfterMs: 60_000,
+  });
+
+  assert.equal(recovery.sent, 1);
+
+  const recovered = await Promise.all([
+    readOutboundRow(firstId),
+    readOutboundRow(secondId),
+  ]);
+  assert.equal(
+    recovered.filter((row) => row.status === "sent").length,
+    2,
+    "Both rows are delivered once the connection state can be verified",
+  );
+});
+
+test("M14D a database fault in the guarded sent transition is retried, not escalated to manual review", async () => {
+  const owner = requireSession();
+
+  await registerTestConnection({
+    workspaceId: owner.workspace.id,
+    phoneNumberId: M14C_DISCONNECTED_PHONE_NUMBER_ID,
+    accessToken: "",
+  });
+
+  const { lead, conversationId } = await createLeadWithConversation(
+    { name: "M14D Guarded Transition Lead" },
+    {
+      phoneNumberId: M14C_DISCONNECTED_PHONE_NUMBER_ID,
+      senderWaId: M14C_DISCONNECTED_SENDER_WA_ID,
+      senderPhoneNumber: M14C_DISCONNECTED_SENDER_WA_ID,
+    },
+  );
+
+  const draft = await createSavedDraftPayload(lead.id);
+  const approved = await approveSavedDraft(lead.id, draft.id, {
+    status: "approved",
+    sendPolicy: "approve_only",
+    conversationId,
+  });
+  assert.equal(approved.status, 200);
+  const approvedDraft = await readJson<ReplyDraftPayload>(approved);
+
+  const inserted = await pool.query<{ id: string }>(
+    `
+      INSERT INTO outbound_messages (
+        workspace_id,
+        conversation_id,
+        reply_draft_id,
+        provider,
+        content,
+        status,
+        idempotency_key,
+        max_attempts
+      )
+      VALUES ($1, $2, $3, 'mock', $4, 'queued', $5, 3)
+      RETURNING id
+    `,
+    [
+      owner.workspace.id,
+      conversationId,
+      draft.id,
+      approvedDraft.draft.draftReply,
+      `m14d-transition-${randomUUID()}`,
+    ],
+  );
+  const outboundId = inserted.rows[0]?.id;
+  assert.ok(outboundId);
+
+  let providerCalls = 0;
+  const provider: OutboundMessageProvider = {
+    name: "mock",
+    idempotency: "guaranteed",
+    async send() {
+      providerCalls += 1;
+      return {
+        providerMessageId: "m14d.mock.transition",
+        status: "sent",
+      };
+    },
+  };
+
+  const result = await runOutboundWorkerOnce(
+    poolWithFailingGuardedTransition(pool),
+    provider,
+    {
+      batchSize: 10,
+      baseRetryDelayMs: 0,
+      staleAfterMs: 60_000,
+    },
+  );
+
+  assert.equal(result.claimed, 1);
+  assert.equal(providerCalls, 1);
+  assert.equal(result.sent, 0);
+  assert.equal(
+    result.manualReview,
+    0,
+    "A database fault is not an ambiguous delivery outcome",
+  );
+  assert.equal(result.retried, 1);
+
+  const row = await readOutboundRow(outboundId);
+  assert.notEqual(row.status, "sent");
+  assert.notEqual(
+    row.status,
+    "manual_review",
+    "A database fault must not strand the message in a manual review",
+  );
+  assert.equal(row.status, "queued");
+  assert.equal(row.provider_message_id, null);
+  assert.match(row.failure_reason ?? "", /could not be verified/);
+  assert.doesNotMatch(
+    row.failure_reason ?? "",
+    /simulated guarded transition failure/,
+    "A raw database error must never be stored in the failure reason",
+  );
 });

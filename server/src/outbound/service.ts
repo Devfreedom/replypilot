@@ -151,7 +151,10 @@ export async function queueManualSend(
 
     if (connectionStatus !== "active") {
       await client.query("ROLLBACK");
-      return { kind: "connection-unusable", ...describeConnectionRejection(connectionStatus) };
+      return {
+        kind: "connection-unusable",
+        ...describeConnectionRejection(connectionStatus),
+      };
     }
 
     let outboundMessage = await insertQueuedOutboundMessage(client, {

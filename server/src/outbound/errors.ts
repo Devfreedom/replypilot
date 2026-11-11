@@ -37,8 +37,7 @@ export const WHATSAPP_CONNECTION_ERROR_MESSAGE =
   "This WhatsApp connection needs attention. Verify it before sending.";
 
 /** Stable machine-readable code for a conversation without a WhatsApp connection. */
-export const WHATSAPP_CONNECTION_MISSING_CODE =
-  "WHATSAPP_CONNECTION_MISSING";
+export const WHATSAPP_CONNECTION_MISSING_CODE = "WHATSAPP_CONNECTION_MISSING";
 
 /** User-facing message paired with {@link WHATSAPP_CONNECTION_MISSING_CODE}. */
 export const WHATSAPP_CONNECTION_MISSING_MESSAGE =
