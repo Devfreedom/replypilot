@@ -1,4 +1,8 @@
 import { createApp } from "./app.js";
+import {
+  GeminiReplyDraftProvider,
+  MockReplyDraftProvider,
+} from "./ai/reply-draft.js";
 import { loadConfig } from "./config.js";
 import { createPool } from "./db/pool.js";
 import { assertRequiredMigrations } from "./db/schema.js";
@@ -13,6 +17,10 @@ async function start(): Promise<void> {
   // database that has not applied it would fail later, inside a request, with
   // an opaque database error.
   await assertRequiredMigrations(pool);
+  
+  const replyDraftProvider = config.gemini
+    ? new GeminiReplyDraftProvider(config.gemini)
+    : new MockReplyDraftProvider();
 
   const app = createApp({
     pool,

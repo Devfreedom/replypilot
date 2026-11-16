@@ -56,6 +56,8 @@ const environmentSchema = z
       .optional(),
     BETTER_AUTH_TRUSTED_ORIGINS: z.string().optional(),
     BETTER_AUTH_TRUSTED_PROXY_CIDRS: z.string().optional(),
+    GEMINI_API_KEY: z.string().trim().min(1).optional(),
+    GEMINI_MODEL: z.string().trim().min(1).optional(),
   })
   .superRefine((value, context) => {
     if (value.NODE_ENV === "production" && !value.BETTER_AUTH_URL) {
@@ -90,6 +92,7 @@ export type ServerConfig = Readonly<{
   whatsapp: WhatsAppIntegrationConfig | null;
   embeddedSignup: EmbeddedSignupConfig | null;
   onboardingRateLimit: OnboardingRateLimitConfig;
+  gemini: Readonly<{ apiKey: string; model?: string }> | null;
 }>;
 
 function parseTrustedOrigins(
@@ -179,5 +182,13 @@ export function loadConfig(
     whatsapp: loadWhatsAppConfig(environment),
     embeddedSignup,
     onboardingRateLimit,
+    gemini: result.data.GEMINI_API_KEY
+      ? {
+        apiKey: result.data.GEMINI_API_KEY,
+        ...(result.data.GEMINI_MODEL
+          ? { model: result.data.GEMINI_MODEL }
+          : {}),
+      }
+      : null,
   };
 }

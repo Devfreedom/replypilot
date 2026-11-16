@@ -125,8 +125,8 @@ const replyDraftSchema = z.object({
   summary: z.string(),
   missingInformation: z.array(z.string()),
   draftReply: z.string(),
-  provider: z.literal("mock"),
-  isDemo: z.literal(true),
+  provider: z.enum(["mock", "gemini"]),
+  isDemo: z.boolean(),
 });
 
 const approvalSendPolicySchema = z.enum(APPROVAL_SEND_POLICIES);

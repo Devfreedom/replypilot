@@ -1145,16 +1145,27 @@ export function DraftReplyDialog({
         </button>
       </div>
 
-      <p
-        id="draft-reply-demo"
-        className="mt-5 rounded-xl border border-[color-mix(in_oklab,var(--rp-warning)_25%,transparent)] bg-warning-soft px-4 py-3 text-sm leading-6 text-warning-ink"
-      >
-        Demonstration output from ReplyPilot&apos;s mock provider. No live AI
-        model was used. Approval records your review; approve and queue adds the
-        approved snapshot to the server-selected outbound worker. Meta delivery
-        requires restricted server-side test configuration and is unavailable
-        in production.
-      </p>
+      {selectedDraft && !selectedDraft.isDemo ? (
+        <p
+          id="draft-reply-demo"
+          className="mt-5 rounded-xl border border-line bg-hushed px-4 py-3 text-sm leading-6 text-ink-soft"
+        >
+          AI-generated draft grounded in your approved business profile and
+          catalogue. Review and edit before approving; approve and queue adds
+          the approved snapshot to the server-selected outbound worker.
+        </p>
+      ) : (
+        <p
+          id="draft-reply-demo"
+          className="mt-5 rounded-xl border border-[color-mix(in_oklab,var(--rp-warning)_25%,transparent)] bg-warning-soft px-4 py-3 text-sm leading-6 text-warning-ink"
+        >
+          Demonstration output from ReplyPilot&apos;s mock provider. No live AI
+          model was used. Approval records your review; approve and queue adds the
+          approved snapshot to the server-selected outbound worker. Meta delivery
+          requires restricted server-side test configuration and is unavailable
+          in production.
+        </p>
+      )}
 
       {isLoading ? (
         <div role="status" className="py-12 text-center text-sm text-ink-soft">
