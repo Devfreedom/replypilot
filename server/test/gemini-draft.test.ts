@@ -966,3 +966,58 @@ test("GEMINI_TIMEOUT_MS configures GeminiReplyDraftProvider timeout and defaults
   const provider = new GeminiReplyDraftProvider(overriddenConfig.gemini);
   assert.equal(provider.provider, "gemini");
 });
+
+test("GeminiReplyDraftProvider classifies 429 rate limits, AbortSignal timeouts, and 5xx upstream errors", async () => {
+  const rateLimited = new GeminiReplyDraftProvider({
+    apiKey: SAMPLE_API_KEY,
+    fetchImplementation: async () =>
+      new Response(JSON.stringify({ error: { message: "Quota exceeded" } }), {
+        status: 429,
+      }),
+  });
+  await assert.rejects(
+    () => rateLimited.draftReply(makeLead(), makeContext()),
+    (error: unknown) =>
+      error instanceof ReplyDraftProviderError &&
+      error.code === "rate_limit" &&
+      error.statusCode === 429 &&
+      error.userMessage ===
+        "AI provider rate limit reached. Wait a moment and try again.",
+  );
+
+  const timedOut = new GeminiReplyDraftProvider({
+    apiKey: SAMPLE_API_KEY,
+    timeoutMs: 15,
+    fetchImplementation: async (_input, init) =>
+      new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener(
+          "abort",
+          () => reject(init.signal?.reason),
+          { once: true },
+        );
+      }),
+  });
+  await assert.rejects(
+    () => timedOut.draftReply(makeLead(), makeContext()),
+    (error: unknown) =>
+      error instanceof ReplyDraftProviderError &&
+      error.code === "timeout" &&
+      error.statusCode === 504 &&
+      error.userMessage === "AI provider timed out. Please try again.",
+  );
+
+  const upstreamFailed = new GeminiReplyDraftProvider({
+    apiKey: SAMPLE_API_KEY,
+    fetchImplementation: async () =>
+      new Response(JSON.stringify({ error: { message: "Unavailable" } }), {
+        status: 503,
+      }),
+  });
+  await assert.rejects(
+    () => upstreamFailed.draftReply(makeLead(), makeContext()),
+    (error: unknown) =>
+      error instanceof ReplyDraftProviderError &&
+      error.code === "upstream_error" &&
+      error.statusCode === 502,
+  );
+});

@@ -3,6 +3,7 @@ import type { Pool } from "pg";
 import { z, type ZodError } from "zod";
 import {
   MockReplyDraftProvider,
+  ReplyDraftProviderError,
   type ReplyDraftProvider,
 } from "../ai/reply-draft.js";
 import type { AuthInstance } from "../auth/config.js";
@@ -89,6 +90,24 @@ function sanitizeDraftError(error: unknown): string {
   const apiKey = process.env.GEMINI_API_KEY?.trim();
   const redacted = apiKey ? raw.split(apiKey).join("[REDACTED]") : raw;
   return redacted.replace(/AIza[0-9A-Za-z_-]{16,}/g, "[REDACTED]");
+}
+
+function handleDraftGenerationError(
+  response: Response,
+  contextLabel: string,
+  error: unknown,
+): void {
+  console.error(contextLabel, sanitizeDraftError(error));
+
+  if (error instanceof ReplyDraftProviderError) {
+    response.status(error.statusCode).json({
+      error: error.userMessage,
+      code: error.code,
+    });
+    return;
+  }
+
+  response.status(500).json({ error: "Internal server error" });
 }
 
 function sendValidationError(
@@ -225,8 +244,11 @@ export function createLeadsRouter({
       );
       response.status(200).json(legacyReplyDraft(draft));
     } catch (error) {
-      console.error("Failed to generate reply draft:", sanitizeDraftError(error));
-      response.status(500).json({ error: "Internal server error" });
+      handleDraftGenerationError(
+        response,
+        "Failed to generate reply draft:",
+        error,
+      );
     }
   });
 
@@ -429,11 +451,11 @@ export function createLeadsRouter({
           replyDraftProvider,
         );
       } catch (error) {
-        console.error(
+        handleDraftGenerationError(
+          response,
           "Failed to generate saved reply draft:",
-          sanitizeDraftError(error),
+          error,
         );
-        response.status(500).json({ error: "Internal server error" });
         return;
       }
 

@@ -15393,7 +15393,11 @@ test("GET /api/workspace exposes active replyDraftProvider and draft routes log 
         },
       },
     );
-    assert.equal(draftReplyRes.status, 500);
+    assert.equal(draftReplyRes.status, 502);
+    assert.equal(
+      (await readJson<{ code?: string }>(draftReplyRes)).code,
+      "upstream_error",
+    );
 
     const savedDraftRes = await nativeFetch(
       `${geminiApp.baseUrl}/api/leads/${lead.id}/reply-drafts`,
@@ -15407,7 +15411,11 @@ test("GET /api/workspace exposes active replyDraftProvider and draft routes log 
         body: JSON.stringify({}),
       },
     );
-    assert.equal(savedDraftRes.status, 500);
+    assert.equal(savedDraftRes.status, 502);
+    assert.equal(
+      (await readJson<{ code?: string }>(savedDraftRes)).code,
+      "upstream_error",
+    );
   } finally {
     console.error = originalError;
     if (previousGeminiKey === undefined) {
@@ -15426,4 +15434,90 @@ test("GET /api/workspace exposes active replyDraftProvider and draft routes log 
     false,
     "GEMINI_API_KEY must never appear in console.error logs",
   );
+});
+
+test("draft routes map upstream 429 rate limits and 504 timeouts to accurate HTTP statuses and user messages", async () => {
+  const lead = await createDraftLead();
+  const originalError = console.error;
+  console.error = () => undefined;
+
+  try {
+    for (const scenario of [
+      {
+        mode: "429" as const,
+        expectedStatus: 429,
+        expectedCode: "rate_limit",
+        expectedError:
+          "AI provider rate limit reached. Wait a moment and try again.",
+      },
+      {
+        mode: "timeout" as const,
+        expectedStatus: 504,
+        expectedCode: "timeout",
+        expectedError: "AI provider timed out. Please try again.",
+      },
+    ]) {
+      const provider = new GeminiReplyDraftProvider({
+        apiKey: "AIzaSyTestStatusMappingFakeKey123456",
+        timeoutMs: 15,
+        fetchImplementation: async (_input, init) => {
+          if (scenario.mode === "429") {
+            return new Response(
+              JSON.stringify({ error: { message: "Rate limited" } }),
+              { status: 429 },
+            );
+          }
+
+          return new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener(
+              "abort",
+              () => reject(init.signal?.reason),
+              { once: true },
+            );
+          });
+        },
+      });
+
+      const app = await startServer(pool, provider);
+      try {
+        const legacyRes = await nativeFetch(
+          `${app.baseUrl}/api/leads/${lead.id}/draft-reply`,
+          {
+            method: "POST",
+            headers: {
+              cookie: requireSession().cookie,
+              "x-forwarded-for": TEST_CLIENT_IP,
+            },
+          },
+        );
+        assert.equal(legacyRes.status, scenario.expectedStatus);
+        assert.deepEqual(await readJson(legacyRes), {
+          error: scenario.expectedError,
+          code: scenario.expectedCode,
+        });
+
+        const savedRes = await nativeFetch(
+          `${app.baseUrl}/api/leads/${lead.id}/reply-drafts`,
+          {
+            method: "POST",
+            headers: {
+              cookie: requireSession().cookie,
+              "content-type": "application/json",
+              "x-forwarded-for": TEST_CLIENT_IP,
+            },
+            body: JSON.stringify({}),
+          },
+        );
+        assert.equal(savedRes.status, scenario.expectedStatus);
+        assert.deepEqual(await readJson(savedRes), {
+          error: scenario.expectedError,
+          code: scenario.expectedCode,
+        });
+      } finally {
+        await stopServer(app.server);
+      }
+    }
+  } finally {
+    console.error = originalError;
+  }
 });

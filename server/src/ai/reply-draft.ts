@@ -75,11 +75,76 @@ export function resolveReplyDraftProviderKind(
   return "mock";
 }
 
+export type ReplyDraftProviderErrorCode =
+  | "rate_limit"
+  | "timeout"
+  | "upstream_error"
+  | "invalid_config";
+
+export type ReplyDraftProviderErrorOptions = Readonly<{
+  code?: ReplyDraftProviderErrorCode;
+  statusCode?: number;
+  userMessage?: string;
+}>;
+
+const DEFAULT_USER_MESSAGE_BY_CODE: Record<
+  ReplyDraftProviderErrorCode,
+  string
+> = {
+  rate_limit: "AI provider rate limit reached. Wait a moment and try again.",
+  timeout: "AI provider timed out. Please try again.",
+  upstream_error:
+    "AI provider could not generate a draft right now. Please try again.",
+  invalid_config: "AI provider configuration is invalid.",
+};
+
 export class ReplyDraftProviderError extends Error {
-  constructor(message: string) {
+  readonly code: ReplyDraftProviderErrorCode;
+  readonly statusCode: number;
+  readonly userMessage: string;
+
+  constructor(message: string, options: ReplyDraftProviderErrorOptions = {}) {
     super(message);
     this.name = "ReplyDraftProviderError";
+    const code = options.code ?? "upstream_error";
+    this.code = code;
+    this.statusCode =
+      options.statusCode ??
+      (code === "rate_limit"
+        ? 429
+        : code === "timeout"
+          ? 504
+          : code === "invalid_config"
+            ? 500
+            : 502);
+    this.userMessage =
+      options.userMessage ?? DEFAULT_USER_MESSAGE_BY_CODE[code];
   }
+}
+
+function isTimeoutError(error: unknown, signal?: AbortSignal): boolean {
+  if (signal?.aborted) {
+    return true;
+  }
+
+  if (error instanceof Error) {
+    if (error.name === "TimeoutError" || error.name === "AbortError") {
+      return true;
+    }
+
+    if (
+      error.cause instanceof Error &&
+      (error.cause.name === "HeadersTimeoutError" ||
+        error.cause.name === "ConnectTimeoutError" ||
+        error.cause.name === "BodyTimeoutError" ||
+        error.cause.name === "TimeoutError" ||
+        error.cause.name === "AbortError")
+    ) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 function getIntent(message: string | null | undefined): ReplyDraft["intent"] {
@@ -416,7 +481,10 @@ export class GeminiReplyDraftProvider implements ReplyDraftProvider {
   constructor(options: GeminiReplyDraftProviderOptions) {
     const trimmedKey = options.apiKey.trim();
     if (!trimmedKey) {
-      throw new ReplyDraftProviderError("GEMINI_API_KEY must not be empty.");
+      throw new ReplyDraftProviderError("GEMINI_API_KEY must not be empty.", {
+        code: "invalid_config",
+        statusCode: 500,
+      });
     }
 
     this.#apiKey = trimmedKey;
@@ -425,13 +493,17 @@ export class GeminiReplyDraftProvider implements ReplyDraftProvider {
     this.#fetch = options.fetchImplementation ?? globalThis.fetch;
   }
 
-  async #requestModel(model: string, userPrompt: string): Promise<Response> {
+  async #requestModel(
+    model: string,
+    userPrompt: string,
+  ): Promise<{ response: Response; signal: AbortSignal }> {
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(
       model,
     )}:generateContent`;
+    const signal = AbortSignal.timeout(this.#timeoutMs);
 
     try {
-      return await this.#fetch(url, {
+      const response = await this.#fetch(url, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -456,8 +528,9 @@ export class GeminiReplyDraftProvider implements ReplyDraftProvider {
             },
           },
         }),
-        signal: AbortSignal.timeout(this.#timeoutMs),
+        signal,
       });
+      return { response, signal };
     } catch (error) {
       const causeMessage =
         error instanceof Error && error.cause instanceof Error
@@ -468,8 +541,24 @@ export class GeminiReplyDraftProvider implements ReplyDraftProvider {
           ? `${error.message}${causeMessage}`
           : "unknown network error";
       const safeMessage = rawMessage.split(this.#apiKey).join("[REDACTED]");
+
+      if (isTimeoutError(error, signal)) {
+        throw new ReplyDraftProviderError(
+          `Gemini API request failed: ${safeMessage}`,
+          {
+            code: "timeout",
+            statusCode: 504,
+            userMessage: "AI provider timed out. Please try again.",
+          },
+        );
+      }
+
       throw new ReplyDraftProviderError(
         `Gemini API request failed: ${safeMessage}`,
+        {
+          code: "upstream_error",
+          statusCode: 502,
+        },
       );
     }
   }
@@ -481,7 +570,10 @@ export class GeminiReplyDraftProvider implements ReplyDraftProvider {
     );
     const userPrompt = buildUserPrompt(lead, facts);
 
-    let response = await this.#requestModel(this.#model, userPrompt);
+    let { response, signal } = await this.#requestModel(
+      this.#model,
+      userPrompt,
+    );
 
     // If a configured model (such as retired gemini-2.5-flash) returns 404
     // because Google retired it for new users, retry once with the current
@@ -500,22 +592,67 @@ export class GeminiReplyDraftProvider implements ReplyDraftProvider {
         console.warn(
           `Configured Gemini model "${this.#model}" is unavailable (HTTP 404); falling back to "${DEFAULT_GEMINI_MODEL}".`,
         );
-        response = await this.#requestModel(DEFAULT_GEMINI_MODEL, userPrompt);
+        ({ response, signal } = await this.#requestModel(
+          DEFAULT_GEMINI_MODEL,
+          userPrompt,
+        ));
       }
     }
 
     if (!response.ok) {
+      if (response.status === 429) {
+        throw new ReplyDraftProviderError(
+          `Gemini API returned HTTP ${response.status}.`,
+          {
+            code: "rate_limit",
+            statusCode: 429,
+            userMessage:
+              "AI provider rate limit reached. Wait a moment and try again.",
+          },
+        );
+      }
+
+      if (response.status === 408 || response.status === 504) {
+        throw new ReplyDraftProviderError(
+          `Gemini API returned HTTP ${response.status}.`,
+          {
+            code: "timeout",
+            statusCode: 504,
+            userMessage: "AI provider timed out. Please try again.",
+          },
+        );
+      }
+
       throw new ReplyDraftProviderError(
         `Gemini API returned HTTP ${response.status}.`,
+        {
+          code: "upstream_error",
+          statusCode: 502,
+        },
       );
     }
 
     let payload: unknown;
     try {
       payload = await response.json();
-    } catch {
+    } catch (error) {
+      if (isTimeoutError(error, signal)) {
+        throw new ReplyDraftProviderError(
+          "Gemini API request failed: response timed out.",
+          {
+            code: "timeout",
+            statusCode: 504,
+            userMessage: "AI provider timed out. Please try again.",
+          },
+        );
+      }
+
       throw new ReplyDraftProviderError(
         "Gemini API returned an invalid JSON response.",
+        {
+          code: "upstream_error",
+          statusCode: 502,
+        },
       );
     }
 

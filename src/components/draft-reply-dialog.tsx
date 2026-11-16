@@ -181,6 +181,7 @@ export function DraftReplyDialog({
   const linkableConversationsRequestIdRef = useRef(0);
   const conversationsRequestIdRef = useRef(0);
   const loadedLeadIdRef = useRef<string | null>(null);
+  const inFlightGenerationRef = useRef(false);
   const conversationsRef = useRef<WhatsAppConversation[]>([]);
   const outboundMessageRef = useRef<OutboundMessage | null>(null);
   const [drafts, setDrafts] = useState<SavedReplyDraft[]>([]);
@@ -998,8 +999,11 @@ export function DraftReplyDialog({
   }
 
   async function createNewDraft() {
-    if (!lead) return;
+    if (!lead || isLoading || pendingAction !== null || inFlightGenerationRef.current) {
+      return;
+    }
 
+    inFlightGenerationRef.current = true;
     setPendingAction("new");
     setActionError(null);
     setValidationError(null);
@@ -1038,13 +1042,23 @@ export function DraftReplyDialog({
           : "Unable to create a new draft reply.",
       );
     } finally {
+      inFlightGenerationRef.current = false;
       setPendingAction(null);
     }
   }
 
   async function regenerateDraft() {
-    if (!lead || !selectedDraft) return;
+    if (
+      !lead ||
+      !selectedDraft ||
+      isLoading ||
+      pendingAction !== null ||
+      inFlightGenerationRef.current
+    ) {
+      return;
+    }
 
+    inFlightGenerationRef.current = true;
     setPendingAction("regenerate");
     setActionError(null);
     setValidationError(null);
@@ -1085,6 +1099,7 @@ export function DraftReplyDialog({
           : "Unable to regenerate the draft reply.",
       );
     } finally {
+      inFlightGenerationRef.current = false;
       setPendingAction(null);
     }
   }
@@ -1657,7 +1672,7 @@ export function DraftReplyDialog({
             <button
               type="button"
               onClick={() => void createNewDraft()}
-              disabled={isBusy}
+              disabled={isBusy || isLoading}
               className="btn btn-secondary"
             >
               {pendingAction === "new" ? "Creating…" : "New draft"}
@@ -1665,7 +1680,7 @@ export function DraftReplyDialog({
             <button
               type="button"
               onClick={() => void regenerateDraft()}
-              disabled={isBusy}
+              disabled={isBusy || isLoading}
               className="btn btn-secondary"
             >
               {pendingAction === "regenerate"
