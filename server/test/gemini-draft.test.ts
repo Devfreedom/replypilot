@@ -5,12 +5,14 @@ import path from "node:path";
 import { after, before, beforeEach, test } from "node:test";
 import type { Pool } from "pg";
 import {
+  DEFAULT_GEMINI_TIMEOUT_MS,
   GeminiReplyDraftProvider,
   MockReplyDraftProvider,
   ReplyDraftProviderError,
   resolveReplyDraftProviderKind,
   type ReplyDraftProvider,
 } from "../src/ai/reply-draft.js";
+import { loadConfig } from "../src/config.js";
 import {
   buildCatalogueReplySource,
   MAX_SOURCES,
@@ -212,6 +214,13 @@ test("GeminiReplyDraftProvider maps citedFactIds back to canonical ReplyDraftSou
   );
   assert.equal(capturedHeaders?.get("x-goog-api-key"), SAMPLE_API_KEY);
   assert.equal(capturedHeaders?.get("content-type"), "application/json");
+
+  const generationConfig = capturedBody?.generationConfig as {
+    temperature?: number;
+    thinkingConfig?: { thinkingBudget?: number };
+  };
+  assert.equal(generationConfig?.temperature, 0.2);
+  assert.deepEqual(generationConfig?.thinkingConfig, { thinkingBudget: 0 });
 
   const contents = capturedBody?.contents as Array<{
     parts: Array<{ text: string }>;
@@ -932,4 +941,28 @@ test("resolveReplyDraftProviderKind distinguishes Gemini and mock providers", ()
     "mock",
   );
   assert.equal(resolveReplyDraftProviderKind(undefined), "mock");
+});
+
+test("GEMINI_TIMEOUT_MS configures GeminiReplyDraftProvider timeout and defaults to 45_000 ms", () => {
+  assert.equal(DEFAULT_GEMINI_TIMEOUT_MS, 45_000);
+
+  const baseEnv = {
+    NODE_ENV: "development",
+    DATABASE_URL: "postgres://replypilot:replypilot@localhost:5432/replypilot",
+    BETTER_AUTH_SECRET: "replypilot-development-test-secret-0123456789",
+    GEMINI_API_KEY: SAMPLE_API_KEY,
+  };
+
+  const defaultConfig = loadConfig(baseEnv);
+  assert.equal(defaultConfig.gemini?.timeoutMs, 45_000);
+
+  const overriddenConfig = loadConfig({
+    ...baseEnv,
+    GEMINI_TIMEOUT_MS: "75000",
+  });
+  assert.equal(overriddenConfig.gemini?.timeoutMs, 75_000);
+
+  assert.ok(overriddenConfig.gemini);
+  const provider = new GeminiReplyDraftProvider(overriddenConfig.gemini);
+  assert.equal(provider.provider, "gemini");
 });

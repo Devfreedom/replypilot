@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { DEFAULT_GEMINI_TIMEOUT_MS } from "./ai/reply-draft.js";
 import { isValidProxyIpOrCidr } from "./auth/config.js";
 import { loadMetaOutboundConfig } from "./outbound/meta-config.js";
 import { loadWhatsAppConfig } from "./whatsapp/config.js";
@@ -91,6 +92,11 @@ const environmentSchema = z
     BETTER_AUTH_TRUSTED_PROXY_CIDRS: z.string().optional(),
     GEMINI_API_KEY: z.string().trim().min(1).optional(),
     GEMINI_MODEL: z.string().trim().min(1).optional(),
+    GEMINI_TIMEOUT_MS: z.preprocess(
+      (value) =>
+        typeof value === "string" && value.trim() === "" ? undefined : value,
+      z.coerce.number().int().min(1_000).max(300_000).optional(),
+    ),
   })
   .superRefine((value, context) => {
     if (value.NODE_ENV === "production" && !value.BETTER_AUTH_URL) {
@@ -125,7 +131,11 @@ export type ServerConfig = Readonly<{
   whatsapp: WhatsAppIntegrationConfig | null;
   embeddedSignup: EmbeddedSignupConfig | null;
   onboardingRateLimit: OnboardingRateLimitConfig;
-  gemini: Readonly<{ apiKey: string; model?: string }> | null;
+  gemini: Readonly<{
+    apiKey: string;
+    model?: string;
+    timeoutMs: number;
+  }> | null;
 }>;
 
 function parseTrustedOrigins(
@@ -263,6 +273,7 @@ export function loadConfig(
         ...(result.data.GEMINI_MODEL
           ? { model: result.data.GEMINI_MODEL }
           : {}),
+        timeoutMs: result.data.GEMINI_TIMEOUT_MS ?? DEFAULT_GEMINI_TIMEOUT_MS,
       }
       : null,
   };

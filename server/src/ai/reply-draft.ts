@@ -56,7 +56,7 @@ export interface ReplyDraftProvider {
 
 const MAX_REPLY_LENGTH = 1_900;
 const DEFAULT_GEMINI_MODEL = "gemini-3.5-flash";
-const DEFAULT_GEMINI_TIMEOUT_MS = 30_000;
+export const DEFAULT_GEMINI_TIMEOUT_MS = 45_000;
 
 function safeTrim(value: string | null | undefined): string {
   return typeof value === "string" ? value.trim() : "";
@@ -451,6 +451,9 @@ export class GeminiReplyDraftProvider implements ReplyDraftProvider {
             temperature: 0.2,
             responseMimeType: "application/json",
             responseSchema: GEMINI_RESPONSE_JSON_SCHEMA,
+            thinkingConfig: {
+              thinkingBudget: 0,
+            },
           },
         }),
         signal: AbortSignal.timeout(this.#timeoutMs),

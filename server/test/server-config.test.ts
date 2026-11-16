@@ -42,24 +42,53 @@ test("gemini config is null when GEMINI_API_KEY is unset", () => {
   assert.equal(config.gemini, null);
 });
 
-test("gemini config captures trimmed GEMINI_API_KEY and optional GEMINI_MODEL", () => {
+test("gemini config captures trimmed GEMINI_API_KEY, optional GEMINI_MODEL, and GEMINI_TIMEOUT_MS", () => {
   const withoutModel = loadConfig({
     ...BASE_ENVIRONMENT,
     GEMINI_API_KEY: "  test-gemini-key-value  ",
   });
   assert.deepEqual(withoutModel.gemini, {
     apiKey: "test-gemini-key-value",
+    timeoutMs: 45_000,
   });
 
-  const withModel = loadConfig({
+  const withModelAndTimeout = loadConfig({
     ...BASE_ENVIRONMENT,
     GEMINI_API_KEY: "test-gemini-key-value",
-    GEMINI_MODEL: "  gemini-2.5-pro  ",
+    GEMINI_MODEL: "  gemini-3.5-flash  ",
+    GEMINI_TIMEOUT_MS: "60000",
   });
-  assert.deepEqual(withModel.gemini, {
+  assert.deepEqual(withModelAndTimeout.gemini, {
     apiKey: "test-gemini-key-value",
-    model: "gemini-2.5-pro",
+    model: "gemini-3.5-flash",
+    timeoutMs: 60_000,
   });
+
+  const blankTimeout = loadConfig({
+    ...BASE_ENVIRONMENT,
+    GEMINI_API_KEY: "test-gemini-key-value",
+    GEMINI_TIMEOUT_MS: "  ",
+  });
+  assert.deepEqual(blankTimeout.gemini, {
+    apiKey: "test-gemini-key-value",
+    timeoutMs: 45_000,
+  });
+
+  for (const badTimeout of ["not-a-number", "500", "500000", "-10"]) {
+    assert.throws(
+      () =>
+        loadConfig({
+          ...BASE_ENVIRONMENT,
+          GEMINI_API_KEY: "test-gemini-key-value",
+          GEMINI_TIMEOUT_MS: badTimeout,
+        }),
+      (error: unknown) => {
+        assert.ok(error instanceof ConfigError);
+        assert.match(error.message, /GEMINI_TIMEOUT_MS/);
+        return true;
+      },
+    );
+  }
 });
 
 test("loadConfig rejects whitespace-only GEMINI_API_KEY values", () => {
