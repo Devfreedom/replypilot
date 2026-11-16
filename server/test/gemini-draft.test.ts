@@ -11,6 +11,10 @@ import {
   type ReplyDraftProvider,
 } from "../src/ai/reply-draft.js";
 import {
+  buildCatalogueReplySource,
+  MAX_SOURCES,
+} from "../src/business/provenance.js";
+import {
   createCatalogueEntry,
   createKnowledgeEntry,
 } from "../src/business/repository.js";
@@ -724,4 +728,76 @@ test("generateReplyDraft rejects mismatched provider/demo metadata and unapprove
       ),
     /not selected from active approved context/,
   );
+});
+
+test("M14 bounds long keyword-match sourceReason strings to <= 300 chars and caps grounded facts at MAX_SOURCES", async () => {
+  const longTokens = [
+    "a".repeat(120),
+    "b".repeat(120),
+    "c".repeat(120),
+  ];
+  const lead = await createLead(pool, LEGACY_WORKSPACE_ID, {
+    name: "Ngozi Mensah",
+    service: `Wedding ${longTokens[0]}`,
+    lastMessage: `Need pricing for ${longTokens[1]} and ${longTokens[2]} package`,
+    whatsappNumber: null,
+    confirmUnresolvedNumber: false,
+    channel: "Manual",
+    status: "New",
+    nextFollowUpAt: null,
+  });
+
+  const directSource = buildCatalogueReplySource(
+    makeCatalogueEntry({
+      name: `Package ${longTokens[0]}`,
+      description: `${longTokens[1]} ${longTokens[2]}`,
+    }),
+    lead,
+  );
+  assert.ok(directSource.reason.length <= 300);
+
+  // Create 55 active catalogue entries matching the lead's enquiry (> MAX_SOURCES = 50).
+  for (let i = 0; i < 55; i += 1) {
+    await createCatalogueEntry(pool, LEGACY_WORKSPACE_ID, {
+      name: `Wedding ${longTokens[0]} Option ${i}`,
+      description: `Includes ${longTokens[1]} and ${longTokens[2]}`,
+      priceMinor: 10_000 + i,
+      currencyCode: "GBP",
+      isActive: true,
+      availabilityNotes: null,
+    });
+  }
+
+  let sentFactCount = 0;
+  const geminiProvider = new GeminiReplyDraftProvider({
+    apiKey: SAMPLE_API_KEY,
+    fetchImplementation: async (_input, init) => {
+      const body = JSON.parse(String(init?.body)) as {
+        contents: Array<{ parts: Array<{ text: string }> }>;
+      };
+      const userPrompt = body.contents[0]?.parts[0]?.text ?? "";
+      const factMatches = userPrompt.match(/\[(?:cat|know):\d+\]/g) ?? [];
+      sentFactCount = factMatches.length;
+
+      // Attempt to cite both an in-cap ID and an out-of-cap ID (cat:52).
+      return geminiSuccessResponse({
+        intent: "pricing",
+        summary: "Ngozi asked about wedding package pricing.",
+        missingInformation: ["Event date"],
+        draftReply:
+          "Hi Ngozi, thanks for asking about our wedding packages. Could you share your event date?",
+        citedFactIds: ["cat:0", "cat:49", "cat:52"],
+      });
+    },
+  });
+
+  const generated = await generateReplyDraft(
+    pool,
+    LEGACY_WORKSPACE_ID,
+    lead,
+    geminiProvider,
+  );
+  assert.equal(sentFactCount, MAX_SOURCES);
+  assert.equal(generated.sources.length, 2);
+  assert.ok(generated.sources.every((source) => source.reason.length <= 300));
 });

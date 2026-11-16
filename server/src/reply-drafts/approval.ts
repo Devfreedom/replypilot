@@ -39,6 +39,10 @@ export type ApproveReplyDraftResult =
       kind: "connection-unusable";
       code: string;
       message: string;
+    }>
+  | Readonly<{
+      kind: "outbound-conflict";
+      message: string;
     }>;
 
 /**
@@ -146,6 +150,36 @@ export async function approveReplyDraft(
           conversation.conversationId,
         ),
       });
+
+      if (!outboundMessage) {
+        const existingOutbound = await getOutboundMessageForDraft(
+          client,
+          input.workspaceId,
+          input.draftId,
+        );
+
+        if (
+          !existingOutbound ||
+          existingOutbound.status !== "queued" ||
+          existingOutbound.content !== current.draft_reply ||
+          existingOutbound.conversationId !== conversation.conversationId
+        ) {
+          await client.query("ROLLBACK");
+          return {
+            kind: "outbound-conflict",
+            message:
+              existingOutbound?.status === "cancelled"
+                ? "This draft's previous outbound send was cancelled. Create a new draft to send revised content."
+                : existingOutbound &&
+                    existingOutbound.conversationId !==
+                      conversation.conversationId
+                  ? "This draft already has an outbound message tied to a different conversation. Create a new draft to send to this conversation."
+                  : "This draft already has an outbound message for an earlier snapshot. Create a new draft to send revised content.",
+          };
+        }
+
+        outboundMessage = existingOutbound;
+      }
     }
 
     const updated = await client.query<ReplyDraftRow>(

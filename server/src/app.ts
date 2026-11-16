@@ -27,6 +27,111 @@ import { createWhatsAppWebhookRouter } from "./whatsapp/webhook-routes.js";
 import { createWorkspaceRouter } from "./workspaces/routes.js";
 
 const JSON_BODY_LIMIT = "10kb";
+const AUTH_BODY_LIMIT_BYTES = 16_384;
+
+function enforceAuthBodyLimit(
+  request: Request,
+  response: Response,
+  next: NextFunction,
+): void {
+  const rawContentLength = request.headers["content-length"];
+  const firstContentLength = Array.isArray(rawContentLength)
+    ? rawContentLength[0]
+    : rawContentLength;
+
+  if (firstContentLength !== undefined) {
+    const parsedLength = Number(firstContentLength);
+
+    if (Number.isFinite(parsedLength) && parsedLength > AUTH_BODY_LIMIT_BYTES) {
+      response.setHeader("Connection", "close");
+      response.status(413).json({ error: "Request body too large" });
+      return;
+    }
+  }
+
+  if (request.method === "GET" || request.method === "HEAD") {
+    next();
+    return;
+  }
+
+  const chunks: Buffer[] = [];
+  let totalBytes = 0;
+  let finished = false;
+
+  const cleanup = () => {
+    request.off("data", onData);
+    request.off("end", onEnd);
+    request.off("error", onError);
+    request.off("aborted", onAborted);
+  };
+
+  const onData = (chunk: Buffer | string) => {
+    if (finished) {
+      return;
+    }
+
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    totalBytes += buffer.length;
+
+    if (totalBytes > AUTH_BODY_LIMIT_BYTES) {
+      finished = true;
+      cleanup();
+      request.pause();
+
+      if (!response.headersSent) {
+        response.setHeader("Connection", "close");
+        response.once("finish", () => {
+          request.destroy();
+        });
+        response.status(413).json({ error: "Request body too large" });
+      } else {
+        request.destroy();
+      }
+      return;
+    }
+
+    chunks.push(buffer);
+  };
+
+  const onEnd = () => {
+    if (finished) {
+      return;
+    }
+
+    finished = true;
+    cleanup();
+
+    if (chunks.length > 0 && request.headers["content-type"]) {
+      request.body = Buffer.concat(chunks).toString("utf8");
+    }
+
+    next();
+  };
+
+  const onError = (error: Error) => {
+    if (finished) {
+      return;
+    }
+
+    finished = true;
+    cleanup();
+    next(error);
+  };
+
+  const onAborted = () => {
+    if (finished) {
+      return;
+    }
+
+    finished = true;
+    cleanup();
+  };
+
+  request.on("data", onData);
+  request.on("end", onEnd);
+  request.on("error", onError);
+  request.on("aborted", onAborted);
+}
 
 export type AppAuthOptions = Readonly<{
   secret: string;
@@ -87,7 +192,7 @@ export function createApp({
 
   // Better Auth must receive the raw request before a JSON body parser.
   // Browser requests reach this handler through the Next.js /api rewrite.
-  app.all("/api/auth/*splat", toNodeHandler(auth));
+  app.all("/api/auth/*splat", enforceAuthBodyLimit, toNodeHandler(auth));
 
   // Meta signs the exact raw body bytes, so the webhook's raw parser must run
   // before the shared JSON parser. Only this route receives a raw body.
@@ -148,9 +253,13 @@ export function createApp({
       error: unknown,
       _request: Request,
       response: Response,
-      // eslint-disable-next-line @typescript-eslint/no-unused-vars -- Express identifies error handlers by this four-argument signature.
       _next: NextFunction,
     ) => {
+      if (response.headersSent) {
+        _next(error);
+        return;
+      }
+
       if (
         error instanceof SyntaxError &&
         "status" in error &&

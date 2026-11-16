@@ -278,19 +278,18 @@ async function mutateReplyDraft(
       return { kind: "not-found" };
     }
 
-    const sendingLock = await client.query(
+    const outboundLock = await client.query<{ id: string; status: string }>(
       `
-        SELECT id
+        SELECT id, status
         FROM outbound_messages
         WHERE workspace_id = $1
           AND reply_draft_id = $2
-          AND status = 'sending'
         FOR UPDATE
       `,
       [workspaceId, draftId],
     );
 
-    if (sendingLock.rows.length > 0) {
+    if (outboundLock.rows.some((row) => row.status === "sending")) {
       await client.query("ROLLBACK");
       return { kind: "send-in-progress" };
     }

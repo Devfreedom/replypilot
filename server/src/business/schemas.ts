@@ -168,7 +168,10 @@ export const businessProfileSchema = z
       .max(160),
     businessDescription: z.string().trim().max(2000).default(""),
     contactEmail: optionalText(254).refine(
-      (value) => value === null || z.email().safeParse(value).success,
+      (value) =>
+        value === undefined ||
+        value === null ||
+        z.email().safeParse(value).success,
       "Use a valid email address",
     ),
     contactPhone: contactPhoneSchema,

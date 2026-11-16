@@ -2,6 +2,7 @@ import { z } from "zod";
 import {
   buildCatalogueReplySource,
   buildKnowledgeReplySource,
+  MAX_SOURCES,
   replyDraftSourcesSchema,
   type ReplyDraftSource,
 } from "../business/provenance.js";
@@ -168,7 +169,9 @@ function groundedFacts(lead: Lead, context?: ReplyContext): GroundedFact[] {
       text: knowledgeFact(entry),
       source: buildKnowledgeReplySource(entry, lead),
     })),
-  ].filter((fact) => fact.text.length <= 700);
+  ]
+    .slice(0, MAX_SOURCES)
+    .filter((fact) => fact.text.length <= 700);
 }
 
 function appendFacts(

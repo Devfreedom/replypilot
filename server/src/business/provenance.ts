@@ -36,11 +36,21 @@ export const replyDraftSourceSchema = z
 
 export type ReplyDraftSource = z.infer<typeof replyDraftSourceSchema>;
 
-const MAX_SOURCES = 50;
+export const MAX_SOURCES = 50;
+const MAX_SOURCE_REASON_LENGTH = 300;
+const MAX_VISIBLE_TERM_LENGTH = 40;
 
 export const replyDraftSourcesSchema = z
   .array(replyDraftSourceSchema)
   .max(MAX_SOURCES);
+
+function formatVisibleTerm(term: string): string {
+  if (term.length <= MAX_VISIBLE_TERM_LENGTH) {
+    return `"${term}"`;
+  }
+
+  return `"${term.slice(0, MAX_VISIBLE_TERM_LENGTH - 3)}..."`;
+}
 
 function sourceReason(lead: Lead, searchableText: string): string {
   const enquiryTerms = searchTerms(`${lead.service} ${lead.lastMessage}`);
@@ -52,7 +62,7 @@ function sourceReason(lead: Lead, searchableText: string): string {
     return "Selected by the current keyword rule. Keyword matching is not semantic retrieval; verify that this fact is relevant.";
   }
 
-  const visibleTerms = sharedTerms.slice(0, 3).map((term) => `"${term}"`);
+  const visibleTerms = sharedTerms.slice(0, 3).map(formatVisibleTerm);
   const termList =
     visibleTerms.length === 1
       ? visibleTerms[0]
@@ -60,7 +70,11 @@ function sourceReason(lead: Lead, searchableText: string): string {
           visibleTerms[visibleTerms.length - 1]
         }`;
 
-  return `Keyword match on ${termList}. Keyword matching only, not semantic retrieval; verify that this fact is relevant.`;
+  const reason = `Keyword match on ${termList}. Keyword matching only, not semantic retrieval; verify that this fact is relevant.`;
+
+  return reason.length <= MAX_SOURCE_REASON_LENGTH
+    ? reason
+    : `${reason.slice(0, MAX_SOURCE_REASON_LENGTH - 3)}...`;
 }
 
 function catalogueContent(entry: CatalogueEntry): string {

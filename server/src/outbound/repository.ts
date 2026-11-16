@@ -423,29 +423,26 @@ export async function claimQueuedOutboundMessages(
         WITH claimed AS (
           SELECT message.id
           FROM outbound_messages AS message
+          JOIN reply_drafts AS draft
+            ON draft.id = message.reply_draft_id
+           AND draft.workspace_id = message.workspace_id
+          JOIN whatsapp_conversations AS conversation
+            ON conversation.id = message.conversation_id
+           AND conversation.workspace_id = message.workspace_id
           WHERE message.status = 'queued'
             AND message.provider = $2
             AND (message.next_attempt_at IS NULL OR message.next_attempt_at <= now())
-            AND EXISTS (
+            AND draft.status = 'approved'
+            AND draft.draft_reply = message.content
+            AND conversation.status IN ('open', 'closed')
+            AND NOT EXISTS (
               SELECT 1
-              FROM reply_drafts AS draft
-              JOIN whatsapp_conversations AS conversation
-                ON conversation.id = message.conversation_id
-               AND conversation.workspace_id = message.workspace_id
-              WHERE draft.id = message.reply_draft_id
-                AND draft.workspace_id = message.workspace_id
-                AND draft.status = 'approved'
-                AND draft.draft_reply = message.content
-                AND conversation.status IN ('open', 'closed')
-                AND NOT EXISTS (
-                  SELECT 1
-                  FROM customer_suppressions AS suppression
-                  WHERE suppression.workspace_id = message.workspace_id
-                    AND suppression.customer_id = conversation.customer_id
-                )
+              FROM customer_suppressions AS suppression
+              WHERE suppression.workspace_id = message.workspace_id
+                AND suppression.customer_id = conversation.customer_id
             )
           ORDER BY message.queued_at ASC, message.id ASC
-          FOR UPDATE SKIP LOCKED
+          FOR UPDATE OF message FOR SHARE OF draft SKIP LOCKED
           LIMIT $1
         ),
         updated AS (

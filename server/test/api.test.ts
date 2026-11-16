@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createHmac, randomUUID } from "node:crypto";
 import { once } from "node:events";
 import { readFile, readdir } from "node:fs/promises";
-import type { Server } from "node:http";
+import { request as httpRequest, type Server } from "node:http";
 import { after, before, beforeEach, test } from "node:test";
 import { join } from "node:path";
 import { Pool } from "pg";
@@ -33,6 +33,8 @@ import type {
   OutboundMessageRecord,
 } from "../src/outbound/types.js";
 import { runOutboundWorkerOnce } from "../src/outbound/worker.js";
+import { claimQueuedOutboundMessages } from "../src/outbound/repository.js";
+import { updateReplyDraftText } from "../src/reply-drafts/repository.js";
 import { recordWorkerHeartbeat } from "../src/outbound/worker-status.js";
 import {
   LEGACY_WORKSPACE_ID,
@@ -9381,9 +9383,22 @@ test("draft edits cancel queued work and worker cancels inactive conversations",
     sendPolicy: "approve_and_send",
     conversationId,
   });
-  assert.equal(reapproved.status, 200);
-  const cancelled = await readJson<ReplyDraftApprovalPayload>(reapproved);
-  assert.equal(cancelled.outboundMessage?.status, "cancelled");
+  assert.equal(reapproved.status, 409);
+  assert.match(
+    (await readJson<ErrorPayload>(reapproved)).error,
+    /cancelled.*new draft/i,
+  );
+
+  const draftsAfterConflict = await readJson<ReplyDraftsPayload>(
+    await listSavedDrafts(lead.id),
+  );
+  assert.equal(draftsAfterConflict.drafts[0]?.status, "draft");
+
+  const reapprovedOnly = await approveSavedDraft(lead.id, draft.id, {
+    status: "approved",
+    sendPolicy: "approve_only",
+  });
+  assert.equal(reapprovedOnly.status, 200);
 
   const retry = await sendSavedDraft(draft.id);
   assert.equal(retry.status, 409);
@@ -14701,4 +14716,309 @@ test("M14F the owner can confirm explicitly that an unresolved number is a diffe
     M14F_GH_NATIONAL,
     "The legacy row is left untouched",
   );
+});
+
+// ─── Batch 1 Audit Regression Tests (H1, H2, H4, M10, M11) ──────────────────
+
+test("H1 mutateReplyDraft cancels queued outbound and serializes against concurrent worker claims", async () => {
+  const { lead, conversationId } = await createLeadWithConversation();
+  const draft = await createSavedDraftPayload(lead.id);
+  const approved = await approveSavedDraft(lead.id, draft.id, {
+    status: "approved",
+    sendPolicy: "approve_and_send",
+    conversationId,
+  });
+  assert.equal(approved.status, 200);
+
+  // Run draft edit concurrently with claimQueuedOutboundMessages.
+  const [editResult, claimedRows] = await Promise.all([
+    updateReplyDraftText(
+      pool,
+      requireSession().workspace.id,
+      lead.id,
+      draft.id,
+      "Edited draft content that must never be sent if claimed.",
+    ),
+    claimQueuedOutboundMessages(pool, 10, "mock"),
+  ]);
+
+  if (editResult.kind === "updated") {
+    assert.equal(claimedRows.length, 0);
+    const outbound = await pool.query<{ status: string }>(
+      "SELECT status FROM outbound_messages WHERE reply_draft_id = $1",
+      [draft.id],
+    );
+    assert.equal(outbound.rows[0]?.status, "cancelled");
+  } else {
+    assert.equal(editResult.kind, "send-in-progress");
+    assert.equal(claimedRows.length, 1);
+    assert.equal(claimedRows[0]?.content, draft.draftReply);
+
+    // Subsequent API edit while 'sending' returns 409.
+    const blockedEdit = await patchSavedDraft(lead.id, draft.id, {
+      draftReply: "Blocked while sending.",
+    });
+    assert.equal(blockedEdit.status, 409);
+  }
+});
+
+test("H2 re-approving a draft with an existing failed, sent, or mismatched outbound row returns 409 Conflict", async () => {
+  const { lead, conversationId } = await createLeadWithConversation();
+  await persistInboundMessages(pool, requireSession().workspace.id, [
+    inboundMessage({
+      phoneNumberId: "106540352242999",
+      senderWaId: TEST_WHATSAPP_CUSTOMER_WA_ID,
+      senderPhoneNumber: TEST_WHATSAPP_CUSTOMER_WA_ID,
+    }),
+  ]);
+  const conversationIds = await conversationIdsForLead(lead.id);
+  const otherConversationId = conversationIds.find((id) => id !== conversationId);
+  assert.ok(otherConversationId);
+
+  const draft = await createSavedDraftPayload(lead.id);
+  const firstApprove = await approveSavedDraft(lead.id, draft.id, {
+    status: "approved",
+    sendPolicy: "approve_and_send",
+    conversationId,
+  });
+  assert.equal(firstApprove.status, 200);
+
+  // Return to draft, then simulate an existing 'failed' outbound row.
+  const returned = await patchSavedDraft(lead.id, draft.id, {
+    status: "draft",
+  });
+  assert.equal(returned.status, 200);
+
+  await pool.query(
+    "UPDATE outbound_messages SET status = 'failed' WHERE reply_draft_id = $1",
+    [draft.id],
+  );
+  const conflictFailed = await approveSavedDraft(lead.id, draft.id, {
+    status: "approved",
+    sendPolicy: "approve_and_send",
+    conversationId,
+  });
+  assert.equal(conflictFailed.status, 409);
+  assert.match(
+    (await readJson<ErrorPayload>(conflictFailed)).error,
+    /new draft/i,
+  );
+
+  // Queued row targeting a different conversation also returns 409 Conflict.
+  await pool.query(
+    "UPDATE outbound_messages SET status = 'queued' WHERE reply_draft_id = $1",
+    [draft.id],
+  );
+  const conflictConversation = await approveSavedDraft(lead.id, draft.id, {
+    status: "approved",
+    sendPolicy: "approve_and_send",
+    conversationId: otherConversationId,
+  });
+  assert.equal(conflictConversation.status, 409);
+  assert.match(
+    (await readJson<ErrorPayload>(conflictConversation)).error,
+    /different conversation/i,
+  );
+});
+
+test("H4 /api/auth/*splat rejects payloads > 16 KB for both Content-Length and chunked streams", async () => {
+  const oversized = JSON.stringify({
+    email: "auth-limit@example.test",
+    password: "a".repeat(20_000),
+  });
+
+  // 1. Standard Content-Length request > 16384 bytes
+  const clResponse = await nativeFetch(`${baseUrl}/api/auth/sign-in/email`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-forwarded-for": TEST_CLIENT_IP,
+    },
+    body: oversized,
+  });
+  assert.equal(clResponse.status, 413);
+  assert.equal(
+    (await readJson<ErrorPayload>(clResponse)).error,
+    "Request body too large",
+  );
+
+  // 2. Chunked stream without Content-Length header > 16384 bytes
+  const target = new URL(`${baseUrl}/api/auth/sign-in/email`);
+  const chunkedResult = await new Promise<{ status: number; body: string }>(
+    (resolve, reject) => {
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (!settled) {
+          settled = true;
+          req.destroy();
+          reject(new Error("Timed out waiting for chunked 413 response"));
+        }
+      }, 5_000);
+
+      const req = httpRequest(
+        {
+          hostname: target.hostname,
+          port: target.port,
+          path: target.pathname,
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Transfer-Encoding": "chunked",
+            "x-forwarded-for": TEST_CLIENT_IP,
+          },
+        },
+        (res) => {
+          const parts: Buffer[] = [];
+          res.on("data", (chunk: Buffer) => parts.push(chunk));
+          res.on("end", () => {
+            if (!settled) {
+              settled = true;
+              clearTimeout(timer);
+              resolve({
+                status: res.statusCode ?? 0,
+                body: Buffer.concat(parts).toString("utf8"),
+              });
+            }
+          });
+        },
+      );
+      req.on("error", (err) => {
+        if (!settled) {
+          settled = true;
+          clearTimeout(timer);
+          reject(err);
+        }
+      });
+      req.write(oversized.slice(0, 10_000));
+      setTimeout(() => {
+        if (!req.destroyed) {
+          req.write(oversized.slice(10_000));
+          req.end();
+        }
+      }, 10);
+    },
+  );
+  assert.equal(chunkedResult.status, 413);
+  assert.equal(
+    (JSON.parse(chunkedResult.body) as ErrorPayload).error,
+    "Request body too large",
+  );
+
+  // 3. Normal-sized auth payload still succeeds.
+  const okSession = await registerUser({
+    name: "Auth Limit Valid",
+    email: `auth-limit-ok-${randomUUID()}@example.test`,
+    password: "Password123!",
+  });
+  assert.ok(okSession.cookie);
+});
+
+test("M10 business profile accepts omitted contactEmail on create and update", async () => {
+  const { contactEmail: _ignored, ...withoutEmail } = validProfileBody;
+  void _ignored;
+
+  const created = await jsonRequest("/api/business/profile", "POST", withoutEmail);
+  assert.equal(created.status, 201);
+  const createdPayload = await readJson<{
+    profile: { contactEmail: string | null };
+  }>(created);
+  assert.equal(createdPayload.profile.contactEmail, null);
+
+  const updated = await jsonRequest("/api/business/profile", "PATCH", {
+    ...withoutEmail,
+    businessName: "Updated Without Email",
+  });
+  assert.equal(updated.status, 200);
+  const updatedPayload = await readJson<{
+    profile: { businessName: string; contactEmail: string | null };
+  }>(updated);
+  assert.equal(updatedPayload.profile.businessName, "Updated Without Email");
+  assert.equal(updatedPayload.profile.contactEmail, null);
+});
+
+test("M11 PATCH on deactivated catalogue or knowledge entries without isActive preserves isActive: false", async () => {
+  const createdCat = await jsonRequest("/api/business/catalogue", "POST", {
+    name: "Inactive Wedding Package",
+    description: "Wedding coverage",
+    priceMinor: 50_000,
+    currencyCode: "NGN",
+  });
+  assert.equal(createdCat.status, 201);
+  const catId = (await readJson<CataloguePayload>(createdCat)).entry.id;
+
+  const deactivatedCat = await jsonRequest(
+    `/api/business/catalogue/${catId}`,
+    "DELETE",
+  );
+  assert.equal(deactivatedCat.status, 200);
+  assert.equal(
+    (await readJson<CataloguePayload>(deactivatedCat)).entry.isActive,
+    false,
+  );
+
+  // PATCH without isActive must keep isActive: false.
+  const patchedCat = await jsonRequest(
+    `/api/business/catalogue/${catId}`,
+    "PATCH",
+    {
+      name: "Inactive Wedding Package Renamed",
+      description: "Updated wedding coverage",
+      priceMinor: 60_000,
+      currencyCode: "NGN",
+    },
+  );
+  assert.equal(patchedCat.status, 200);
+  assert.equal(
+    (await readJson<CataloguePayload>(patchedCat)).entry.isActive,
+    false,
+  );
+
+  const createdKnowledge = await jsonRequest("/api/business/knowledge", "POST", {
+    title: "Inactive Deposit Policy",
+    answer: "Wedding deposit policy.",
+    entryType: "policy",
+  });
+  assert.equal(createdKnowledge.status, 201);
+  const knowId = (await readJson<KnowledgePayload>(createdKnowledge)).entry.id;
+
+  const deactivatedKnow = await jsonRequest(
+    `/api/business/knowledge/${knowId}`,
+    "DELETE",
+  );
+  assert.equal(deactivatedKnow.status, 200);
+  assert.equal(
+    (await readJson<KnowledgePayload>(deactivatedKnow)).entry.isActive,
+    false,
+  );
+
+  const patchedKnow = await jsonRequest(
+    `/api/business/knowledge/${knowId}`,
+    "PATCH",
+    {
+      title: "Inactive Deposit Policy Renamed",
+      answer: "Updated wedding deposit policy.",
+      entryType: "policy",
+    },
+  );
+  assert.equal(patchedKnow.status, 200);
+  assert.equal(
+    (await readJson<KnowledgePayload>(patchedKnow)).entry.isActive,
+    false,
+  );
+
+  // Ensure neither deactivated entry leaks into reply context.
+  const leadResponse = await postLead({
+    name: "Context Check Lead",
+    service: "Wedding coverage",
+    lastMessage: "What is your wedding deposit policy?",
+  });
+  assert.equal(leadResponse.status, 201);
+  const lead = (await readJson<LeadPayload>(leadResponse)).lead;
+  const context = await buildReplyContext(
+    pool,
+    requireSession().workspace.id,
+    lead,
+  );
+  assert.equal(context.catalogue.length, 0);
+  assert.equal(context.knowledge.length, 0);
 });

@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useEffect, useState, type FormEvent } from "react";
 import { authClient } from "@/lib/auth-client";
+import { sanitizeAuthRedirectPath } from "@/lib/auth-redirect";
 import { useAuth } from "./auth-provider";
 
 type AuthMode = "sign-in" | "sign-up";
@@ -18,7 +19,7 @@ function destination(): string {
 
   const next = new URLSearchParams(window.location.search).get("next");
 
-  return next && next.startsWith("/") && !next.startsWith("//") ? next : "/";
+  return sanitizeAuthRedirectPath(next, window.location.origin);
 }
 
 function friendlyAuthError(

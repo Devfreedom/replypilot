@@ -604,6 +604,13 @@ export function createLeadsRouter({
         return;
       }
 
+      if (result.kind === "outbound-conflict") {
+        response.status(409).json({
+          error: result.message,
+        });
+        return;
+      }
+
       response.status(200).json({
         draft: result.draft,
         outboundMessage: result.outboundMessage,
