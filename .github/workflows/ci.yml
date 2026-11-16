@@ -47,6 +47,8 @@ jobs:
 
       - run: npm run lint
       - run: npm run typecheck:api
+      - run: npx next typegen && npx tsc --noEmit
       - run: npm run test:web
       - run: npm run test:api
+      - run: npm run build
       - run: npm run build:api

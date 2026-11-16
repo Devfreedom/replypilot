@@ -1,11 +1,20 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import { useAuth } from "./auth-provider";
 import { ThemeSelect } from "./theme";
 import { dashboardViewHref, type View } from "@/lib/leads";
-import { assistantProviderBadgeLabel } from "@/lib/workspace";
+import {
+  assistantProviderBadgeLabel,
+  resolveWorkspaceCanManage,
+} from "@/lib/workspace";
 
 export type ShellActiveKey =
   | "dashboard"
@@ -172,9 +181,9 @@ function AccountNavList({
   );
 }
 
-function BrandBlock() {
+function BrandBlock({ onNavigate }: { onNavigate?: () => void }) {
   return (
-    <Link href="/" className="flex items-center gap-3 px-2">
+    <Link href="/" onClick={onNavigate} className="flex items-center gap-3 px-2">
       <div
         aria-hidden="true"
         className="flex h-10 w-10 items-center justify-center rounded-xl bg-accent text-lg font-bold text-on-accent"
@@ -255,7 +264,7 @@ export function AppShell({
   onDashboardNavigate,
   leadCount = 0,
   followUpCount = 0,
-  canManage = false,
+  canManage,
   title,
   subtitle,
   actions,
@@ -279,7 +288,8 @@ export function AppShell({
 }) {
   const drawerRef = useRef<HTMLDialogElement>(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
-  const { user, workspace, signOut } = useAuth();
+  const { user, workspace, role, signOut } = useAuth();
+  const effectiveCanManage = resolveWorkspaceCanManage(role, canManage);
 
   useEffect(() => {
     const drawer = drawerRef.current;
@@ -292,6 +302,20 @@ export function AppShell({
       drawer.close();
     }
   }, [drawerOpen]);
+
+  // Close the modal drawer when Activity hides this route so its top-layer
+  // dialog backdrop never persists across navigation.
+  useLayoutEffect(() => {
+    const drawer = drawerRef.current;
+
+    return () => {
+      if (drawer?.open) {
+        drawer.close();
+      }
+
+      setDrawerOpen(false);
+    };
+  }, []);
 
   function closeDrawer() {
     setDrawerOpen(false);
@@ -348,7 +372,7 @@ export function AppShell({
         </div>
 
         <div className="mt-8">
-          <AssistantNote canManage={canManage} />
+          <AssistantNote canManage={effectiveCanManage} />
         </div>
 
         <UserFooter onSignOut={signOut} />
@@ -364,7 +388,7 @@ export function AppShell({
       >
         <div className="flex h-full w-72 flex-col overflow-y-auto px-5 py-6">
           <div className="flex items-center justify-between">
-            <BrandBlock />
+            <BrandBlock onNavigate={closeDrawer} />
             <button
               type="button"
               onClick={closeDrawer}
@@ -404,7 +428,7 @@ export function AppShell({
           </div>
 
           <div className="mt-8">
-            <AssistantNote canManage={canManage} />
+            <AssistantNote canManage={effectiveCanManage} />
           </div>
 
           <UserFooter onSignOut={signOut} />

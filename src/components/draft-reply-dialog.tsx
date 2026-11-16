@@ -4,6 +4,7 @@ import {
   useCallback,
   useEffect,
   useEffectEvent,
+  useLayoutEffect,
   useRef,
   useState,
 } from "react";
@@ -27,6 +28,7 @@ import {
   parseOutboundMessageLookupResponse,
   preferredConversationIdForDraft,
   sendPolicyChoiceForDraftSelection,
+  shouldClearOutboundOnDraftUpdate,
   type ApprovalSendPolicy,
   type OutboundMessage,
 } from "@/lib/messaging";
@@ -183,7 +185,10 @@ export function DraftReplyDialog({
   const loadedLeadIdRef = useRef<string | null>(null);
   const inFlightGenerationRef = useRef(false);
   const conversationsRef = useRef<WhatsAppConversation[]>([]);
-  const outboundMessageRef = useRef<OutboundMessage | null>(null);
+  const outboundMessageRef = useRef<{
+    leadId: string;
+    message: OutboundMessage;
+  } | null>(null);
   const [drafts, setDrafts] = useState<SavedReplyDraft[]>([]);
   const [selectedDraftId, setSelectedDraftId] = useState<string | null>(null);
   const [editedReply, setEditedReply] = useState("");
@@ -208,8 +213,10 @@ export function DraftReplyDialog({
     string | null
   >(null);
   const [approvalContextLoading, setApprovalContextLoading] = useState(false);
-  const [outboundMessage, setOutboundMessage] =
-    useState<OutboundMessage | null>(null);
+  const [outboundMessageState, setOutboundMessageState] = useState<{
+    leadId: string;
+    message: OutboundMessage;
+  } | null>(null);
   const [outboundLoading, setOutboundLoading] = useState(false);
   const [outboundLoadError, setOutboundLoadError] = useState<string | null>(
     null,
@@ -227,6 +234,13 @@ export function DraftReplyDialog({
 
   const selectedDraft =
     drafts.find((draft) => draft.id === selectedDraftId) ?? null;
+  const outboundMessage =
+    lead &&
+    selectedDraft &&
+    outboundMessageState?.leadId === lead.id &&
+    outboundMessageState.message.replyDraftId === selectedDraft.id
+      ? outboundMessageState.message
+      : null;
   const hasUnsavedChanges = selectedDraft
     ? editedReply !== selectedDraft.draftReply
     : false;
@@ -268,7 +282,9 @@ export function DraftReplyDialog({
       setConversations(nextConversations);
       setSelectedConversationId(
         preferredConversationIdForDraft(
-          outboundMessageRef.current?.conversationId ?? null,
+          outboundMessageRef.current?.leadId === leadId
+            ? outboundMessageRef.current.message.conversationId
+            : null,
           nextConversations.filter(
             (conversation) =>
               conversation.leadId === leadId &&
@@ -282,8 +298,11 @@ export function DraftReplyDialog({
 
   const setOutboundForLead = useCallback(
     (leadId: string, nextOutboundMessage: OutboundMessage | null) => {
-      outboundMessageRef.current = nextOutboundMessage;
-      setOutboundMessage(nextOutboundMessage);
+      const scoped = nextOutboundMessage
+        ? { leadId, message: nextOutboundMessage }
+        : null;
+      outboundMessageRef.current = scoped;
+      setOutboundMessageState(scoped);
       setSelectedConversationId(
         preferredConversationIdForDraft(
           nextOutboundMessage?.conversationId ?? null,
@@ -299,7 +318,7 @@ export function DraftReplyDialog({
   );
 
   function replaceDraft(nextDraft: SavedReplyDraft) {
-    if (nextDraft.id !== selectedDraftId) {
+    if (shouldClearOutboundOnDraftUpdate(selectedDraftId, nextDraft)) {
       outboundRequestIdRef.current += 1;
       setOutboundForLead(lead?.id ?? "", null);
       setOutboundLoadError(null);
@@ -607,6 +626,10 @@ export function DraftReplyDialog({
       setDrafts([]);
       setSelectedDraftId(null);
       setEditedReply("");
+      setSendPolicyChoice("default");
+      setLinkableConversations([]);
+      setSelectedLinkableConversationId("");
+      setLinkingError(null);
       setOutboundForLead(selectedLead.id, null);
       setOutboundLoadError(null);
       setOutboundLoading(false);
@@ -678,11 +701,63 @@ export function DraftReplyDialog({
       }
   }
 
+  const invalidateLeadRequests = useCallback(() => {
+    requestIdRef.current += 1;
+    approvalContextRequestIdRef.current += 1;
+    outboundRequestIdRef.current += 1;
+    conversationsRequestIdRef.current += 1;
+    linkableConversationsRequestIdRef.current += 1;
+    conversationsRef.current = [];
+    outboundMessageRef.current = null;
+  }, []);
+
+  const resetDialogState = useCallback(() => {
+    invalidateLeadRequests();
+    setDrafts([]);
+    setSelectedDraftId(null);
+    setEditedReply("");
+    setIsLoading(false);
+    setError(null);
+    setActionError(null);
+    setValidationError(null);
+    setNotice(null);
+    setCopyMessage(null);
+    setSendPolicyChoice("default");
+    setConversations([]);
+    setSelectedConversationId("");
+    setApprovalContextError(null);
+    setApprovalContextLoading(false);
+    setOutboundMessageState(null);
+    setOutboundLoading(false);
+    setOutboundLoadError(null);
+    setLinkableConversations([]);
+    setLinkableLoading(false);
+    setLinkingConversationId(null);
+    setSelectedLinkableConversationId("");
+    setLinkingError(null);
+  }, [invalidateLeadRequests]);
+
+  function handleDialogClose() {
+    loadedLeadIdRef.current = null;
+    resetDialogState();
+    onClose();
+  }
+
   const loadApprovalContextForEffect = useEffectEvent(loadApprovalContext);
   const loadDraftsForEffect = useEffectEvent(loadDrafts);
   const loadLinkableConversationsForEffect = useEffectEvent(
     loadLinkableConversations,
   );
+
+  useLayoutEffect(() => {
+    const dialog = dialogRef.current;
+
+    return () => {
+      if (dialog?.open) {
+        dialog.close();
+      }
+    };
+  }, []);
 
   useEffect(() => {
     const dialog = dialogRef.current;
@@ -696,30 +771,20 @@ export function DraftReplyDialog({
 
       if (loadedLeadIdRef.current !== lead.id) {
         loadedLeadIdRef.current = lead.id;
-        approvalContextRequestIdRef.current += 1;
-        outboundRequestIdRef.current += 1;
-        conversationsRequestIdRef.current += 1;
-        linkableConversationsRequestIdRef.current += 1;
-        setSendPolicyChoice("default");
-        setSelectedConversationId("");
-        setLinkableConversations([]);
-        setSelectedLinkableConversationId("");
-        setLinkingError(null);
+        invalidateLeadRequests();
         void loadDraftsForEffect(lead);
         void loadApprovalContextForEffect(lead);
         void loadLinkableConversationsForEffect(lead);
       }
     } else {
-      requestIdRef.current += 1;
-      approvalContextRequestIdRef.current += 1;
-      outboundRequestIdRef.current += 1;
       loadedLeadIdRef.current = null;
+      invalidateLeadRequests();
 
       if (dialog.open) {
         dialog.close();
       }
     }
-  }, [lead]);
+  }, [lead, invalidateLeadRequests]);
 
   async function saveReply() {
     if (!lead || !selectedDraft) return;
@@ -1130,7 +1195,7 @@ export function DraftReplyDialog({
   return (
     <dialog
       ref={dialogRef}
-      onClose={onClose}
+      onClose={handleDialogClose}
       onClick={handleBackdropClick}
       aria-labelledby="draft-reply-title"
       aria-describedby="draft-reply-demo"

@@ -3,6 +3,7 @@ import { test } from "node:test";
 import {
   assistantProviderBadgeLabel,
   parseWorkspaceResponse,
+  resolveWorkspaceCanManage,
 } from "./workspace";
 
 test("parseWorkspaceResponse accepts mock, gemini, and omitted replyDraftProvider", () => {
@@ -49,4 +50,12 @@ test("assistantProviderBadgeLabel displays Gemini AI vs Mock provider copy accur
     assistantProviderBadgeLabel(null),
     "Mock provider · no live AI",
   );
+});
+
+test("resolveWorkspaceCanManage derives permission from workspace role unless explicitly overridden", () => {
+  assert.equal(resolveWorkspaceCanManage("owner"), true);
+  assert.equal(resolveWorkspaceCanManage("member"), false);
+  assert.equal(resolveWorkspaceCanManage(null), false);
+  assert.equal(resolveWorkspaceCanManage("owner", false), false);
+  assert.equal(resolveWorkspaceCanManage("member", true), true);
 });

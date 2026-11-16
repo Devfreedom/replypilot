@@ -308,13 +308,24 @@ function ConversationThread({
     scrollTop: number;
   } | null>(null);
   const scrollToBottomRef = useRef(true);
+  const loadedConversationIdRef = useRef<string | null>(null);
   const olderAbortRef = useRef<AbortController | null>(null);
   const loadingOlderRef = useRef(false);
 
   useEffect(() => {
+    if (loadedConversationIdRef.current === conversation.id) {
+      return () => {
+        olderAbortRef.current?.abort();
+        olderAbortRef.current = null;
+      };
+    }
+
     const controller = new AbortController();
 
     async function load() {
+      setMessagesLoading(true);
+      setMessagesError(null);
+
       try {
         const params = new URLSearchParams({
           limit: String(MESSAGE_PAGE_SIZE),
@@ -340,6 +351,7 @@ function ConversationThread({
           return;
         }
 
+        loadedConversationIdRef.current = conversation.id;
         setMessages(parsed.messages);
         setOlderCursor(parsed.pagination?.prevCursor ?? null);
         setHasOlder(parsed.pagination?.hasMore ?? false);

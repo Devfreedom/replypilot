@@ -5,11 +5,7 @@ import { WhatsAppInbox } from "@/components/whatsapp-inbox";
 export default function WhatsAppPage() {
   return (
     <ProtectedApp>
-      <AppShell
-        active="whatsapp"
-        title="Unified WhatsApp inbox"
-        canManage={false}
-      >
+      <AppShell active="whatsapp" title="Unified WhatsApp inbox">
         <WhatsAppInbox />
       </AppShell>
     </ProtectedApp>

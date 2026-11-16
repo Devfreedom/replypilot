@@ -60,3 +60,10 @@ export function assistantProviderBadgeLabel(
     ? "Gemini AI · grounded drafts"
     : "Mock provider · no live AI";
 }
+
+export function resolveWorkspaceCanManage(
+  role: "owner" | "member" | null | undefined,
+  explicitCanManage?: boolean,
+): boolean {
+  return explicitCanManage ?? role === "owner";
+}

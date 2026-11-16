@@ -1,6 +1,7 @@
 "use client";
 
-import { Suspense, useEffect, useMemo, useState } from "react";
+import Link from "next/link";
+import { Activity, Suspense, useEffect, useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useAuth } from "@/components/auth-provider";
 import { AppShell } from "@/components/app-shell";
@@ -181,12 +182,12 @@ function NextSteps({ leadCount }: { leadCount: number }) {
           </span>
           <span>
             In{" "}
-            <a
+            <Link
               href="/settings"
               className="font-semibold text-accent-ink hover:underline"
             >
               Business settings
-            </a>
+            </Link>
             , add the services, prices, opening hours and policies you want
             reply drafts to use.
           </span>
@@ -206,6 +207,209 @@ function NextSteps({ leadCount }: { leadCount: number }) {
   );
 }
 
+/**
+ * Interactive search/filter/table panel rendered inside each dashboard `<Activity>`
+ * boundary so switching between Overview, All leads, and Follow-ups retains
+ * uncommitted filters and scroll position without cross-tab leakage.
+ */
+function LeadsPanel({
+  leads,
+  allLeadCount,
+  isLoading,
+  loadError,
+  operationError,
+  canManage,
+  pendingStatusIds,
+  onStatusChange,
+  onDraftReply,
+  onRetryLoad,
+  onOpenNewLead,
+  followUpsOnly = false,
+}: {
+  leads: Lead[];
+  allLeadCount: number;
+  isLoading: boolean;
+  loadError: string | null;
+  operationError: string | null;
+  canManage: boolean;
+  pendingStatusIds: ReadonlySet<string>;
+  onStatusChange: (id: string, status: LeadStatus) => void;
+  onDraftReply: (lead: Lead) => void;
+  onRetryLoad: () => void;
+  onOpenNewLead: () => void;
+  followUpsOnly?: boolean;
+}) {
+  const [filter, setFilter] = useState<LeadFilter>("All");
+  const [search, setSearch] = useState("");
+
+  const displayedLeads = useMemo(() => {
+    const query = search.trim().toLowerCase();
+
+    return leads.filter((lead) => {
+      const matchesSearch =
+        !query ||
+        lead.name.toLowerCase().includes(query) ||
+        lead.service.toLowerCase().includes(query) ||
+        lead.lastMessage.toLowerCase().includes(query);
+
+      const matchesFilter = filter === "All" || lead.status === filter;
+
+      return matchesSearch && matchesFilter;
+    });
+  }, [leads, search, filter]);
+
+  function clearFilters() {
+    setSearch("");
+    setFilter("All");
+  }
+
+  return (
+    <>
+      <div className="flex flex-col gap-4 px-5 py-4 sm:px-6 xl:flex-row xl:items-center xl:justify-between">
+        <label className="relative block w-full xl:max-w-xs">
+          <span className="sr-only">Search leads</span>
+          <span
+            aria-hidden="true"
+            className="pointer-events-none absolute inset-y-0 left-3 flex items-center text-ink-faint"
+          >
+            ⌕
+          </span>
+          <input
+            type="search"
+            value={search}
+            onChange={(event) => setSearch(event.target.value)}
+            placeholder="Search name, service or enquiry..."
+            className="input rounded-xl bg-hushed pl-9"
+          />
+        </label>
+
+        <div
+          role="group"
+          aria-label="Filter leads by status"
+          className="flex flex-wrap gap-2"
+        >
+          {LEAD_FILTERS.map((item) => (
+            <button
+              key={item}
+              type="button"
+              onClick={() => setFilter(item)}
+              aria-pressed={filter === item}
+              className={`cursor-pointer rounded-lg px-3 py-2 text-xs font-semibold ${
+                filter === item
+                  ? "bg-ink text-surface"
+                  : "bg-hushed text-ink-soft hover:text-ink"
+              }`}
+            >
+              {FILTER_LABELS[item]}
+              {item === "All" ? ` (${leads.length})` : ""}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {operationError ? (
+        <div className="px-5 pb-4 sm:px-6">
+          <Alert tone="danger">{operationError}</Alert>
+        </div>
+      ) : null}
+
+      {isLoading ? (
+        <div
+          role="status"
+          className="border-t border-line px-6 py-16 text-center text-sm text-ink-soft"
+        >
+          Loading leads…
+        </div>
+      ) : loadError ? (
+        <div className="border-t border-line">
+          <SectionState
+            title="Unable to load leads"
+            action={
+              <button
+                type="button"
+                onClick={onRetryLoad}
+                className="btn btn-quiet"
+              >
+                Try again
+              </button>
+            }
+          >
+            <p>{loadError}</p>
+          </SectionState>
+        </div>
+      ) : allLeadCount === 0 ? (
+        <div className="border-t border-line">
+          <SectionState
+            title="No leads yet"
+            action={
+              canManage ? (
+                <button
+                  type="button"
+                  onClick={onOpenNewLead}
+                  className="btn btn-primary"
+                >
+                  Add a lead
+                </button>
+              ) : null
+            }
+          >
+            <p>
+              {canManage
+                ? "Add your first customer enquiry to begin tracking it here."
+                : "No leads have been added to this workspace yet."}
+            </p>
+          </SectionState>
+        </div>
+      ) : followUpsOnly && leads.length === 0 ? (
+        <div className="border-t border-line">
+          <SectionState icon="✓" title="No follow-ups due">
+            <p>
+              Enquiries with a follow-up date will appear here when the date
+              arrives. You can set one when adding or editing a lead.
+            </p>
+          </SectionState>
+        </div>
+      ) : displayedLeads.length === 0 ? (
+        <div className="border-t border-line">
+          <SectionState
+            icon="⌕"
+            title="No matching leads"
+            action={
+              <button
+                type="button"
+                onClick={clearFilters}
+                className="btn btn-quiet"
+              >
+                Clear filters
+              </button>
+            }
+          >
+            <p>Try another search, change your filter or add a new lead.</p>
+          </SectionState>
+        </div>
+      ) : (
+        <div className="border-t border-line">
+          <LeadTable
+            leads={displayedLeads}
+            onStatusChange={onStatusChange}
+            onDraftReply={onDraftReply}
+            pendingStatusIds={pendingStatusIds}
+            canManage={canManage}
+          />
+
+          <div className="flex flex-col justify-between gap-2 px-5 py-3 text-xs text-ink-faint sm:flex-row sm:items-center sm:px-6">
+            <span>
+              Showing {displayedLeads.length} of {leads.length}{" "}
+              {followUpsOnly ? "follow-ups due" : "leads"}
+            </span>
+            <span>Status changes are saved to the local development API.</span>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
 function Dashboard() {
   const { role } = useAuth();
   const canManage = role === "owner";
@@ -213,8 +417,6 @@ function Dashboard() {
   const searchParams = useSearchParams();
   const view = parseDashboardView(searchParams.get("view"));
   const [leads, setLeads] = useState<Lead[]>([]);
-  const [filter, setFilter] = useState<LeadFilter>("All");
-  const [search, setSearch] = useState("");
   const [modalOpen, setModalOpen] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -263,25 +465,6 @@ function Dashboard() {
     void loadLeads();
     return () => controller.abort();
   }, [loadAttempt]);
-
-  const displayedLeads = useMemo(() => {
-    const query = search.trim().toLowerCase();
-
-    return leads.filter((lead) => {
-      const matchesSearch =
-        !query ||
-        lead.name.toLowerCase().includes(query) ||
-        lead.service.toLowerCase().includes(query) ||
-        lead.lastMessage.toLowerCase().includes(query);
-
-      const matchesFilter = filter === "All" || lead.status === filter;
-
-      const matchesView =
-        view !== "follow-ups" || isFollowUpDue(lead);
-
-      return matchesSearch && matchesFilter && matchesView;
-    });
-  }, [leads, search, filter, view]);
 
   const followUpLeads = useMemo(
     () =>
@@ -395,13 +578,7 @@ function Dashboard() {
   }
 
   function selectView(nextView: View) {
-    clearFilters();
     router.push(dashboardViewHref(nextView), { scroll: false });
-  }
-
-  function clearFilters() {
-    setSearch("");
-    setFilter("All");
   }
 
   const newLeadButton = canManage ? (
@@ -410,18 +587,11 @@ function Dashboard() {
       New lead
     </button>
   ) : null;
-  const sectionTitle =
-    view === "follow-ups"
-      ? "Enquiries needing attention"
-      : view === "leads"
-        ? "All customer enquiries"
-        : "Recent leads";
 
   return (
     <AppShell
       active="dashboard"
       dashboardView={view}
-      onDashboardNavigate={clearFilters}
       leadCount={leads.length}
       followUpCount={followUpCount}
       canManage={canManage}
@@ -450,123 +620,168 @@ function Dashboard() {
           {newLeadButton ? <span className="sm:hidden">{newLeadButton}</span> : null}
         </PageHeading>
 
-        {view === "overview" && (
-          <>
-            {/* 1. What needs my attention? */}
-            <section
-              aria-labelledby="attention-title"
-              className="card mt-8"
-            >
-              <div className="flex flex-col justify-between gap-2 border-b border-line px-5 py-4 sm:flex-row sm:items-center sm:px-6">
-                <div>
-                  <h2 id="attention-title" className="font-bold text-ink">
-                    Needs your attention
-                  </h2>
-                  <p className="mt-0.5 text-xs text-ink-soft">
-                    {followUpCount > 0
-                      ? `${followUpCount} ${followUpCount === 1 ? "follow-up" : "follow-ups"} overdue or due today`
-                      : "Nothing is overdue right now."}
-                  </p>
-                </div>
-                {followUpCount > 0 ? (
+        <Activity mode={view === "overview" ? "visible" : "hidden"}>
+          {/* 1. What needs my attention? */}
+          <section
+            aria-labelledby="attention-title"
+            className="card mt-8"
+          >
+            <div className="flex flex-col justify-between gap-2 border-b border-line px-5 py-4 sm:flex-row sm:items-center sm:px-6">
+              <div>
+                <h2 id="attention-title" className="font-bold text-ink">
+                  Needs your attention
+                </h2>
+                <p className="mt-0.5 text-xs text-ink-soft">
+                  {followUpCount > 0
+                    ? `${followUpCount} ${followUpCount === 1 ? "follow-up" : "follow-ups"} overdue or due today`
+                    : "Nothing is overdue right now."}
+                </p>
+              </div>
+              {followUpCount > 0 ? (
+                <button
+                  type="button"
+                  onClick={() => selectView("follow-ups")}
+                  className="btn btn-quiet"
+                >
+                  View the follow-ups list →
+                </button>
+              ) : null}
+            </div>
+
+            {isLoading ? (
+              <SectionState title="Checking follow-ups…">
+                <p>One moment while follow-ups load.</p>
+              </SectionState>
+            ) : loadError ? (
+              <SectionState
+                title="Unable to load leads"
+                action={
                   <button
                     type="button"
-                    onClick={() => selectView("follow-ups")}
+                    onClick={() => setLoadAttempt((current) => current + 1)}
                     className="btn btn-quiet"
                   >
-                    View the follow-ups list →
+                    Try again
                   </button>
-                ) : null}
-              </div>
+                }
+              >
+                <p>{loadError}</p>
+              </SectionState>
+            ) : followUpCount === 0 ? (
+              <SectionState icon="✓" title="No follow-ups due">
+                <p>
+                  Enquiries with a follow-up date will appear here when the
+                  date arrives. You can set one when adding or editing a lead.
+                </p>
+              </SectionState>
+            ) : (
+              <ul className="divide-y divide-line">
+                {followUpLeads.map((lead) => (
+                  <AttentionItem
+                    key={lead.id}
+                    lead={lead}
+                    canManage={canManage}
+                    onDraftReply={setDraftLead}
+                  />
+                ))}
+              </ul>
+            )}
+          </section>
 
-              {isLoading ? (
-                <SectionState title="Checking follow-ups…">
-                  <p>One moment while follow-ups load.</p>
-                </SectionState>
-              ) : loadError ? (
-                <SectionState
-                  title="Unable to load leads"
-                  action={
-                    <button
-                      type="button"
-                      onClick={() => setLoadAttempt((current) => current + 1)}
-                      className="btn btn-quiet"
-                    >
-                      Try again
-                    </button>
-                  }
-                >
-                  <p>{loadError}</p>
-                </SectionState>
-              ) : followUpCount === 0 ? (
-                <SectionState icon="✓" title="No follow-ups due">
-                  <p>
-                    Enquiries with a follow-up date will appear here when the
-                    date arrives. You can set one when adding or editing a lead.
-                  </p>
-                </SectionState>
-              ) : (
-                <ul className="divide-y divide-line">
-                  {followUpLeads.map((lead) => (
-                    <AttentionItem
-                      key={lead.id}
-                      lead={lead}
-                      canManage={canManage}
-                      onDraftReply={setDraftLead}
-                    />
-                  ))}
-                </ul>
-              )}
+          {/* 2. What is happening with my enquiries? */}
+          <div className="mt-6 grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+            <StatCard
+              label="Total leads"
+              value={leads.length}
+              detail="All recorded enquiries"
+              dotColor="bg-accent"
+            />
+            <StatCard
+              label="Need follow-up"
+              value={followUpCount}
+              detail="Due or overdue"
+              dotColor="bg-warning"
+            />
+            <StatCard
+              label="Quotes sent"
+              value={quotedCount}
+              detail="Awaiting a decision"
+              dotColor="bg-violet"
+            />
+            <StatCard
+              label="Bookings"
+              value={bookedCount}
+              detail="Marked as confirmed"
+              dotColor="bg-success"
+            />
+          </div>
+
+          {/* Two columns only from 2xl: the leads table needs the full
+              content width below that to avoid constant horizontal scroll. */}
+          <div className="mt-6 grid gap-6 2xl:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
+            {/* 3. Which leads should I review next? */}
+            <section className="card overflow-hidden">
+              <div className="border-b border-line px-5 py-4 sm:px-6">
+                <h2 className="font-bold text-ink">Recent leads</h2>
+                <p className="mt-0.5 text-xs text-ink-soft">
+                  The most recent enquiries come first.
+                </p>
+              </div>
+              <LeadsPanel
+                leads={leads}
+                allLeadCount={leads.length}
+                isLoading={isLoading}
+                loadError={loadError}
+                operationError={operationError}
+                canManage={canManage}
+                pendingStatusIds={pendingStatusIds}
+                onStatusChange={updateStatus}
+                onDraftReply={setDraftLead}
+                onRetryLoad={() => setLoadAttempt((current) => current + 1)}
+                onOpenNewLead={() => setModalOpen(true)}
+              />
             </section>
 
-            {/* 2. What is happening with my enquiries? */}
-            <div className="mt-6 grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-              <StatCard
-                label="Total leads"
-                value={leads.length}
-                detail="All recorded enquiries"
-                dotColor="bg-accent"
-              />
-              <StatCard
-                label="Need follow-up"
-                value={followUpCount}
-                detail="Due or overdue"
-                dotColor="bg-warning"
-              />
-              <StatCard
-                label="Quotes sent"
-                value={quotedCount}
-                detail="Awaiting a decision"
-                dotColor="bg-violet"
-              />
-              <StatCard
-                label="Bookings"
-                value={bookedCount}
-                detail="Marked as confirmed"
-                dotColor="bg-success"
-              />
-            </div>
+            <NextSteps leadCount={leads.length} />
+          </div>
+        </Activity>
 
-            {/* Two columns only from 2xl: the leads table needs the full
-                content width below that to avoid constant horizontal scroll. */}
-            <div className="mt-6 grid gap-6 2xl:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
-              {/* 3. Which leads should I review next? */}
-              <section className="card overflow-hidden">
-                <div className="border-b border-line px-5 py-4 sm:px-6">
-                  <h2 className="font-bold text-ink">{sectionTitle}</h2>
-                  <p className="mt-0.5 text-xs text-ink-soft">
-                    The most recent enquiries come first.
-                  </p>
-                </div>
-                {buildLeadsSection()}
-              </section>
+        <Activity mode={view === "leads" ? "visible" : "hidden"}>
+          <div className="mt-8">
+            <LeadsPanel
+              leads={leads}
+              allLeadCount={leads.length}
+              isLoading={isLoading}
+              loadError={loadError}
+              operationError={operationError}
+              canManage={canManage}
+              pendingStatusIds={pendingStatusIds}
+              onStatusChange={updateStatus}
+              onDraftReply={setDraftLead}
+              onRetryLoad={() => setLoadAttempt((current) => current + 1)}
+              onOpenNewLead={() => setModalOpen(true)}
+            />
+          </div>
+        </Activity>
 
-              <NextSteps leadCount={leads.length} />
-            </div>
-          </>
-        )}
-
-        {view !== "overview" && <div className="mt-8">{buildLeadsSection()}</div>}
+        <Activity mode={view === "follow-ups" ? "visible" : "hidden"}>
+          <div className="mt-8">
+            <LeadsPanel
+              leads={followUpLeads}
+              allLeadCount={leads.length}
+              isLoading={isLoading}
+              loadError={loadError}
+              operationError={operationError}
+              canManage={canManage}
+              pendingStatusIds={pendingStatusIds}
+              onStatusChange={updateStatus}
+              onDraftReply={setDraftLead}
+              onRetryLoad={() => setLoadAttempt((current) => current + 1)}
+              onOpenNewLead={() => setModalOpen(true)}
+              followUpsOnly
+            />
+          </div>
+        </Activity>
 
         <footer className="py-10 text-center text-xs text-ink-faint">
           ReplyPilot · Built to help small businesses follow up
@@ -581,144 +796,6 @@ function Dashboard() {
       <DraftReplyDialog lead={draftLead} onClose={() => setDraftLead(null)} />
     </AppShell>
   );
-
-  function buildLeadsSection() {
-    return (
-      <>
-        <div className="flex flex-col gap-4 px-5 py-4 sm:px-6 xl:flex-row xl:items-center xl:justify-between">
-          <label className="relative block w-full xl:max-w-xs">
-            <span className="sr-only">Search leads</span>
-            <span
-              aria-hidden="true"
-              className="pointer-events-none absolute inset-y-0 left-3 flex items-center text-ink-faint"
-            >
-              ⌕
-            </span>
-            <input
-              type="search"
-              value={search}
-              onChange={(event) => setSearch(event.target.value)}
-              placeholder="Search name, service or enquiry..."
-              className="input rounded-xl bg-hushed pl-9"
-            />
-          </label>
-
-          <div
-            role="group"
-            aria-label="Filter leads by status"
-            className="flex flex-wrap gap-2"
-          >
-            {LEAD_FILTERS.map((item) => (
-              <button
-                key={item}
-                type="button"
-                onClick={() => setFilter(item)}
-                aria-pressed={filter === item}
-                className={`cursor-pointer rounded-lg px-3 py-2 text-xs font-semibold ${
-                  filter === item
-                    ? "bg-ink text-surface"
-                    : "bg-hushed text-ink-soft hover:text-ink"
-                }`}
-              >
-                {FILTER_LABELS[item]}
-                {item === "All" ? ` (${leads.length})` : ""}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        {operationError ? (
-          <div className="px-5 pb-4 sm:px-6">
-            <Alert tone="danger">{operationError}</Alert>
-          </div>
-        ) : null}
-
-        {isLoading ? (
-          <div
-            role="status"
-            className="border-t border-line px-6 py-16 text-center text-sm text-ink-soft"
-          >
-            Loading leads…
-          </div>
-        ) : loadError ? (
-          <div className="border-t border-line">
-            <SectionState
-              title="Unable to load leads"
-              action={
-                <button
-                  type="button"
-                  onClick={() => setLoadAttempt((current) => current + 1)}
-                  className="btn btn-quiet"
-                >
-                  Try again
-                </button>
-              }
-            >
-              <p>{loadError}</p>
-            </SectionState>
-          </div>
-        ) : leads.length === 0 ? (
-          <div className="border-t border-line">
-            <SectionState
-              title="No leads yet"
-              action={
-                canManage ? (
-                  <button
-                    type="button"
-                    onClick={() => setModalOpen(true)}
-                    className="btn btn-primary"
-                  >
-                    Add a lead
-                  </button>
-                ) : null
-              }
-            >
-              <p>
-                {canManage
-                  ? "Add your first customer enquiry to begin tracking it here."
-                  : "No leads have been added to this workspace yet."}
-              </p>
-            </SectionState>
-          </div>
-        ) : displayedLeads.length === 0 ? (
-          <div className="border-t border-line">
-            <SectionState
-              icon="⌕"
-              title="No matching leads"
-              action={
-                <button
-                  type="button"
-                  onClick={clearFilters}
-                  className="btn btn-quiet"
-                >
-                  Clear filters
-                </button>
-              }
-            >
-              <p>Try another search, change your filter or add a new lead.</p>
-            </SectionState>
-          </div>
-        ) : (
-          <div className="border-t border-line">
-            <LeadTable
-              leads={displayedLeads}
-              onStatusChange={updateStatus}
-              onDraftReply={setDraftLead}
-              pendingStatusIds={pendingStatusIds}
-              canManage={canManage}
-            />
-
-            <div className="flex flex-col justify-between gap-2 px-5 py-3 text-xs text-ink-faint sm:flex-row sm:items-center sm:px-6">
-              <span>
-                Showing {displayedLeads.length} of {leads.length} leads
-              </span>
-              <span>Status changes are saved to the local development API.</span>
-            </div>
-          </div>
-        )}
-      </>
-    );
-  }
 }
 
 export default function Home() {

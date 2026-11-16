@@ -5,6 +5,7 @@ import {
   type ReactNode,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
 import {
@@ -121,6 +122,7 @@ export function BusinessSettings() {
   const [showProfileForm, setShowProfileForm] = useState(false);
   const [busy, setBusy] = useState(false);
   const [reloadToken, setReloadToken] = useState(0);
+  const loadedReloadTokenRef = useRef<number | null>(null);
   const [schedule, setSchedule] = useState<WeeklySchedule>(() =>
     createEmptyWeeklySchedule(),
   );
@@ -163,15 +165,22 @@ export function BusinessSettings() {
     : {};
 
   useEffect(() => {
-    let active = true;
+    if (loadedReloadTokenRef.current === reloadToken) {
+      return;
+    }
+
+    const controller = new AbortController();
 
     async function load() {
+      setLoading(true);
+      setError(null);
+
       try {
         const [profileResponse, catalogueResponse, knowledgeResponse] =
           await Promise.all([
-            fetch("/api/business/profile"),
-            fetch("/api/business/catalogue"),
-            fetch("/api/business/knowledge"),
+            fetch("/api/business/profile", { signal: controller.signal }),
+            fetch("/api/business/catalogue", { signal: controller.signal }),
+            fetch("/api/business/knowledge", { signal: controller.signal }),
           ]);
         const [profileData, catalogueData, knowledgeData] = await Promise.all([
           readJson(profileResponse),
@@ -184,12 +193,17 @@ export function BusinessSettings() {
           !catalogueResponse.ok ||
           !knowledgeResponse.ok
         ) {
+          const failingData = !profileResponse.ok
+            ? profileData
+            : !catalogueResponse.ok
+              ? catalogueData
+              : knowledgeData;
           throw new Error(
-            apiError(profileData, "Unable to load business settings."),
+            apiError(failingData, "Unable to load business settings."),
           );
         }
 
-        if (!active) return;
+        if (controller.signal.aborted) return;
 
         const nextProfile = parseProfileResponse(profileData);
         const nextCatalogue = parseCatalogueResponse(catalogueData);
@@ -213,6 +227,7 @@ export function BusinessSettings() {
           nextProfile?.contactPhoneCountry ?? null,
         );
 
+        loadedReloadTokenRef.current = reloadToken;
         setProfile(nextProfile);
         setCatalogue(nextCatalogue);
         setKnowledge(nextKnowledge);
@@ -233,7 +248,7 @@ export function BusinessSettings() {
         setBusinessCurrency(nextProfile?.currencyCode ?? "");
         setProfileValidationAttempted(false);
       } catch (cause) {
-        if (!active) return;
+        if (controller.signal.aborted) return;
 
         setError(
           cause instanceof Error
@@ -241,7 +256,7 @@ export function BusinessSettings() {
             : "Unable to load business settings.",
         );
       } finally {
-        if (active) {
+        if (!controller.signal.aborted) {
           setLoading(false);
         }
       }
@@ -250,7 +265,7 @@ export function BusinessSettings() {
     void load();
 
     return () => {
-      active = false;
+      controller.abort();
     };
   }, [reloadToken]);
 

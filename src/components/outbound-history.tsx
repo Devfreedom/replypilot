@@ -96,9 +96,12 @@ export function OutboundHistory() {
   const [reloadToken, setReloadToken] = useState(0);
 
   useEffect(() => {
-    let active = true;
+    const controller = new AbortController();
 
     async function load() {
+      setLoading(true);
+      setError(null);
+
       try {
         const query = new URLSearchParams({
           limit: String(PAGE_SIZE),
@@ -109,7 +112,9 @@ export function OutboundHistory() {
           query.set("status", statusFilter);
         }
 
-        const response = await fetch(`/api/outbound-messages?${query}`);
+        const response = await fetch(`/api/outbound-messages?${query}`, {
+          signal: controller.signal,
+        });
         const data = await readJson(response);
 
         if (!response.ok) {
@@ -126,12 +131,12 @@ export function OutboundHistory() {
           );
         }
 
-        if (active) {
+        if (!controller.signal.aborted) {
           setItems(parsed.messages);
           setHasMore(parsed.pagination.hasMore);
         }
       } catch (requestError) {
-        if (active) {
+        if (!controller.signal.aborted) {
           setError(
             requestError instanceof Error
               ? requestError.message
@@ -139,7 +144,7 @@ export function OutboundHistory() {
           );
         }
       } finally {
-        if (active) {
+        if (!controller.signal.aborted) {
           setLoading(false);
         }
       }
@@ -148,7 +153,7 @@ export function OutboundHistory() {
     void load();
 
     return () => {
-      active = false;
+      controller.abort();
     };
   }, [offset, statusFilter, reloadToken]);
 

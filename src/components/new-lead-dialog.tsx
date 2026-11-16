@@ -1,6 +1,12 @@
 "use client";
 
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type FormEvent,
+} from "react";
 import { PHONE_COUNTRY_OPTIONS } from "@/lib/countries";
 import {
   LeadApiError,
@@ -79,6 +85,16 @@ export function NewLeadDialog({
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [unresolvedNumber, setUnresolvedNumber] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
+
+  useLayoutEffect(() => {
+    const dialog = dialogRef.current;
+
+    return () => {
+      if (dialog?.open) {
+        dialog.close();
+      }
+    };
+  }, []);
 
   useEffect(() => {
     const dialog = dialogRef.current;
