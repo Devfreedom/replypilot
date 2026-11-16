@@ -544,7 +544,7 @@ export function WhatsAppConnections() {
 
   return (
     <section
-      className="card mt-6 p-5 sm:p-6"
+      className="card p-5 sm:p-6"
       aria-labelledby="whatsapp-connections"
     >
       <div className="flex flex-wrap items-start justify-between gap-3">

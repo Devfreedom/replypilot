@@ -1231,7 +1231,7 @@ export function DraftReplyDialog({
             Draft reply
           </h2>
           {lead ? (
-            <p className="mt-1 truncate text-sm leading-6 text-ink-soft">
+            <p className="mt-1 break-words text-sm leading-6 text-ink-soft">
               {lead.name} ({lead.service})
             </p>
           ) : null}

@@ -146,13 +146,13 @@ export function LeadTable({
         {leads.map((lead) => (
           <li key={lead.id} className="space-y-3 p-4">
             <div className="flex items-start justify-between gap-3">
-              <div className="flex min-w-0 items-center gap-3">
+              <div className="flex min-w-0 items-start gap-3">
                 <Avatar name={lead.name} />
                 <div className="min-w-0">
-                  <p className="truncate text-sm font-semibold text-ink">
+                  <p className="break-words text-sm font-semibold text-ink">
                     {lead.name}
                   </p>
-                  <p className="truncate text-xs text-ink-soft">
+                  <p className="break-words text-xs text-ink-soft">
                     {lead.service}
                   </p>
                 </div>

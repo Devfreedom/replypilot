@@ -62,6 +62,24 @@ function formatDate(value: string | null): string {
   }).format(new Date(value));
 }
 
+function summarizeWorkerTick(lastTick: Record<string, unknown>): string {
+  const entries = Object.entries(lastTick).filter(
+    ([, value]) =>
+      typeof value === "number" ||
+      typeof value === "string" ||
+      typeof value === "boolean",
+  );
+
+  if (entries.length === 0) {
+    return "Heartbeat recorded.";
+  }
+
+  return entries
+    .slice(0, 4)
+    .map(([key, value]) => `${key}: ${String(value)}`)
+    .join(" · ");
+}
+
 function outcomeBadgeClass(outcome: DeliveryEventOutcome): string {
   if (outcome === "processed") return "badge badge-approved";
   if (outcome === "failed") return "badge bg-danger-soft text-danger-ink";
@@ -444,13 +462,19 @@ export function DeliveryProtection() {
       </PageHeading>
 
       <div className="mt-4 space-y-3">
-        <Alert tone="info">
-          <span className="font-semibold">Test environment.</span>{" "}
-          The mock provider never contacts WhatsApp. Delivery events shown here
-          come from signed local webhook fixtures. Meta sending is restricted to
-          the configured test workspace, sender, and recipient allowlist, and is
-          rejected in production.
-        </Alert>
+        {protection?.providerForWorkspace === "whatsapp" ? (
+          <Alert tone="info">
+            <span className="font-semibold">WhatsApp delivery active.</span>{" "}
+            Outbound messages follow the 24-hour customer service window and
+            skip customers marked as suppressed or opted out.
+          </Alert>
+        ) : (
+          <Alert tone="info">
+            <span className="font-semibold">Test preview mode.</span> The mock
+            provider keeps replies inside this workspace and never delivers them
+            to customer handsets.
+          </Alert>
+        )}
 
         {error ? (
           <Alert tone="danger">
@@ -491,8 +515,8 @@ export function DeliveryProtection() {
                   </dt>
                   <dd className="mt-0.5 font-semibold text-ink">
                     {protection.providerForWorkspace === "whatsapp"
-                      ? "Meta WhatsApp Cloud API"
-                      : "Mock provider (no real delivery)"}
+                      ? "WhatsApp Cloud API"
+                      : "Mock provider (test preview only)"}
                   </dd>
                 </div>
                 <div>
@@ -590,13 +614,13 @@ export function DeliveryProtection() {
                       <p className="text-[11px] font-medium text-ink-soft">
                         {OUTBOUND_STATUS_LABELS[status]}
                       </p>
-                      <p className="text-lg font-bold text-ink">
+                      <p className="numeric-tabular text-lg font-bold text-ink">
                         {workerStatus.queue.counts[status] ?? 0}
                       </p>
                     </div>
                   ))}
                 </div>
-                <p className="mt-3 text-xs text-ink-soft">
+                <p className="numeric-tabular mt-3 text-xs text-ink-soft">
                   Oldest queued record:{" "}
                   {formatDate(workerStatus.queue.oldestQueuedAt)}
                 </p>
@@ -625,18 +649,25 @@ export function DeliveryProtection() {
                           >
                             {worker.stale ? "Stale" : "Live"}
                           </span>
-                          <span className="text-ink-faint">
+                          <span className="text-ink-soft">
                             {worker.workerId}
                           </span>
                         </div>
-                        <p className="mt-1 text-ink-soft">
+                        <p className="numeric-tabular mt-1 text-ink-soft">
                           Last seen {formatDate(worker.lastSeenAt)} · started{" "}
                           {formatDate(worker.workerStartedAt)}
                         </p>
-                        <p className="mt-1 break-words text-ink-faint">
-                          Last tick:{" "}
-                          {JSON.stringify(worker.lastTick)}
+                        <p className="numeric-tabular mt-1 text-ink-soft">
+                          {summarizeWorkerTick(worker.lastTick)}
                         </p>
+                        <details className="mt-1.5">
+                          <summary className="cursor-pointer font-medium text-ink-soft hover:text-ink">
+                            Technical details
+                          </summary>
+                          <pre className="mt-1.5 overflow-x-auto rounded-lg bg-hushed p-2 font-mono text-[11px] text-ink-soft">
+                            {JSON.stringify(worker.lastTick, null, 2)}
+                          </pre>
+                        </details>
                       </li>
                     ))
                   )}
@@ -663,7 +694,7 @@ export function DeliveryProtection() {
                     onChange={(event) =>
                       setSelectedCustomerId(event.target.value)
                     }
-                    className="input mt-1"
+                    className="select mt-1"
                     disabled={suppressing || candidates.length === 0}
                   >
                     <option value="">
@@ -685,7 +716,7 @@ export function DeliveryProtection() {
                     onChange={(event) =>
                       setSuppressReason(event.target.value as SuppressionReason)
                     }
-                    className="input mt-1"
+                    className="select mt-1"
                     disabled={suppressing}
                   >
                     {SUPPRESSION_REASONS.map((reason) => (
@@ -702,7 +733,7 @@ export function DeliveryProtection() {
                     onChange={(event) => setSuppressNotes(event.target.value)}
                     maxLength={500}
                     className="input mt-1"
-                    placeholder="Fictional demo note"
+                    placeholder="Reason or customer request note"
                     disabled={suppressing}
                   />
                 </label>
@@ -855,14 +886,14 @@ export function DeliveryProtection() {
                       ) : null}
                     </div>
                     <p className="mt-1 break-all text-xs text-ink-soft">
-                      wamid: {event.providerMessageId}
+                      Message reference: {event.providerMessageId}
                     </p>
                     {event.outboundContent ? (
                       <p className="mt-1 line-clamp-2 text-xs text-ink">
                         {event.outboundContent}
                       </p>
                     ) : null}
-                    <dl className="mt-2 grid gap-2 text-[11px] text-ink-faint sm:grid-cols-3">
+                    <dl className="numeric-tabular mt-2 grid gap-2 text-[11px] text-ink-soft sm:grid-cols-3">
                       <div>
                         <dt className="font-medium">Provider time</dt>
                         <dd>{formatDate(event.providerTimestamp)}</dd>

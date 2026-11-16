@@ -425,7 +425,7 @@ export function AppShell({
 
         <div className="mt-5 rounded-xl border border-line bg-hushed/75 px-3.5 py-2.5">
           <p className="text-xs font-medium text-ink-soft">Active business</p>
-          <p className="mt-0.5 truncate text-sm font-semibold text-ink">
+          <p className="mt-0.5 break-words text-sm font-semibold text-ink">
             {workspace?.name ?? "Workspace"}
           </p>
         </div>
@@ -479,7 +479,7 @@ export function AppShell({
 
           <div className="mt-5 rounded-xl border border-line bg-hushed/75 px-3.5 py-2.5">
             <p className="text-xs font-medium text-ink-soft">Active business</p>
-            <p className="mt-0.5 truncate text-sm font-semibold text-ink">
+            <p className="mt-0.5 break-words text-sm font-semibold text-ink">
               {workspace?.name ?? "Workspace"}
             </p>
           </div>
@@ -534,26 +534,37 @@ export function AppShell({
               </svg>
             </button>
 
-            <nav aria-label="Breadcrumb" className="min-w-0 flex-1">
+            <nav
+              aria-label="Breadcrumb"
+              title={
+                workspace?.name
+                  ? `${workspace.name} / ${title}${subtitle ? ` / ${subtitle}` : ""}`
+                  : title
+              }
+              className="min-w-0 flex-1"
+            >
               <p className="truncate text-xs text-ink-soft sm:text-sm">
-                <span className="font-medium text-ink-soft">
+                <span className="hidden font-medium text-ink-soft sm:inline">
                   {workspace?.name ?? "Workspace"}
                 </span>{" "}
-                <span aria-hidden="true" className="text-ink-faint">
+                <span
+                  aria-hidden="true"
+                  className="hidden text-ink-soft sm:inline"
+                >
                   /
                 </span>{" "}
                 <span className="font-semibold text-ink">{title}</span>
                 {subtitle ? (
                   <>
                     {" "}
-                    <span aria-hidden="true" className="text-ink-faint">
+                    <span aria-hidden="true" className="text-ink-soft">
                       /
                     </span>{" "}
                     <span>{subtitle}</span>
                   </>
                 ) : null}
               </p>
-              <p className="truncate text-xs text-ink-faint lg:hidden">
+              <p className="truncate text-xs text-ink-soft lg:hidden">
                 {user?.email}
               </p>
             </nav>

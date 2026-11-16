@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  Activity,
   type FormEvent,
   type ReactNode,
   useEffect,
@@ -12,13 +13,17 @@ import {
   type BusinessProfile,
   type CatalogueEntry,
   type KnowledgeEntry,
-  MAX_SAFE_PRICE_MINOR,
   parseCatalogueEntryResponse,
   parseCatalogueResponse,
   parseKnowledgeEntryResponse,
   parseKnowledgeResponse,
   parseProfileResponse,
 } from "@/lib/business";
+import {
+  formatMajorPrice,
+  formatMinorToMajorInput,
+  parseMajorPriceToMinor,
+} from "@/lib/money";
 import {
   CURRENCY_OPTIONS,
   defaultCatalogueCurrency,
@@ -47,7 +52,7 @@ import { useAuth } from "./auth-provider";
 import { OpeningHoursEditor } from "./opening-hours-editor";
 import { PhoneNumberField } from "./phone-number-field";
 import { SearchableCombobox } from "./searchable-combobox";
-import { Alert } from "./ui";
+import { Alert, PageHeading } from "./ui";
 
 const inputClass = "input mt-1";
 const labelClass = "field-label";
@@ -106,7 +111,15 @@ function hasKey(value: unknown, key: string): boolean {
   return typeof value === "object" && value !== null && key in value;
 }
 
-export function BusinessSettings() {
+export type BusinessSettingsSection = "profile" | "catalogue" | "knowledge";
+
+export function BusinessSettings({
+  embedded = false,
+  activeSection,
+}: {
+  embedded?: boolean;
+  activeSection?: BusinessSettingsSection | null;
+} = {}) {
   const { workspace, role } = useAuth();
   const canManage = role === "owner";
   const [profile, setProfile] = useState<BusinessProfile | null>(null);
@@ -117,8 +130,10 @@ export function BusinessSettings() {
   const [notice, setNotice] = useState<string | null>(null);
   const [editingCatalogue, setEditingCatalogue] =
     useState<CatalogueEntry | null>(null);
+  const [catalogueResetCount, setCatalogueResetCount] = useState(0);
   const [editingKnowledge, setEditingKnowledge] =
     useState<KnowledgeEntry | null>(null);
+  const [knowledgeResetCount, setKnowledgeResetCount] = useState(0);
   const [showProfileForm, setShowProfileForm] = useState(false);
   const [busy, setBusy] = useState(false);
   const [reloadToken, setReloadToken] = useState(0);
@@ -451,32 +466,25 @@ export function BusinessSettings() {
 
     const formElement = event.currentTarget;
     const form = new FormData(formElement);
-    const rawPrice = String(form.get("priceMinor") ?? "").trim();
-    let priceMinor: number | null = null;
+    const currencyCode = String(form.get("currencyCode") ?? "")
+      .trim()
+      .toUpperCase();
+    const parsedPrice = parseMajorPriceToMinor(
+      String(form.get("priceMajor") ?? ""),
+      currencyCode,
+    );
 
-    if (rawPrice) {
-      const parsedPrice = Number(rawPrice);
-
-      if (
-        !Number.isSafeInteger(parsedPrice) ||
-        parsedPrice < 0 ||
-        parsedPrice > MAX_SAFE_PRICE_MINOR
-      ) {
-        setError(
-          "Price must be a non-negative whole number of minor units within the safe integer range.",
-        );
-        setBusy(false);
-        return;
-      }
-
-      priceMinor = parsedPrice;
+    if (!parsedPrice.ok) {
+      setError(parsedPrice.message);
+      setBusy(false);
+      return;
     }
 
     const payload = {
       name: String(form.get("name") ?? ""),
       description: String(form.get("description") ?? ""),
-      priceMinor,
-      currencyCode: String(form.get("currencyCode") ?? ""),
+      priceMinor: parsedPrice.minor,
+      currencyCode,
       availabilityNotes: emptyToNull(form.get("availabilityNotes")),
       isActive: form.get("isActive") === "on",
     };
@@ -510,6 +518,7 @@ export function BusinessSettings() {
           : [saved, ...current],
       );
       setEditingCatalogue(null);
+      setCatalogueResetCount((count) => count + 1);
       formElement.reset();
       setNotice("Service saved.");
     } catch (cause) {
@@ -565,6 +574,7 @@ export function BusinessSettings() {
           : [saved, ...current],
       );
       setEditingKnowledge(null);
+      setKnowledgeResetCount((count) => count + 1);
       formElement.reset();
       setNotice("Knowledge entry saved.");
     } catch (cause) {
@@ -634,23 +644,37 @@ export function BusinessSettings() {
   }
 
   const showSetupState = profile === null && !showProfileForm;
+  const businessVisible = !embedded || activeSection !== null;
+  const showProfileSection = !embedded || activeSection === "profile";
+  const showCatalogueSection = !embedded || activeSection === "catalogue";
+  const showKnowledgeSection = !embedded || activeSection === "knowledge";
 
   return (
-    <div className="mx-auto max-w-5xl px-4 py-8 sm:px-6 lg:px-8">
+    <div
+      className={
+        embedded
+          ? businessVisible
+            ? ""
+            : "hidden"
+          : "mx-auto max-w-5xl px-4 py-8 sm:px-6 lg:px-8"
+      }
+    >
       <div className="mb-6 space-y-4">
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight text-ink sm:text-3xl">
-            Business settings
-          </h1>
-          <p className="mt-2 max-w-2xl text-sm leading-6 text-ink-soft">
-            Approved facts that reply drafts may use. Everything here is scoped
-            to your workspace.
-          </p>
-        </div>
-        <Alert tone="info" role="status">
-          Signed in to <strong>{workspace?.name ?? "this workspace"}</strong>.
-          Business details and reply context are scoped to this workspace.
-        </Alert>
+        {!embedded ? (
+          <>
+            <PageHeading
+              title="Business settings"
+              description="Approved facts that reply drafts may use. Everything here applies only to this workspace."
+            />
+            <Alert tone="info" role="status">
+              Signed in to{" "}
+              <strong className="break-words">
+                {workspace?.name ?? "this workspace"}
+              </strong>
+              . Business details and reply context are scoped to this workspace.
+            </Alert>
+          </>
+        ) : null}
 
         {!canManage ? (
           <Alert tone="warning" role="status">
@@ -691,10 +715,16 @@ export function BusinessSettings() {
             disabled={!canManage}
             className="m-0 min-w-0 space-y-8 border-0 p-0"
           >
-            <section className="card p-5 sm:p-6">
-              <h2 className="text-lg font-bold text-ink">
-                Business profile
-              </h2>
+            <Activity mode={showProfileSection ? "visible" : "hidden"}>
+              <section
+                id={embedded ? "settings-panel-profile" : undefined}
+                role={embedded ? "tabpanel" : undefined}
+                aria-labelledby={embedded ? "settings-tab-profile" : undefined}
+                className="card p-5 sm:p-6"
+              >
+                <h2 className="text-lg font-bold text-ink">
+                  Business profile
+                </h2>
 
               {showSetupState ? (
                 <div className="mt-4 rounded-xl border border-dashed border-line-strong bg-hushed p-5">
@@ -893,284 +923,308 @@ export function BusinessSettings() {
                   </form>
                 </>
               )}
-            </section>
+              </section>
+            </Activity>
 
-            <section className="card p-5 sm:p-6">
-              <h2 className="text-lg font-bold text-ink">
-                Products &amp; services
-              </h2>
-              <form
-                className="mt-5 grid gap-4 sm:grid-cols-2"
-                onSubmit={(event) => void saveCatalogue(event)}
+            <Activity mode={showCatalogueSection ? "visible" : "hidden"}>
+              <section
+                id={embedded ? "settings-panel-catalogue" : undefined}
+                role={embedded ? "tabpanel" : undefined}
+                aria-labelledby={embedded ? "settings-tab-catalogue" : undefined}
+                className="card p-5 sm:p-6"
               >
-                <label className={labelClass}>
-                  Name
-                  <input
-                    required
-                    name="name"
-                    key={`name-${editingCatalogue?.id ?? "new"}`}
-                    defaultValue={editingCatalogue?.name ?? ""}
-                    className={inputClass}
-                  />
-                </label>
-                <label className={labelClass}>
-                  Currency code
-                  <input
-                    required
-                    name="currencyCode"
-                    key={`currency-${
-                      editingCatalogue?.id ??
-                      `new-${profile?.currencyCode ?? "unconfigured"}`
-                    }`}
-                    defaultValue={
-                      editingCatalogue?.currencyCode ??
-                      defaultCatalogueCurrency(profile?.currencyCode)
-                    }
-                    maxLength={3}
-                    pattern="[A-Z]{3}"
-                    title="A three-letter uppercase ISO 4217 currency code, for example NGN or USD"
-                    className={inputClass}
-                    aria-describedby="currency-help"
-                  />
-                </label>
-                <p
-                  id="currency-help"
-                  className="-mt-2 text-xs text-ink-soft sm:col-span-2"
+                <h2 className="text-lg font-bold text-ink">
+                  Products &amp; services
+                </h2>
+                <form
+                  key={`catalogue-form-${editingCatalogue?.id ?? "new"}-${catalogueResetCount}`}
+                  className="mt-5 grid gap-4 sm:grid-cols-2"
+                  onSubmit={(event) => void saveCatalogue(event)}
                 >
-                  Use a current ISO 4217 code in uppercase, for example NGN or
-                  USD. New services default to the business currency (
-                  {defaultCatalogueCurrency(profile?.currencyCode)}
-                  ); existing services keep their own currency and prices.
-                </p>
-                <label className={labelClass}>
-                  Price (minor units)
-                  <input
-                    name="priceMinor"
-                    key={`price-${editingCatalogue?.id ?? "new"}`}
-                    defaultValue={editingCatalogue?.priceMinor ?? ""}
-                    type="number"
-                    min="0"
-                    max={MAX_SAFE_PRICE_MINOR}
-                    step="1"
-                    className={inputClass}
-                    aria-describedby="price-help"
-                  />
-                </label>
-                <label className={labelClass}>
-                  Availability notes
-                  <input
-                    name="availabilityNotes"
-                    key={`availability-${editingCatalogue?.id ?? "new"}`}
-                    defaultValue={editingCatalogue?.availabilityNotes ?? ""}
-                    className={inputClass}
-                  />
-                </label>
-                <p
-                  id="price-help"
-                  className="-mt-2 text-xs text-ink-soft sm:col-span-2"
-                >
-                  Optional whole minor units only (for example 150000). Leave
-                  blank when pricing is not fixed.
-                </p>
-                <label className={`${labelClass} sm:col-span-2`}>
-                  Description
-                  <textarea
-                    name="description"
-                    key={`description-${editingCatalogue?.id ?? "new"}`}
-                    defaultValue={editingCatalogue?.description ?? ""}
-                    rows={3}
-                    className={inputClass}
-                  />
-                </label>
-                <label className="flex items-center gap-2 text-sm text-ink sm:col-span-2">
-                  <input
-                    name="isActive"
-                    key={`active-${editingCatalogue?.id ?? "new"}`}
-                    type="checkbox"
-                    className="checkbox"
-                    defaultChecked={editingCatalogue?.isActive ?? true}
-                  />
-                  Active and approved for future context
-                </label>
-                <div className="flex gap-3 sm:col-span-2">
-                  <button disabled={busy} className={primaryButtonClass}>
-                    {editingCatalogue ? "Save service" : "Add service"}
-                  </button>
-                  {editingCatalogue ? (
-                    <button
-                      type="button"
-                      onClick={() => setEditingCatalogue(null)}
-                      className={secondaryButtonClass}
-                    >
-                      Cancel
-                    </button>
-                  ) : null}
-                </div>
-              </form>
-
-              <EntryList
-                entries={catalogue}
-                empty="No services added yet."
-                render={(entry) => (
-                  <>
-                    <div className="flex flex-wrap items-center gap-2">
-                      <p className="font-semibold text-ink">
-                        {entry.name}
-                      </p>
-                      <span
-                        className={`badge ${
-                          entry.isActive ? "badge-booked" : "badge-neutral"
-                        }`}
-                      >
-                        {entry.isActive ? "Active" : "Inactive"}
-                      </span>
-                    </div>
-                    <p className="mt-1 text-sm text-ink-soft">
-                      {entry.priceMinor === null
-                        ? "Price on request"
-                        : `${entry.currencyCode} ${entry.priceMinor} minor units`}{" "}
-                      · {" "}
-                      {entry.isActive
-                        ? "used for future reply context"
-                        : "not used for reply context"}
-                    </p>
-                    <div className="mt-2 flex gap-3 py-1">
-                      <button
-                        type="button"
-                        onClick={() => setEditingCatalogue(entry)}
-                        className="btn btn-quiet"
-                      >
-                        Edit
-                      </button>
-                      {entry.isActive ? (
-                        <button
-                          type="button"
-                          disabled={busy}
-                          onClick={() => void deactivate("catalogue", entry.id)}
-                          className="btn btn-danger-quiet"
-                        >
-                          Deactivate
-                        </button>
-                      ) : null}
-                    </div>
-                  </>
-                )}
-              />
-            </section>
-
-            <section className="card p-5 sm:p-6">
-              <h2 className="text-lg font-bold text-ink">
-                FAQs &amp; policies
-              </h2>
-              <form
-                className="mt-5 grid gap-4 sm:grid-cols-2"
-                onSubmit={(event) => void saveKnowledge(event)}
-              >
-                <label className={labelClass}>
-                  Title or question
-                  <input
-                    required
-                    name="title"
-                    key={`title-${editingKnowledge?.id ?? "new"}`}
-                    defaultValue={editingKnowledge?.title ?? ""}
-                    className={inputClass}
-                  />
-                </label>
-                <label className={labelClass}>
-                  Entry type
-                  <select
-                    name="entryType"
-                    key={`type-${editingKnowledge?.id ?? "new"}`}
-                    defaultValue={editingKnowledge?.entryType ?? "faq"}
-                    className={inputClass}
+                  <label className={labelClass}>
+                    Name
+                    <input
+                      required
+                      name="name"
+                      defaultValue={editingCatalogue?.name ?? ""}
+                      className={inputClass}
+                    />
+                  </label>
+                  <label className={labelClass}>
+                    Currency code
+                    <input
+                      required
+                      name="currencyCode"
+                      defaultValue={
+                        editingCatalogue?.currencyCode ??
+                        defaultCatalogueCurrency(profile?.currencyCode)
+                      }
+                      maxLength={3}
+                      pattern="[A-Z]{3}"
+                      title="A three-letter uppercase ISO 4217 currency code, for example NGN or USD"
+                      className={inputClass}
+                      aria-describedby="currency-help"
+                    />
+                  </label>
+                  <p
+                    id="currency-help"
+                    className="-mt-2 text-xs text-ink-soft sm:col-span-2"
                   >
-                    <option value="faq">FAQ</option>
-                    <option value="policy">Policy</option>
-                  </select>
-                </label>
-                <label className={`${labelClass} sm:col-span-2`}>
-                  Approved answer or policy
-                  <textarea
-                    required
-                    name="answer"
-                    key={`answer-${editingKnowledge?.id ?? "new"}`}
-                    defaultValue={editingKnowledge?.answer ?? ""}
-                    rows={4}
-                    className={inputClass}
-                  />
-                </label>
-                <label className="flex items-center gap-2 text-sm text-ink sm:col-span-2">
-                  <input
-                    name="isActive"
-                    key={`knowledge-active-${editingKnowledge?.id ?? "new"}`}
-                    type="checkbox"
-                    className="checkbox"
-                    defaultChecked={editingKnowledge?.isActive ?? true}
-                  />
-                  Active and approved for future context
-                </label>
-                <div className="flex gap-3 sm:col-span-2">
-                  <button disabled={busy} className={primaryButtonClass}>
-                    {editingKnowledge ? "Save entry" : "Add entry"}
-                  </button>
-                  {editingKnowledge ? (
-                    <button
-                      type="button"
-                      onClick={() => setEditingKnowledge(null)}
-                      className={secondaryButtonClass}
-                    >
-                      Cancel
+                    Use a current ISO 4217 code in uppercase, for example NGN or
+                    USD. New services default to the business currency (
+                    {defaultCatalogueCurrency(profile?.currencyCode)}
+                    ); existing services keep their own currency and prices.
+                  </p>
+                  <label className={labelClass}>
+                    Price
+                    <input
+                      name="priceMajor"
+                      defaultValue={
+                        editingCatalogue
+                          ? formatMinorToMajorInput(
+                              editingCatalogue.priceMinor,
+                              editingCatalogue.currencyCode,
+                            )
+                          : ""
+                      }
+                      type="text"
+                      inputMode="decimal"
+                      placeholder="15000.00"
+                      className={`${inputClass} numeric-tabular`}
+                      aria-describedby="price-help"
+                    />
+                  </label>
+                  <label className={labelClass}>
+                    Availability notes
+                    <input
+                      name="availabilityNotes"
+                      defaultValue={editingCatalogue?.availabilityNotes ?? ""}
+                      className={inputClass}
+                    />
+                  </label>
+                  <p
+                    id="price-help"
+                    className="-mt-2 text-xs text-ink-soft sm:col-span-2"
+                  >
+                    Enter the price in normal currency units (for example 15000
+                    or 15000.50 in NGN). Leave blank when pricing is quoted per
+                    booking.
+                  </p>
+                  <label className={`${labelClass} sm:col-span-2`}>
+                    Description
+                    <textarea
+                      name="description"
+                      defaultValue={editingCatalogue?.description ?? ""}
+                      rows={3}
+                      className={inputClass}
+                    />
+                  </label>
+                  <label className="flex items-center gap-2 text-sm text-ink sm:col-span-2">
+                    <input
+                      name="isActive"
+                      type="checkbox"
+                      className="checkbox"
+                      defaultChecked={editingCatalogue?.isActive ?? true}
+                    />
+                    Active and approved for future context
+                  </label>
+                  <div className="flex gap-3 sm:col-span-2">
+                    <button disabled={busy} className={primaryButtonClass}>
+                      {editingCatalogue ? "Save service" : "Add service"}
                     </button>
-                  ) : null}
-                </div>
-              </form>
-
-              <EntryList
-                entries={knowledge}
-                empty="No FAQs or policies added yet."
-                render={(entry) => (
-                  <>
-                    <div className="flex flex-wrap items-center gap-2">
-                      <p className="font-semibold text-ink">{entry.title}</p>
-                      <span className="badge badge-neutral">
-                        {entry.entryType === "faq" ? "FAQ" : "Policy"}
-                      </span>
-                      <span
-                        className={`badge ${
-                          entry.isActive ? "badge-booked" : "badge-neutral"
-                        }`}
-                      >
-                        {entry.isActive ? "Active" : "Inactive"}
-                      </span>
-                    </div>
-                    <p className="mt-1.5 max-w-2xl text-sm leading-6 text-ink-soft">
-                      {entry.answer}
-                    </p>
-                    <div className="mt-2 flex gap-3 py-1">
+                    {editingCatalogue ? (
                       <button
                         type="button"
-                        onClick={() => setEditingKnowledge(entry)}
-                        className="btn btn-quiet"
+                        onClick={() => {
+                          setEditingCatalogue(null);
+                          setCatalogueResetCount((count) => count + 1);
+                        }}
+                        className={secondaryButtonClass}
                       >
-                        Edit
+                        Cancel
                       </button>
-                      {entry.isActive ? (
+                    ) : null}
+                  </div>
+                </form>
+
+                <EntryList
+                  entries={catalogue}
+                  empty="No services added yet."
+                  render={(entry) => (
+                    <>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <p className="break-words font-semibold text-ink">
+                          {entry.name}
+                        </p>
+                        <span
+                          className={`badge ${
+                            entry.isActive ? "badge-booked" : "badge-neutral"
+                          }`}
+                        >
+                          {entry.isActive ? "Active" : "Inactive"}
+                        </span>
+                      </div>
+                      <p className="mt-1 text-sm text-ink-soft">
+                        <span className="numeric-tabular font-medium text-ink">
+                          {entry.priceMinor === null
+                            ? "Price on request"
+                            : formatMajorPrice(
+                                entry.priceMinor,
+                                entry.currencyCode,
+                              )}
+                        </span>{" "}
+                        ·{" "}
+                        {entry.isActive
+                          ? "used for future reply context"
+                          : "not used for reply context"}
+                      </p>
+                      <div className="mt-2 flex gap-3 py-1">
                         <button
                           type="button"
-                          disabled={busy}
-                          onClick={() =>
-                            void deactivate("knowledge", entry.id)
-                          }
-                          className="btn btn-danger-quiet"
+                          onClick={() => setEditingCatalogue(entry)}
+                          className="btn btn-quiet"
                         >
-                          Deactivate
+                          Edit
                         </button>
-                      ) : null}
-                    </div>
-                  </>
-                )}
-              />
-            </section>
+                        {entry.isActive ? (
+                          <button
+                            type="button"
+                            disabled={busy}
+                            onClick={() => void deactivate("catalogue", entry.id)}
+                            className="btn btn-danger-quiet"
+                          >
+                            Deactivate
+                          </button>
+                        ) : null}
+                      </div>
+                    </>
+                  )}
+                />
+              </section>
+            </Activity>
+
+            <Activity mode={showKnowledgeSection ? "visible" : "hidden"}>
+              <section
+                id={embedded ? "settings-panel-knowledge" : undefined}
+                role={embedded ? "tabpanel" : undefined}
+                aria-labelledby={embedded ? "settings-tab-knowledge" : undefined}
+                className="card p-5 sm:p-6"
+              >
+                <h2 className="text-lg font-bold text-ink">
+                  FAQs &amp; policies
+                </h2>
+                <form
+                  key={`knowledge-form-${editingKnowledge?.id ?? "new"}-${knowledgeResetCount}`}
+                  className="mt-5 grid gap-4 sm:grid-cols-2"
+                  onSubmit={(event) => void saveKnowledge(event)}
+                >
+                  <label className={labelClass}>
+                    Title or question
+                    <input
+                      required
+                      name="title"
+                      defaultValue={editingKnowledge?.title ?? ""}
+                      className={inputClass}
+                    />
+                  </label>
+                  <label className={labelClass}>
+                    Entry type
+                    <select
+                      name="entryType"
+                      defaultValue={editingKnowledge?.entryType ?? "faq"}
+                      className="select mt-1"
+                    >
+                      <option value="faq">FAQ</option>
+                      <option value="policy">Policy</option>
+                    </select>
+                  </label>
+                  <label className={`${labelClass} sm:col-span-2`}>
+                    Approved answer or policy
+                    <textarea
+                      required
+                      name="answer"
+                      defaultValue={editingKnowledge?.answer ?? ""}
+                      rows={4}
+                      className={inputClass}
+                    />
+                  </label>
+                  <label className="flex items-center gap-2 text-sm text-ink sm:col-span-2">
+                    <input
+                      name="isActive"
+                      type="checkbox"
+                      className="checkbox"
+                      defaultChecked={editingKnowledge?.isActive ?? true}
+                    />
+                    Active and approved for future context
+                  </label>
+                  <div className="flex gap-3 sm:col-span-2">
+                    <button disabled={busy} className={primaryButtonClass}>
+                      {editingKnowledge ? "Save entry" : "Add entry"}
+                    </button>
+                    {editingKnowledge ? (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setEditingKnowledge(null);
+                          setKnowledgeResetCount((count) => count + 1);
+                        }}
+                        className={secondaryButtonClass}
+                      >
+                        Cancel
+                      </button>
+                    ) : null}
+                  </div>
+                </form>
+
+                <EntryList
+                  entries={knowledge}
+                  empty="No FAQs or policies added yet."
+                  render={(entry) => (
+                    <>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <p className="break-words font-semibold text-ink">
+                          {entry.title}
+                        </p>
+                        <span className="badge badge-neutral">
+                          {entry.entryType === "faq" ? "FAQ" : "Policy"}
+                        </span>
+                        <span
+                          className={`badge ${
+                            entry.isActive ? "badge-booked" : "badge-neutral"
+                          }`}
+                        >
+                          {entry.isActive ? "Active" : "Inactive"}
+                        </span>
+                      </div>
+                      <p className="mt-1.5 max-w-2xl break-words text-sm leading-6 text-ink-soft">
+                        {entry.answer}
+                      </p>
+                      <div className="mt-2 flex gap-3 py-1">
+                        <button
+                          type="button"
+                          onClick={() => setEditingKnowledge(entry)}
+                          className="btn btn-quiet"
+                        >
+                          Edit
+                        </button>
+                        {entry.isActive ? (
+                          <button
+                            type="button"
+                            disabled={busy}
+                            onClick={() =>
+                              void deactivate("knowledge", entry.id)
+                            }
+                            className="btn btn-danger-quiet"
+                          >
+                            Deactivate
+                          </button>
+                        ) : null}
+                      </div>
+                    </>
+                  )}
+                />
+              </section>
+            </Activity>
           </fieldset>
         )}
       </div>
