@@ -52,12 +52,28 @@ export type AuthRateLimitOptions = Readonly<{
   max?: number;
 }>;
 
+export const AUTH_MIN_PASSWORD_LENGTH = 8;
+export const AUTH_MAX_PASSWORD_LENGTH = 128;
+export const AUTH_RESET_TOKEN_EXPIRES_IN_SECONDS = 900;
+
+export type PasswordResetEmailPayload = Readonly<{
+  user: Readonly<{ id: string; email: string; name: string }>;
+  url: string;
+  token: string;
+}>;
+
+export type SendResetPasswordEmailHook = (
+  data: PasswordResetEmailPayload,
+) => Promise<void> | void;
+
 export type CreateAuthOptions = Readonly<{
   pool: Pool;
   secret: string;
   baseURL?: string;
   trustedOrigins: string[];
   rateLimit?: AuthRateLimitOptions;
+  nodeEnv?: "development" | "test" | "production";
+  sendResetPasswordEmail?: SendResetPasswordEmailHook;
   /**
    * CIDR ranges of proxies that are allowed to set the client IP header.
    *
@@ -75,6 +91,8 @@ export function createAuth({
   baseURL,
   trustedOrigins,
   rateLimit,
+  nodeEnv = "development",
+  sendResetPasswordEmail,
   trustedProxyCidrs,
 }: CreateAuthOptions) {
   const trustedProxies = [
@@ -97,9 +115,35 @@ export function createAuth({
     database: pool,
     emailAndPassword: {
       enabled: true,
-      minPasswordLength: 8,
-      maxPasswordLength: 128,
+      minPasswordLength: AUTH_MIN_PASSWORD_LENGTH,
+      maxPasswordLength: AUTH_MAX_PASSWORD_LENGTH,
       requireEmailVerification: false,
+      resetPasswordTokenExpiresIn: AUTH_RESET_TOKEN_EXPIRES_IN_SECONDS,
+      revokeSessionsOnPasswordReset: true,
+      sendResetPassword: async ({ user, url, token }) => {
+        if (sendResetPasswordEmail) {
+          await sendResetPasswordEmail({
+            user: { id: user.id, email: user.email, name: user.name },
+            url,
+            token,
+          });
+          return;
+        }
+
+        // Never log tokens, reset links, or user emails in production or test logs.
+        if (nodeEnv === "development") {
+          console.info(
+            `[dev-only] Password reset link (expires in ${AUTH_RESET_TOKEN_EXPIRES_IN_SECONDS / 60}m): ${url}`,
+          );
+          return;
+        }
+
+        if (nodeEnv === "production") {
+          console.warn(
+            "Password reset requested, but no production email delivery provider is configured.",
+          );
+        }
+      },
     },
     rateLimit: {
       enabled: rateLimit?.enabled ?? true,
@@ -108,6 +152,8 @@ export function createAuth({
       customRules: {
         "/sign-in/email": { window: 60, max: 10 },
         "/sign-up/email": { window: 60, max: 5 },
+        "/request-password-reset": { window: 60, max: 3 },
+        "/reset-password": { window: 60, max: 5 },
       },
     },
     advanced: {

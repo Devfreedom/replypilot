@@ -29,6 +29,7 @@ async function start(): Promise<void> {
       baseURL: config.betterAuthUrl,
       trustedOrigins: config.trustedOrigins,
       trustedProxyCidrs: config.trustedProxyCidrs,
+      nodeEnv: config.nodeEnv,
     },
     replyDraftProvider,
     whatsapp: config.whatsapp,

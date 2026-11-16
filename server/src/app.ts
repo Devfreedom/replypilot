@@ -13,6 +13,7 @@ import {
 import {
   createAuth,
   type AuthRateLimitOptions,
+  type SendResetPasswordEmailHook,
 } from "./auth/config.js";
 import { createBusinessRouter } from "./business/routes.js";
 import { createLeadsRouter } from "./leads/routes.js";
@@ -142,6 +143,8 @@ export type AppAuthOptions = Readonly<{
   trustedOrigins?: string[];
   rateLimit?: AuthRateLimitOptions;
   trustedProxyCidrs?: string[];
+  nodeEnv?: "development" | "test" | "production";
+  sendResetPasswordEmail?: SendResetPasswordEmailHook;
 }>;
 
 export function createApp({
@@ -169,6 +172,8 @@ export function createApp({
     trustedOrigins: authOptions.trustedOrigins ?? [],
     rateLimit: authOptions.rateLimit,
     trustedProxyCidrs: authOptions.trustedProxyCidrs,
+    nodeEnv: authOptions.nodeEnv,
+    sendResetPasswordEmail: authOptions.sendResetPasswordEmail,
   });
 
   app.disable("x-powered-by");
