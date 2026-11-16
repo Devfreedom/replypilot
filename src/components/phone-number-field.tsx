@@ -16,6 +16,7 @@ type PhoneNumberFieldProps = {
   disabled?: boolean;
   onCountryChange: (value: string) => void;
   onNationalNumberChange: (value: string) => void;
+  onNationalNumberBlur?: () => void;
 };
 
 export function PhoneNumberField({
@@ -27,6 +28,7 @@ export function PhoneNumberField({
   disabled = false,
   onCountryChange,
   onNationalNumberChange,
+  onNationalNumberBlur,
 }: PhoneNumberFieldProps) {
   const idPrefix = useId();
   const countryId = `${idPrefix}-phone-country`;
@@ -92,6 +94,7 @@ export function PhoneNumberField({
               onChange={(event) =>
                 onNationalNumberChange(event.target.value)
               }
+              onBlur={onNationalNumberBlur}
               aria-describedby={numberDescribedBy}
               aria-invalid={numberError ? true : undefined}
               placeholder="0803 123 4567"

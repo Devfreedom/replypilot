@@ -1,6 +1,14 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { type FormEvent, useEffect, useMemo, useState } from "react";
+import {
+  hasFieldErrors,
+  mapSuppressionServerErrors,
+  validateSuppressionField,
+  validateSuppressionFields,
+  type SuppressionField,
+  type SuppressionFieldErrors,
+} from "@/lib/business-validation";
 import {
   DELIVERY_EVENT_OUTCOMES,
   SUPPRESSION_REASONS,
@@ -28,7 +36,14 @@ import {
   type WhatsAppConversation,
 } from "@/lib/whatsapp";
 import { useAuth } from "./auth-provider";
-import { Alert, CardSection, PageHeading, SectionState, Spinner } from "./ui";
+import {
+  Alert,
+  CardSection,
+  FormField,
+  PageHeading,
+  SectionState,
+  Spinner,
+} from "./ui";
 
 const PAGE_SIZE = 20;
 const WORKER_POLL_MS = 5_000;
@@ -126,6 +141,8 @@ export function DeliveryProtection() {
   const [suppressReason, setSuppressReason] =
     useState<SuppressionReason>("opt_out");
   const [suppressNotes, setSuppressNotes] = useState("");
+  const [suppressionFieldErrors, setSuppressionFieldErrors] =
+    useState<SuppressionFieldErrors>({});
   const [suppressing, setSuppressing] = useState(false);
   const [reloadToken, setReloadToken] = useState(0);
 
@@ -360,12 +377,46 @@ export function DeliveryProtection() {
     return [...byCustomer.values()];
   }, [conversations, suppressions]);
 
-  async function suppressCustomer() {
-    if (!selectedCustomerId) return;
+  function blurSuppressionField(
+    field: SuppressionField,
+    override?: Partial<Record<SuppressionField, string>>,
+  ) {
+    const message = validateSuppressionField(field, {
+      customerId: override?.customerId ?? selectedCustomerId,
+      reason: override?.reason ?? suppressReason,
+      notes: override?.notes ?? suppressNotes,
+    });
 
-    setSuppressing(true);
+    setSuppressionFieldErrors((current) => ({
+      ...current,
+      [field]: message,
+    }));
+  }
+
+  async function suppressCustomer(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const formElement = event.currentTarget;
     setError(null);
     setNotice(null);
+
+    const validationErrors = validateSuppressionFields({
+      customerId: selectedCustomerId,
+      reason: suppressReason,
+      notes: suppressNotes,
+    });
+
+    setSuppressionFieldErrors(validationErrors);
+
+    if (hasFieldErrors(validationErrors)) {
+      requestAnimationFrame(() => {
+        formElement
+          .querySelector<HTMLElement>('[aria-invalid="true"]')
+          ?.focus();
+      });
+      return;
+    }
+
+    setSuppressing(true);
 
     try {
       const response = await fetch(
@@ -382,9 +433,21 @@ export function DeliveryProtection() {
       const data = await readJson(response);
 
       if (!response.ok) {
-        throw new Error(
-          apiError(data, "Unable to suppress this customer."),
+        const mapped = mapSuppressionServerErrors(
+          data,
+          "Unable to suppress this customer.",
         );
+        setSuppressionFieldErrors(mapped.fieldErrors);
+
+        if (hasFieldErrors(mapped.fieldErrors)) {
+          requestAnimationFrame(() => {
+            formElement
+              .querySelector<HTMLElement>('[aria-invalid="true"]')
+              ?.focus();
+          });
+        }
+
+        throw new Error(mapped.formError ?? "Unable to suppress this customer.");
       }
 
       const parsed = parseSuppressionResponse(data);
@@ -397,6 +460,7 @@ export function DeliveryProtection() {
 
       setSelectedCustomerId("");
       setSuppressNotes("");
+      setSuppressionFieldErrors({});
       setNotice(
         "Customer suppressed. Queued outbound messages will be cancelled and no new sends are permitted.",
       );
@@ -686,68 +750,103 @@ export function DeliveryProtection() {
                 Only the workspace owner can suppress or restore customers.
               </Alert>
             ) : (
-              <div className="grid gap-3 border-b border-line pb-4 sm:grid-cols-[minmax(0,1fr)_minmax(0,12rem)_minmax(0,1fr)_auto] sm:items-end">
-                <label className="field-label">
-                  Customer
-                  <select
-                    value={selectedCustomerId}
-                    onChange={(event) =>
-                      setSelectedCustomerId(event.target.value)
-                    }
-                    className="select mt-1"
-                    disabled={suppressing || candidates.length === 0}
-                  >
-                    <option value="">
-                      {candidates.length === 0
-                        ? "No unsuppressed customers with conversations"
-                        : "Choose a customer"}
-                    </option>
-                    {candidates.map((candidate) => (
-                      <option key={candidate.id} value={candidate.id}>
-                        {candidate.label}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <label className="field-label">
-                  Reason
-                  <select
-                    value={suppressReason}
-                    onChange={(event) =>
-                      setSuppressReason(event.target.value as SuppressionReason)
-                    }
-                    className="select mt-1"
-                    disabled={suppressing}
-                  >
-                    {SUPPRESSION_REASONS.map((reason) => (
-                      <option key={reason} value={reason}>
-                        {SUPPRESSION_REASON_LABELS[reason]}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <label className="field-label">
-                  Notes (optional)
-                  <input
-                    value={suppressNotes}
-                    onChange={(event) => setSuppressNotes(event.target.value)}
-                    maxLength={500}
-                    className="input mt-1"
-                    placeholder="Reason or customer request note"
-                    disabled={suppressing}
-                  />
-                </label>
-                <button
-                  type="button"
-                  onClick={() => void suppressCustomer()}
-                  disabled={
-                    suppressing || selectedCustomerId.length === 0
-                  }
-                  className="btn btn-secondary"
+              <form
+                noValidate
+                onSubmit={(event) => void suppressCustomer(event)}
+                className="grid gap-3 border-b border-line pb-4 sm:grid-cols-[minmax(0,1fr)_minmax(0,12rem)_minmax(0,1fr)_auto] sm:items-start"
+              >
+                <FormField
+                  id="suppress-customer"
+                  label="Customer"
+                  error={suppressionFieldErrors.customerId}
                 >
-                  {suppressing ? "Suppressing…" : "Suppress customer"}
-                </button>
-              </div>
+                  {(fieldProps) => (
+                    <select
+                      {...fieldProps}
+                      value={selectedCustomerId}
+                      onChange={(event) =>
+                        setSelectedCustomerId(event.target.value)
+                      }
+                      onBlur={(event) =>
+                        blurSuppressionField("customerId", {
+                          customerId: event.target.value,
+                        })
+                      }
+                      className="select"
+                      disabled={suppressing || candidates.length === 0}
+                    >
+                      <option value="">
+                        {candidates.length === 0
+                          ? "No unsuppressed customers with conversations"
+                          : "Choose a customer"}
+                      </option>
+                      {candidates.map((candidate) => (
+                        <option key={candidate.id} value={candidate.id}>
+                          {candidate.label}
+                        </option>
+                      ))}
+                    </select>
+                  )}
+                </FormField>
+                <FormField
+                  id="suppress-reason"
+                  label="Reason"
+                  error={suppressionFieldErrors.reason}
+                >
+                  {(fieldProps) => (
+                    <select
+                      {...fieldProps}
+                      value={suppressReason}
+                      onChange={(event) =>
+                        setSuppressReason(event.target.value as SuppressionReason)
+                      }
+                      onBlur={(event) =>
+                        blurSuppressionField("reason", {
+                          reason: event.target.value,
+                        })
+                      }
+                      className="select"
+                      disabled={suppressing}
+                    >
+                      {SUPPRESSION_REASONS.map((reason) => (
+                        <option key={reason} value={reason}>
+                          {SUPPRESSION_REASON_LABELS[reason]}
+                        </option>
+                      ))}
+                    </select>
+                  )}
+                </FormField>
+                <FormField
+                  id="suppress-notes"
+                  label="Notes (optional)"
+                  error={suppressionFieldErrors.notes}
+                >
+                  {(fieldProps) => (
+                    <input
+                      {...fieldProps}
+                      value={suppressNotes}
+                      onChange={(event) => setSuppressNotes(event.target.value)}
+                      onBlur={(event) =>
+                        blurSuppressionField("notes", {
+                          notes: event.target.value,
+                        })
+                      }
+                      className="input"
+                      placeholder="Reason or customer request note"
+                      disabled={suppressing}
+                    />
+                  )}
+                </FormField>
+                <div className="sm:pt-6">
+                  <button
+                    type="submit"
+                    disabled={suppressing || candidates.length === 0}
+                    className="btn btn-secondary w-full sm:w-auto"
+                  >
+                    {suppressing ? "Suppressing…" : "Suppress customer"}
+                  </button>
+                </div>
+              </form>
             )}
 
             {suppressions.length === 0 ? (

@@ -27,8 +27,25 @@ import {
 import {
   CURRENCY_OPTIONS,
   defaultCatalogueCurrency,
-  isSupportedCurrencyCode,
 } from "@/lib/currencies";
+import {
+  type BusinessProfileField,
+  type BusinessProfileFieldErrors,
+  type CatalogueField,
+  type CatalogueFieldErrors,
+  type KnowledgeField,
+  type KnowledgeFieldErrors,
+  hasFieldErrors,
+  mapBusinessProfileServerErrors,
+  mapCatalogueServerErrors,
+  mapKnowledgeServerErrors,
+  validateBusinessProfileField,
+  validateBusinessProfileFields,
+  validateCatalogueField,
+  validateCatalogueFields,
+  validateKnowledgeField,
+  validateKnowledgeFields,
+} from "@/lib/business-validation";
 import {
   type OpeningHoursEntry,
   type ScheduleErrors,
@@ -44,18 +61,13 @@ import {
   restorePhoneState,
   validatePhoneInput,
 } from "@/lib/phone";
-import {
-  buildTimezoneOptions,
-  isValidTimezone,
-} from "@/lib/timezones";
+import { buildTimezoneOptions } from "@/lib/timezones";
 import { useAuth } from "./auth-provider";
 import { OpeningHoursEditor } from "./opening-hours-editor";
 import { PhoneNumberField } from "./phone-number-field";
 import { SearchableCombobox } from "./searchable-combobox";
-import { Alert, PageHeading } from "./ui";
+import { Alert, FormField, PageHeading } from "./ui";
 
-const inputClass = "input mt-1";
-const labelClass = "field-label";
 const secondaryButtonClass = "btn btn-secondary";
 const primaryButtonClass = "btn btn-primary";
 
@@ -80,31 +92,17 @@ function apiError(data: unknown, fallback: string): string {
   return fallback;
 }
 
-function fieldError(data: unknown, fallback: string): string {
-  if (
-    typeof data === "object" &&
-    data !== null &&
-    "details" in data &&
-    Array.isArray(data.details)
-  ) {
-    const first = data.details[0];
-
-    if (
-      typeof first === "object" &&
-      first !== null &&
-      "message" in first &&
-      typeof first.message === "string"
-    ) {
-      return first.message;
-    }
-  }
-
-  return apiError(data, fallback);
+function emptyTextToNull(value: string): string | null {
+  const text = value.trim();
+  return text || null;
 }
 
-function emptyToNull(value: FormDataEntryValue | null): string | null {
-  const text = typeof value === "string" ? value.trim() : "";
-  return text || null;
+function focusFirstInvalid(formElement: HTMLFormElement) {
+  requestAnimationFrame(() => {
+    formElement
+      .querySelector<HTMLElement>('[data-invalid="true"], [aria-invalid="true"]')
+      ?.focus();
+  });
 }
 
 function hasKey(value: unknown, key: string): boolean {
@@ -130,14 +128,32 @@ export function BusinessSettings({
   const [notice, setNotice] = useState<string | null>(null);
   const [editingCatalogue, setEditingCatalogue] =
     useState<CatalogueEntry | null>(null);
-  const [catalogueResetCount, setCatalogueResetCount] = useState(0);
+  const [catalogueName, setCatalogueName] = useState("");
+  const [catalogueCurrency, setCatalogueCurrency] = useState("NGN");
+  const [cataloguePriceMajor, setCataloguePriceMajor] = useState("");
+  const [catalogueAvailability, setCatalogueAvailability] = useState("");
+  const [catalogueDescription, setCatalogueDescription] = useState("");
+  const [catalogueIsActive, setCatalogueIsActive] = useState(true);
+  const [catalogueFieldErrors, setCatalogueFieldErrors] =
+    useState<CatalogueFieldErrors>({});
   const [editingKnowledge, setEditingKnowledge] =
     useState<KnowledgeEntry | null>(null);
-  const [knowledgeResetCount, setKnowledgeResetCount] = useState(0);
+  const [knowledgeTitle, setKnowledgeTitle] = useState("");
+  const [knowledgeEntryType, setKnowledgeEntryType] = useState<
+    "faq" | "policy"
+  >("faq");
+  const [knowledgeAnswer, setKnowledgeAnswer] = useState("");
+  const [knowledgeIsActive, setKnowledgeIsActive] = useState(true);
+  const [knowledgeFieldErrors, setKnowledgeFieldErrors] =
+    useState<KnowledgeFieldErrors>({});
   const [showProfileForm, setShowProfileForm] = useState(false);
   const [busy, setBusy] = useState(false);
   const [reloadToken, setReloadToken] = useState(0);
   const loadedReloadTokenRef = useRef<number | null>(null);
+  const [businessName, setBusinessName] = useState("");
+  const [businessDescription, setBusinessDescription] = useState("");
+  const [contactEmail, setContactEmail] = useState("");
+  const [businessAddress, setBusinessAddress] = useState("");
   const [schedule, setSchedule] = useState<WeeklySchedule>(() =>
     createEmptyWeeklySchedule(),
   );
@@ -153,31 +169,13 @@ export function BusinessSettings({
   const [phoneWarning, setPhoneWarning] = useState<string | null>(null);
   const [timezone, setTimezone] = useState("");
   const [businessCurrency, setBusinessCurrency] = useState("");
-  const [profileValidationAttempted, setProfileValidationAttempted] =
-    useState(false);
+  const [profileFieldErrors, setProfileFieldErrors] =
+    useState<BusinessProfileFieldErrors>({});
 
   const timezoneOptions = useMemo(
     () => buildTimezoneOptions(timezone),
     [timezone],
   );
-  const phoneValidation = validatePhoneInput(phoneCountry, phoneNational);
-  const timezoneValidationError = timezone
-    ? isValidTimezone(timezone)
-      ? undefined
-      : "Choose a valid IANA timezone."
-    : "Choose the timezone that matches the business.";
-  const currencyValidationError =
-    businessCurrency && !isSupportedCurrencyCode(businessCurrency)
-      ? "Choose a valid ISO 4217 currency."
-      : undefined;
-  const profileErrors = profileValidationAttempted
-    ? {
-        phoneCountry: phoneValidation.errors.country,
-        phoneNumber: phoneValidation.errors.number,
-        timezone: timezoneValidationError,
-        currency: currencyValidationError,
-      }
-    : {};
 
   useEffect(() => {
     if (loadedReloadTokenRef.current === reloadToken) {
@@ -247,6 +245,10 @@ export function BusinessSettings({
         setCatalogue(nextCatalogue);
         setKnowledge(nextKnowledge);
         setShowProfileForm(nextProfile !== null);
+        setBusinessName(nextProfile?.businessName ?? "");
+        setBusinessDescription(nextProfile?.businessDescription ?? "");
+        setContactEmail(nextProfile?.contactEmail ?? "");
+        setBusinessAddress(nextProfile?.businessAddress ?? "");
         setSchedule(loadedSchedule.schedule);
         setScheduleIssues(loadedSchedule.issues);
         setLegacyOpeningHours(
@@ -261,7 +263,10 @@ export function BusinessSettings({
         setPhoneWarning(restoredPhone.warning);
         setTimezone(nextProfile?.timezone ?? "");
         setBusinessCurrency(nextProfile?.currencyCode ?? "");
-        setProfileValidationAttempted(false);
+        setProfileFieldErrors({});
+        setCatalogueCurrency(defaultCatalogueCurrency(nextProfile?.currencyCode));
+        setCatalogueFieldErrors({});
+        setKnowledgeFieldErrors({});
       } catch (cause) {
         if (controller.signal.aborted) return;
 
@@ -312,6 +317,10 @@ export function BusinessSettings({
 
   function cancelProfileSetup() {
     setShowProfileForm(false);
+    setBusinessName("");
+    setBusinessDescription("");
+    setContactEmail("");
+    setBusinessAddress("");
     setSchedule(createEmptyWeeklySchedule());
     setScheduleErrors({});
     setScheduleIssues([]);
@@ -322,86 +331,205 @@ export function BusinessSettings({
     setPhoneWarning(null);
     setTimezone("");
     setBusinessCurrency("");
-    setProfileValidationAttempted(false);
+    setProfileFieldErrors({});
+  }
+
+  function blurProfileField(
+    field: BusinessProfileField,
+    overrides?: Partial<
+      Record<
+        | "businessName"
+        | "timezone"
+        | "businessDescription"
+        | "contactEmail"
+        | "currency"
+        | "phoneCountry"
+        | "phoneNational"
+        | "businessAddress",
+        string
+      >
+    >,
+  ) {
+    const values = {
+      businessName: overrides?.businessName ?? businessName,
+      timezone: overrides?.timezone ?? timezone,
+      businessDescription:
+        overrides?.businessDescription ?? businessDescription,
+      contactEmail: overrides?.contactEmail ?? contactEmail,
+      currency: overrides?.currency ?? businessCurrency,
+      phoneCountry: overrides?.phoneCountry ?? phoneCountry,
+      phoneNational: overrides?.phoneNational ?? phoneNational,
+      businessAddress: overrides?.businessAddress ?? businessAddress,
+    };
+
+    const nextError = validateBusinessProfileField(field, values);
+
+    setProfileFieldErrors((current) => {
+      const updated: BusinessProfileFieldErrors = {
+        ...current,
+        [field]: nextError,
+      };
+
+      if (field === "phoneCountry" || field === "phoneNumber") {
+        updated.phoneCountry = validateBusinessProfileField(
+          "phoneCountry",
+          values,
+        );
+        updated.phoneNumber = validateBusinessProfileField(
+          "phoneNumber",
+          values,
+        );
+      }
+
+      return updated;
+    });
+  }
+
+  function blurCatalogueField(
+    field: CatalogueField,
+    overrides?: Partial<
+      Record<
+        | "name"
+        | "currencyCode"
+        | "priceMajor"
+        | "availabilityNotes"
+        | "description",
+        string
+      >
+    >,
+  ) {
+    const values = {
+      name: overrides?.name ?? catalogueName,
+      currencyCode: overrides?.currencyCode ?? catalogueCurrency,
+      priceMajor: overrides?.priceMajor ?? cataloguePriceMajor,
+      availabilityNotes:
+        overrides?.availabilityNotes ?? catalogueAvailability,
+      description: overrides?.description ?? catalogueDescription,
+    };
+
+    const message = validateCatalogueField(field, values);
+
+    setCatalogueFieldErrors((current) => {
+      const updated: CatalogueFieldErrors = { ...current, [field]: message };
+
+      if (field === "currencyCode" && values.priceMajor.trim()) {
+        updated.priceMajor = validateCatalogueField("priceMajor", values);
+      }
+
+      return updated;
+    });
+  }
+
+  function startEditCatalogue(entry: CatalogueEntry) {
+    setEditingCatalogue(entry);
+    setCatalogueName(entry.name);
+    setCatalogueCurrency(entry.currencyCode);
+    setCataloguePriceMajor(
+      formatMinorToMajorInput(entry.priceMinor, entry.currencyCode),
+    );
+    setCatalogueAvailability(entry.availabilityNotes ?? "");
+    setCatalogueDescription(entry.description);
+    setCatalogueIsActive(entry.isActive);
+    setCatalogueFieldErrors({});
+    setError(null);
+  }
+
+  function resetCatalogueForm(profileCurrencyCode?: string | null) {
+    setEditingCatalogue(null);
+    setCatalogueName("");
+    setCatalogueCurrency(defaultCatalogueCurrency(profileCurrencyCode));
+    setCataloguePriceMajor("");
+    setCatalogueAvailability("");
+    setCatalogueDescription("");
+    setCatalogueIsActive(true);
+    setCatalogueFieldErrors({});
+  }
+
+  function blurKnowledgeField(
+    field: KnowledgeField,
+    overrides?: Partial<Record<"title" | "entryType" | "answer", string>>,
+  ) {
+    const values = {
+      title: overrides?.title ?? knowledgeTitle,
+      entryType: overrides?.entryType ?? knowledgeEntryType,
+      answer: overrides?.answer ?? knowledgeAnswer,
+    };
+
+    setKnowledgeFieldErrors((current) => ({
+      ...current,
+      [field]: validateKnowledgeField(field, values),
+    }));
+  }
+
+  function startEditKnowledge(entry: KnowledgeEntry) {
+    setEditingKnowledge(entry);
+    setKnowledgeTitle(entry.title);
+    setKnowledgeEntryType(entry.entryType);
+    setKnowledgeAnswer(entry.answer);
+    setKnowledgeIsActive(entry.isActive);
+    setKnowledgeFieldErrors({});
+    setError(null);
+  }
+
+  function resetKnowledgeForm() {
+    setEditingKnowledge(null);
+    setKnowledgeTitle("");
+    setKnowledgeEntryType("faq");
+    setKnowledgeAnswer("");
+    setKnowledgeIsActive(true);
+    setKnowledgeFieldErrors({});
   }
 
   async function saveProfile(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    setBusy(true);
     setNotice(null);
     setError(null);
 
     const formElement = event.currentTarget;
-    const form = new FormData(formElement);
     let openingHours: OpeningHoursEntry[];
+    let scheduleInvalid = false;
 
     if (legacyOpeningHours) {
       openingHours = legacyOpeningHours;
     } else {
-      const nextErrors = validateWeeklySchedule(schedule);
-      setScheduleErrors(nextErrors);
+      const nextScheduleErrors = validateWeeklySchedule(schedule);
+      setScheduleErrors(nextScheduleErrors);
       setScheduleValidationAttempted(true);
-
-      if (hasScheduleErrors(nextErrors)) {
-        setBusy(false);
-        requestAnimationFrame(() => {
-          formElement
-            .querySelector<HTMLInputElement>(
-              'input[type="time"][aria-invalid="true"]',
-            )
-            ?.focus();
-        });
-        return;
-      }
-
+      scheduleInvalid = hasScheduleErrors(nextScheduleErrors);
       openingHours = openingHoursFromSchedule(schedule);
     }
 
-    const nextPhoneValidation = validatePhoneInput(
+    const nextFieldErrors = validateBusinessProfileFields({
+      businessName,
+      timezone,
+      businessDescription,
+      contactEmail,
+      currency: businessCurrency,
       phoneCountry,
       phoneNational,
-    );
-    const nextTimezoneError = timezone
-      ? isValidTimezone(timezone)
-        ? null
-        : "Choose a valid IANA timezone."
-      : "Choose the timezone that matches the business.";
-    const nextCurrencyError =
-      businessCurrency && !isSupportedCurrencyCode(businessCurrency)
-        ? "Choose a valid ISO 4217 currency."
-        : null;
-    const nextProfileErrors = {
-      phoneCountry: nextPhoneValidation.errors.country,
-      phoneNumber: nextPhoneValidation.errors.number,
-      timezone: nextTimezoneError,
-      currency: nextCurrencyError,
-    };
+      businessAddress,
+    });
+    setProfileFieldErrors(nextFieldErrors);
 
-    setProfileValidationAttempted(true);
-
-    if (Object.values(nextProfileErrors).some(Boolean)) {
-      setBusy(false);
-      requestAnimationFrame(() => {
-        formElement
-          .querySelector<HTMLElement>(
-            '[data-invalid="true"], [aria-invalid="true"]',
-          )
-          ?.focus();
-      });
+    if (scheduleInvalid || hasFieldErrors(nextFieldErrors)) {
+      focusFirstInvalid(formElement);
       return;
     }
 
+    const nextPhoneValidation = validatePhoneInput(phoneCountry, phoneNational);
     const payload = {
-      businessName: String(form.get("businessName") ?? ""),
-      businessDescription: String(form.get("businessDescription") ?? ""),
-      contactEmail: emptyToNull(form.get("contactEmail")),
+      businessName: businessName.trim(),
+      businessDescription: businessDescription.trim(),
+      contactEmail: emptyTextToNull(contactEmail),
       contactPhone: nextPhoneValidation.phone,
       contactPhoneCountry: nextPhoneValidation.countryCode,
-      businessAddress: emptyToNull(form.get("businessAddress")),
-      timezone,
+      businessAddress: emptyTextToNull(businessAddress),
+      timezone: timezone.trim(),
       openingHours,
       currencyCode: businessCurrency || null,
     };
+
+    setBusy(true);
 
     try {
       const response = await fetch("/api/business/profile", {
@@ -412,8 +540,18 @@ export function BusinessSettings({
       const data = await readJson(response);
 
       if (!response.ok) {
+        const mapped = mapBusinessProfileServerErrors(
+          data,
+          "Unable to save business profile.",
+        );
+        setProfileFieldErrors(mapped.fieldErrors);
+
+        if (hasFieldErrors(mapped.fieldErrors)) {
+          focusFirstInvalid(formElement);
+        }
+
         throw new Error(
-          fieldError(data, "Unable to save business profile."),
+          mapped.formError ?? "Unable to save business profile.",
         );
       }
 
@@ -433,6 +571,10 @@ export function BusinessSettings({
 
       setProfile(saved);
       setShowProfileForm(true);
+      setBusinessName(saved.businessName);
+      setBusinessDescription(saved.businessDescription);
+      setContactEmail(saved.contactEmail ?? "");
+      setBusinessAddress(saved.businessAddress ?? "");
       setSchedule(loadedSchedule.schedule);
       setScheduleIssues(loadedSchedule.issues);
       setLegacyOpeningHours(
@@ -445,7 +587,10 @@ export function BusinessSettings({
       setPhoneWarning(restoredPhone.warning);
       setTimezone(saved.timezone);
       setBusinessCurrency(saved.currencyCode ?? "");
-      setProfileValidationAttempted(false);
+      setProfileFieldErrors({});
+      if (!editingCatalogue) {
+        setCatalogueCurrency(defaultCatalogueCurrency(saved.currencyCode));
+      }
       setNotice("Business profile saved.");
     } catch (cause) {
       setError(
@@ -460,37 +605,49 @@ export function BusinessSettings({
 
   async function saveCatalogue(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    setBusy(true);
     setNotice(null);
     setError(null);
 
     const formElement = event.currentTarget;
-    const form = new FormData(formElement);
-    const currencyCode = String(form.get("currencyCode") ?? "")
-      .trim()
-      .toUpperCase();
+    const normalizedCurrency = catalogueCurrency.trim().toUpperCase();
+    const validationErrors = validateCatalogueFields({
+      name: catalogueName,
+      currencyCode: normalizedCurrency,
+      priceMajor: cataloguePriceMajor,
+      availabilityNotes: catalogueAvailability,
+      description: catalogueDescription,
+    });
+    setCatalogueFieldErrors(validationErrors);
+
+    if (hasFieldErrors(validationErrors)) {
+      focusFirstInvalid(formElement);
+      return;
+    }
+
     const parsedPrice = parseMajorPriceToMinor(
-      String(form.get("priceMajor") ?? ""),
-      currencyCode,
+      cataloguePriceMajor,
+      normalizedCurrency,
     );
 
     if (!parsedPrice.ok) {
-      setError(parsedPrice.message);
-      setBusy(false);
+      setCatalogueFieldErrors({ priceMajor: parsedPrice.message });
+      focusFirstInvalid(formElement);
       return;
     }
 
     const payload = {
-      name: String(form.get("name") ?? ""),
-      description: String(form.get("description") ?? ""),
+      name: catalogueName.trim(),
+      description: catalogueDescription.trim(),
       priceMinor: parsedPrice.minor,
-      currencyCode,
-      availabilityNotes: emptyToNull(form.get("availabilityNotes")),
-      isActive: form.get("isActive") === "on",
+      currencyCode: normalizedCurrency,
+      availabilityNotes: emptyTextToNull(catalogueAvailability),
+      isActive: catalogueIsActive,
     };
     const path = editingCatalogue
       ? `/api/business/catalogue/${editingCatalogue.id}`
       : "/api/business/catalogue";
+
+    setBusy(true);
 
     try {
       const response = await fetch(path, {
@@ -501,7 +658,17 @@ export function BusinessSettings({
       const data = await readJson(response);
 
       if (!response.ok) {
-        throw new Error(fieldError(data, "Unable to save service."));
+        const mapped = mapCatalogueServerErrors(
+          data,
+          "Unable to save service.",
+        );
+        setCatalogueFieldErrors(mapped.fieldErrors);
+
+        if (hasFieldErrors(mapped.fieldErrors)) {
+          focusFirstInvalid(formElement);
+        }
+
+        throw new Error(mapped.formError ?? "Unable to save service.");
       }
 
       const saved = parseCatalogueEntryResponse(data);
@@ -517,9 +684,7 @@ export function BusinessSettings({
           ? current.map((entry) => (entry.id === saved.id ? saved : entry))
           : [saved, ...current],
       );
-      setEditingCatalogue(null);
-      setCatalogueResetCount((count) => count + 1);
-      formElement.reset();
+      resetCatalogueForm(profile?.currencyCode);
       setNotice("Service saved.");
     } catch (cause) {
       setError(
@@ -532,21 +697,33 @@ export function BusinessSettings({
 
   async function saveKnowledge(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    setBusy(true);
     setNotice(null);
     setError(null);
 
     const formElement = event.currentTarget;
-    const form = new FormData(formElement);
+    const validationErrors = validateKnowledgeFields({
+      title: knowledgeTitle,
+      entryType: knowledgeEntryType,
+      answer: knowledgeAnswer,
+    });
+    setKnowledgeFieldErrors(validationErrors);
+
+    if (hasFieldErrors(validationErrors)) {
+      focusFirstInvalid(formElement);
+      return;
+    }
+
     const payload = {
-      title: String(form.get("title") ?? ""),
-      answer: String(form.get("answer") ?? ""),
-      entryType: String(form.get("entryType") ?? "faq"),
-      isActive: form.get("isActive") === "on",
+      title: knowledgeTitle.trim(),
+      answer: knowledgeAnswer.trim(),
+      entryType: knowledgeEntryType,
+      isActive: knowledgeIsActive,
     };
     const path = editingKnowledge
       ? `/api/business/knowledge/${editingKnowledge.id}`
       : "/api/business/knowledge";
+
+    setBusy(true);
 
     try {
       const response = await fetch(path, {
@@ -557,7 +734,17 @@ export function BusinessSettings({
       const data = await readJson(response);
 
       if (!response.ok) {
-        throw new Error(fieldError(data, "Unable to save knowledge entry."));
+        const mapped = mapKnowledgeServerErrors(
+          data,
+          "Unable to save knowledge entry.",
+        );
+        setKnowledgeFieldErrors(mapped.fieldErrors);
+
+        if (hasFieldErrors(mapped.fieldErrors)) {
+          focusFirstInvalid(formElement);
+        }
+
+        throw new Error(mapped.formError ?? "Unable to save knowledge entry.");
       }
 
       const saved = parseKnowledgeEntryResponse(data);
@@ -573,9 +760,7 @@ export function BusinessSettings({
           ? current.map((entry) => (entry.id === saved.id ? saved : entry))
           : [saved, ...current],
       );
-      setEditingKnowledge(null);
-      setKnowledgeResetCount((count) => count + 1);
-      formElement.reset();
+      resetKnowledgeForm();
       setNotice("Knowledge entry saved.");
     } catch (cause) {
       setError(
@@ -750,87 +935,168 @@ export function BusinessSettings({
                     Add only facts you approve for future reply context.
                   </p>
                   <form
+                    noValidate
                     className="mt-5 grid gap-4 sm:grid-cols-2"
                     onSubmit={(event) => void saveProfile(event)}
                   >
-                    <label className={labelClass}>
-                      Business name
-                      <input
-                        required
-                        name="businessName"
-                        defaultValue={profile?.businessName ?? ""}
-                        className={inputClass}
-                      />
-                    </label>
+                    <FormField
+                      id="profile-business-name"
+                      label="Business name"
+                      error={profileFieldErrors.businessName}
+                    >
+                      {(fieldProps) => (
+                        <input
+                          {...fieldProps}
+                          name="businessName"
+                          value={businessName}
+                          onChange={(event) =>
+                            setBusinessName(event.target.value)
+                          }
+                          onBlur={(event) =>
+                            blurProfileField("businessName", {
+                              businessName: event.target.value,
+                            })
+                          }
+                          className="input"
+                        />
+                      )}
+                    </FormField>
                     <SearchableCombobox
                       id="profile-timezone"
                       label="Timezone"
                       value={timezone}
                       options={timezoneOptions}
-                      onChange={setTimezone}
+                      onChange={(value) => {
+                        setTimezone(value);
+                        blurProfileField("timezone", { timezone: value });
+                      }}
                       placeholder="Select a timezone"
                       helpText="Search by region or city. The business owner must choose the timezone; it is not guessed from this device."
-                      error={profileErrors.timezone}
+                      error={profileFieldErrors.timezone}
                       disabled={busy}
                     />
-                    <label className={`${labelClass} sm:col-span-2`}>
-                      Business description
-                      <textarea
-                        name="businessDescription"
-                        defaultValue={profile?.businessDescription ?? ""}
-                        rows={3}
-                        className={inputClass}
-                      />
-                    </label>
-                    <label className={labelClass}>
-                      Contact email
-                      <input
-                        type="email"
-                        name="contactEmail"
-                        defaultValue={profile?.contactEmail ?? ""}
-                        className={inputClass}
-                      />
-                    </label>
+                    <div className="sm:col-span-2">
+                      <FormField
+                        id="profile-business-description"
+                        label="Business description"
+                        error={profileFieldErrors.businessDescription}
+                      >
+                        {(fieldProps) => (
+                          <textarea
+                            {...fieldProps}
+                            name="businessDescription"
+                            value={businessDescription}
+                            onChange={(event) =>
+                              setBusinessDescription(event.target.value)
+                            }
+                            onBlur={(event) =>
+                              blurProfileField("businessDescription", {
+                                businessDescription: event.target.value,
+                              })
+                            }
+                            rows={3}
+                            className="textarea"
+                          />
+                        )}
+                      </FormField>
+                    </div>
+                    <FormField
+                      id="profile-contact-email"
+                      label="Contact email"
+                      error={profileFieldErrors.contactEmail}
+                    >
+                      {(fieldProps) => (
+                        <input
+                          {...fieldProps}
+                          type="email"
+                          name="contactEmail"
+                          value={contactEmail}
+                          onChange={(event) =>
+                            setContactEmail(event.target.value)
+                          }
+                          onBlur={(event) =>
+                            blurProfileField("contactEmail", {
+                              contactEmail: event.target.value,
+                            })
+                          }
+                          className="input"
+                          placeholder="hello@studio.ng"
+                        />
+                      )}
+                    </FormField>
                     <SearchableCombobox
                       id="profile-currency"
                       label="Business currency"
                       value={businessCurrency}
                       options={CURRENCY_OPTIONS}
-                      onChange={setBusinessCurrency}
+                      onChange={(value) => {
+                        setBusinessCurrency(value);
+                        blurProfileField("currency", { currency: value });
+                      }}
                       placeholder="Not configured"
                       helpText={
                         businessCurrency
                           ? "Used as the default for new services. Existing service currencies and prices are not changed."
                           : "No business currency is saved yet. Choose one to set the default for new services."
                       }
-                      error={profileErrors.currency}
+                      error={profileFieldErrors.currency}
                       disabled={busy}
                       allowClear
                     />
                     <PhoneNumberField
                       countryCode={phoneCountry}
                       nationalNumber={phoneNational}
-                      countryError={profileErrors.phoneCountry}
-                      numberError={profileErrors.phoneNumber}
+                      countryError={profileFieldErrors.phoneCountry}
+                      numberError={profileFieldErrors.phoneNumber}
                       warning={phoneWarning}
                       disabled={busy}
                       onCountryChange={(value) => {
                         setPhoneCountry(value);
                         setPhoneWarning(null);
+                        blurProfileField("phoneCountry", {
+                          phoneCountry: value,
+                        });
                       }}
                       onNationalNumberChange={(value) => {
                         setPhoneNational(value);
                         setPhoneWarning(null);
                       }}
+                      onNationalNumberBlur={() =>
+                        blurProfileField("phoneNumber")
+                      }
                     />
-                    <label className={`${labelClass} sm:col-span-2`}>
-                      Business address
-                      <input
-                        name="businessAddress"
-                        defaultValue={profile?.businessAddress ?? ""}
-                        className={inputClass}
-                      />
-                    </label>
+                    <div className="sm:col-span-2">
+                      <FormField
+                        id="profile-business-address"
+                        label="Business address"
+                        error={profileFieldErrors.businessAddress}
+                      >
+                        {(fieldProps) => (
+                          <input
+                            {...fieldProps}
+                            name="businessAddress"
+                            value={businessAddress}
+                            onChange={(event) =>
+                              setBusinessAddress(event.target.value)
+                            }
+                            onBlur={(event) =>
+                              blurProfileField("businessAddress", {
+                                businessAddress: event.target.value,
+                              })
+                            }
+                            className="input"
+                          />
+                        )}
+                      </FormField>
+                    </div>
+                    {profileFieldErrors.openingHours ? (
+                      <p
+                        role="alert"
+                        className="text-xs font-medium text-danger-ink sm:col-span-2"
+                      >
+                        {profileFieldErrors.openingHours}
+                      </p>
+                    ) : null}
                     {legacyOpeningHours !== null ? (
                       <div className="min-w-0 rounded-2xl border border-[color-mix(in_oklab,var(--rp-warning)_25%,transparent)] bg-warning-soft p-4 sm:col-span-2 sm:p-5">
                         <h3 className="text-sm font-semibold text-ink">
@@ -937,94 +1203,142 @@ export function BusinessSettings({
                   Products &amp; services
                 </h2>
                 <form
-                  key={`catalogue-form-${editingCatalogue?.id ?? "new"}-${catalogueResetCount}`}
+                  noValidate
                   className="mt-5 grid gap-4 sm:grid-cols-2"
                   onSubmit={(event) => void saveCatalogue(event)}
                 >
-                  <label className={labelClass}>
-                    Name
-                    <input
-                      required
-                      name="name"
-                      defaultValue={editingCatalogue?.name ?? ""}
-                      className={inputClass}
-                    />
-                  </label>
-                  <label className={labelClass}>
-                    Currency code
-                    <input
-                      required
-                      name="currencyCode"
-                      defaultValue={
-                        editingCatalogue?.currencyCode ??
-                        defaultCatalogueCurrency(profile?.currencyCode)
-                      }
-                      maxLength={3}
-                      pattern="[A-Z]{3}"
-                      title="A three-letter uppercase ISO 4217 currency code, for example NGN or USD"
-                      className={inputClass}
-                      aria-describedby="currency-help"
-                    />
-                  </label>
-                  <p
-                    id="currency-help"
-                    className="-mt-2 text-xs text-ink-soft sm:col-span-2"
+                  <FormField
+                    id="catalogue-name"
+                    label="Name"
+                    error={catalogueFieldErrors.name}
                   >
-                    Use a current ISO 4217 code in uppercase, for example NGN or
-                    USD. New services default to the business currency (
-                    {defaultCatalogueCurrency(profile?.currencyCode)}
-                    ); existing services keep their own currency and prices.
-                  </p>
-                  <label className={labelClass}>
-                    Price
-                    <input
-                      name="priceMajor"
-                      defaultValue={
-                        editingCatalogue
-                          ? formatMinorToMajorInput(
-                              editingCatalogue.priceMinor,
-                              editingCatalogue.currencyCode,
-                            )
-                          : ""
-                      }
-                      type="text"
-                      inputMode="decimal"
-                      placeholder="15000.00"
-                      className={`${inputClass} numeric-tabular`}
-                      aria-describedby="price-help"
-                    />
-                  </label>
-                  <label className={labelClass}>
-                    Availability notes
-                    <input
-                      name="availabilityNotes"
-                      defaultValue={editingCatalogue?.availabilityNotes ?? ""}
-                      className={inputClass}
-                    />
-                  </label>
-                  <p
-                    id="price-help"
-                    className="-mt-2 text-xs text-ink-soft sm:col-span-2"
+                    {(fieldProps) => (
+                      <input
+                        {...fieldProps}
+                        name="name"
+                        value={catalogueName}
+                        onChange={(event) =>
+                          setCatalogueName(event.target.value)
+                        }
+                        onBlur={(event) =>
+                          blurCatalogueField("name", {
+                            name: event.target.value,
+                          })
+                        }
+                        className="input"
+                      />
+                    )}
+                  </FormField>
+                  <FormField
+                    id="catalogue-currency"
+                    label="Currency code"
+                    hint={`Use a current uppercase ISO 4217 code (for example NGN or USD). Defaults to ${defaultCatalogueCurrency(profile?.currencyCode)}.`}
+                    error={catalogueFieldErrors.currencyCode}
                   >
-                    Enter the price in normal currency units (for example 15000
-                    or 15000.50 in NGN). Leave blank when pricing is quoted per
-                    booking.
-                  </p>
-                  <label className={`${labelClass} sm:col-span-2`}>
-                    Description
-                    <textarea
-                      name="description"
-                      defaultValue={editingCatalogue?.description ?? ""}
-                      rows={3}
-                      className={inputClass}
-                    />
-                  </label>
+                    {(fieldProps) => (
+                      <input
+                        {...fieldProps}
+                        name="currencyCode"
+                        value={catalogueCurrency}
+                        onChange={(event) =>
+                          setCatalogueCurrency(event.target.value)
+                        }
+                        onBlur={(event) => {
+                          const normalized = event.target.value
+                            .trim()
+                            .toUpperCase();
+                          setCatalogueCurrency(normalized);
+                          blurCatalogueField("currencyCode", {
+                            currencyCode: normalized,
+                          });
+                        }}
+                        maxLength={3}
+                        className="input uppercase"
+                      />
+                    )}
+                  </FormField>
+                  <FormField
+                    id="catalogue-price"
+                    label="Price"
+                    hint="Enter normal major currency units (for example 15000 or 15000.50 in NGN). Leave blank when quoted per booking."
+                    error={catalogueFieldErrors.priceMajor}
+                  >
+                    {(fieldProps) => (
+                      <input
+                        {...fieldProps}
+                        name="priceMajor"
+                        value={cataloguePriceMajor}
+                        onChange={(event) =>
+                          setCataloguePriceMajor(event.target.value)
+                        }
+                        onBlur={(event) =>
+                          blurCatalogueField("priceMajor", {
+                            priceMajor: event.target.value,
+                          })
+                        }
+                        type="text"
+                        inputMode="decimal"
+                        placeholder="15000.00"
+                        className="input numeric-tabular"
+                      />
+                    )}
+                  </FormField>
+                  <FormField
+                    id="catalogue-availability"
+                    label="Availability notes"
+                    error={catalogueFieldErrors.availabilityNotes}
+                  >
+                    {(fieldProps) => (
+                      <input
+                        {...fieldProps}
+                        name="availabilityNotes"
+                        value={catalogueAvailability}
+                        onChange={(event) =>
+                          setCatalogueAvailability(event.target.value)
+                        }
+                        onBlur={(event) =>
+                          blurCatalogueField("availabilityNotes", {
+                            availabilityNotes: event.target.value,
+                          })
+                        }
+                        className="input"
+                      />
+                    )}
+                  </FormField>
+                  <div className="sm:col-span-2">
+                    <FormField
+                      id="catalogue-description"
+                      label="Description"
+                      error={catalogueFieldErrors.description}
+                    >
+                      {(fieldProps) => (
+                        <textarea
+                          {...fieldProps}
+                          name="description"
+                          value={catalogueDescription}
+                          onChange={(event) =>
+                            setCatalogueDescription(event.target.value)
+                          }
+                          onBlur={(event) =>
+                            blurCatalogueField("description", {
+                              description: event.target.value,
+                            })
+                          }
+                          rows={3}
+                          className="textarea"
+                        />
+                      )}
+                    </FormField>
+                  </div>
                   <label className="flex items-center gap-2 text-sm text-ink sm:col-span-2">
                     <input
                       name="isActive"
                       type="checkbox"
                       className="checkbox"
-                      defaultChecked={editingCatalogue?.isActive ?? true}
+                      checked={catalogueIsActive}
+                      onChange={(event) =>
+                        setCatalogueIsActive(event.target.checked)
+                      }
                     />
                     Active and approved for future context
                   </label>
@@ -1035,10 +1349,9 @@ export function BusinessSettings({
                     {editingCatalogue ? (
                       <button
                         type="button"
-                        onClick={() => {
-                          setEditingCatalogue(null);
-                          setCatalogueResetCount((count) => count + 1);
-                        }}
+                        onClick={() =>
+                          resetCatalogueForm(profile?.currencyCode)
+                        }
                         className={secondaryButtonClass}
                       >
                         Cancel
@@ -1081,7 +1394,7 @@ export function BusinessSettings({
                       <div className="mt-2 flex gap-3 py-1">
                         <button
                           type="button"
-                          onClick={() => setEditingCatalogue(entry)}
+                          onClick={() => startEditCatalogue(entry)}
                           className="btn btn-quiet"
                         >
                           Edit
@@ -1114,46 +1427,93 @@ export function BusinessSettings({
                   FAQs &amp; policies
                 </h2>
                 <form
-                  key={`knowledge-form-${editingKnowledge?.id ?? "new"}-${knowledgeResetCount}`}
+                  noValidate
                   className="mt-5 grid gap-4 sm:grid-cols-2"
                   onSubmit={(event) => void saveKnowledge(event)}
                 >
-                  <label className={labelClass}>
-                    Title or question
-                    <input
-                      required
-                      name="title"
-                      defaultValue={editingKnowledge?.title ?? ""}
-                      className={inputClass}
-                    />
-                  </label>
-                  <label className={labelClass}>
-                    Entry type
-                    <select
-                      name="entryType"
-                      defaultValue={editingKnowledge?.entryType ?? "faq"}
-                      className="select mt-1"
+                  <FormField
+                    id="knowledge-title"
+                    label="Title or question"
+                    error={knowledgeFieldErrors.title}
+                  >
+                    {(fieldProps) => (
+                      <input
+                        {...fieldProps}
+                        name="title"
+                        value={knowledgeTitle}
+                        onChange={(event) =>
+                          setKnowledgeTitle(event.target.value)
+                        }
+                        onBlur={(event) =>
+                          blurKnowledgeField("title", {
+                            title: event.target.value,
+                          })
+                        }
+                        className="input"
+                      />
+                    )}
+                  </FormField>
+                  <FormField
+                    id="knowledge-entry-type"
+                    label="Entry type"
+                    error={knowledgeFieldErrors.entryType}
+                  >
+                    {(fieldProps) => (
+                      <select
+                        {...fieldProps}
+                        name="entryType"
+                        value={knowledgeEntryType}
+                        onChange={(event) =>
+                          setKnowledgeEntryType(
+                            event.target.value as "faq" | "policy",
+                          )
+                        }
+                        onBlur={(event) =>
+                          blurKnowledgeField("entryType", {
+                            entryType: event.target.value,
+                          })
+                        }
+                        className="select"
+                      >
+                        <option value="faq">FAQ</option>
+                        <option value="policy">Policy</option>
+                      </select>
+                    )}
+                  </FormField>
+                  <div className="sm:col-span-2">
+                    <FormField
+                      id="knowledge-answer"
+                      label="Approved answer or policy"
+                      error={knowledgeFieldErrors.answer}
                     >
-                      <option value="faq">FAQ</option>
-                      <option value="policy">Policy</option>
-                    </select>
-                  </label>
-                  <label className={`${labelClass} sm:col-span-2`}>
-                    Approved answer or policy
-                    <textarea
-                      required
-                      name="answer"
-                      defaultValue={editingKnowledge?.answer ?? ""}
-                      rows={4}
-                      className={inputClass}
-                    />
-                  </label>
+                      {(fieldProps) => (
+                        <textarea
+                          {...fieldProps}
+                          name="answer"
+                          value={knowledgeAnswer}
+                          onChange={(event) =>
+                            setKnowledgeAnswer(event.target.value)
+                          }
+                          onBlur={(event) =>
+                            blurKnowledgeField("answer", {
+                              answer: event.target.value,
+                            })
+                          }
+                          rows={4}
+                          className="textarea"
+                        />
+                      )}
+                    </FormField>
+                  </div>
                   <label className="flex items-center gap-2 text-sm text-ink sm:col-span-2">
                     <input
                       name="isActive"
                       type="checkbox"
                       className="checkbox"
-                      defaultChecked={editingKnowledge?.isActive ?? true}
+                      checked={knowledgeIsActive}
+                      onChange={(event) =>
+                        setKnowledgeIsActive(event.target.checked)
+                      }
                     />
                     Active and approved for future context
                   </label>
@@ -1164,10 +1524,7 @@ export function BusinessSettings({
                     {editingKnowledge ? (
                       <button
                         type="button"
-                        onClick={() => {
-                          setEditingKnowledge(null);
-                          setKnowledgeResetCount((count) => count + 1);
-                        }}
+                        onClick={resetKnowledgeForm}
                         className={secondaryButtonClass}
                       >
                         Cancel
@@ -1202,7 +1559,7 @@ export function BusinessSettings({
                       <div className="mt-2 flex gap-3 py-1">
                         <button
                           type="button"
-                          onClick={() => setEditingKnowledge(entry)}
+                          onClick={() => startEditKnowledge(entry)}
                           className="btn btn-quiet"
                         >
                           Edit
