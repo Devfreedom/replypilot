@@ -111,7 +111,7 @@ export function createWhatsAppConnectionsRouter({
   ): EmbeddedSignupConfig | null {
     const config = embeddedSignup;
 
-    if (!config) {
+    if (!config || config.configured === false) {
       response.status(503).json({
         error: "WhatsApp onboarding is not configured.",
         code: "not_configured",

@@ -57,16 +57,21 @@ import type {
 import { loadWhatsAppConfig } from "../src/whatsapp/config.js";
 import {
   loadEmbeddedSignupConfig,
+  toPublicEmbeddedSignupConfig,
   type EmbeddedSignupConfig,
 } from "../src/whatsapp/embedded-signup-config.js";
 import type { OnboardingRateLimitConfig } from "../src/whatsapp/onboarding-rate-limit.js";
 import { verifyWhatsAppConnection } from "../src/whatsapp/onboarding.js";
 import { createMetaGraphClient } from "../src/whatsapp/meta-graph.js";
 import { normalizeWhatsAppPhoneE164 } from "../src/whatsapp/phone.js";
-import { persistInboundMessages } from "../src/whatsapp/repository.js";
+import {
+  persistInboundMessages,
+  WhatsAppPhoneNumberOwnedByAnotherWorkspaceError,
+} from "../src/whatsapp/repository.js";
 import {
   registerWhatsAppConnection,
   resolveActiveConnectionByPhoneNumberId,
+  setWhatsAppConnectionVerificationState,
 } from "../src/whatsapp/connections.js";
 import { ConnectionAwareMetaProvider } from "../src/outbound/meta-connection-provider.js";
 import {
@@ -13308,19 +13313,8 @@ async function createLeadConversationWithConnectionStatus(
     workspaceId: owner.workspace.id,
     phoneNumberId: M14C_DISCONNECTED_PHONE_NUMBER_ID,
     accessToken: "",
-    status: status === "pending" ? "pending" : "active",
+    status: "active",
   });
-
-  if (status === "error") {
-    await pool.query(
-      `
-        UPDATE whatsapp_connections
-        SET status = 'error', updated_at = now()
-        WHERE id = $1
-      `,
-      [connectionId],
-    );
-  }
 
   const { lead, conversationId } = await createLeadWithConversation(
     { name: "M14D Lead" },
@@ -13329,6 +13323,15 @@ async function createLeadConversationWithConnectionStatus(
       senderWaId: M14C_DISCONNECTED_SENDER_WA_ID,
       senderPhoneNumber: M14C_DISCONNECTED_SENDER_WA_ID,
     },
+  );
+
+  await pool.query(
+    `
+      UPDATE whatsapp_connections
+      SET status = $2, updated_at = now()
+      WHERE id = $1
+    `,
+    [connectionId, status],
   );
 
   return { lead, conversationId };
@@ -15021,4 +15024,317 @@ test("M11 PATCH on deactivated catalogue or knowledge entries without isActive p
   );
   assert.equal(context.catalogue.length, 0);
   assert.equal(context.knowledge.length, 0);
+});
+
+// ─── Batch 3 Audit Regression Tests (H5, M2, M3, M8, M15) ───────────────────
+
+test("M15 bare legacy digits without + do not false-match inbound senders and stay unresolved", async () => {
+  const owner = requireSession();
+  const bareUsLike = "13055550123";
+  const bareJpLike = "8123456789";
+  await insertLegacyLead(bareUsLike, "M15 Bare Legacy US-like");
+  await insertLegacyLead(bareJpLike, "M15 Bare Legacy JP-like");
+
+  const stored = await persistInboundMessages(pool, owner.workspace.id, [
+    inboundMessage({
+      senderWaId: bareUsLike,
+      senderPhoneNumber: bareUsLike,
+      contactName: "M15 Inbound Customer",
+    }),
+  ]);
+  assert.equal(stored.stored, 1);
+
+  const conversations = await pool.query<{ lead_id: string | null }>(
+    `
+      SELECT conversation.lead_id
+      FROM whatsapp_conversations AS conversation
+      JOIN customers AS customer ON customer.id = conversation.customer_id
+      WHERE conversation.workspace_id = $1
+        AND customer.phone_e164 = $2
+    `,
+    [owner.workspace.id, `+${bareUsLike}`],
+  );
+  assert.equal(conversations.rows.length, 1);
+  assert.equal(
+    conversations.rows[0]?.lead_id,
+    null,
+    "Inbound sender must not auto-link to a lead whose stored number lacks an international + prefix",
+  );
+
+  const createAttempt = await postLead({
+    name: "M15 Explicit International Lead",
+    service: "Wedding photography",
+    lastMessage: "Please share pricing.",
+    whatsappNumber: `+${bareUsLike}`,
+  });
+  assert.equal(createAttempt.status, 409);
+  const payload = await readJson<{ code?: string }>(createAttempt);
+  assert.equal(
+    payload.code,
+    "WHATSAPP_LEAD_NUMBER_UNRESOLVED",
+    "Bare digits without + must be flagged as unresolved rather than confirmed duplicate",
+  );
+});
+
+test("H5 legacy webhook fallback does not ingest messages or claim a disconnected connection", async () => {
+  const owner = requireSession();
+  const other = await registerUser({
+    email: `h5-other-${randomUUID()}@example.test`,
+    name: "H5 Other Owner",
+  });
+
+  await withCredentialEncryption(async () => {
+    const disconnectedId = await registerTestConnection({
+      workspaceId: owner.workspace.id,
+      phoneNumberId: TEST_WHATSAPP_PHONE_NUMBER_ID,
+      status: "disconnected",
+    });
+
+    const app = await startWhatsAppServer({
+      workspaceId: other.workspace.id,
+      phoneNumberId: TEST_WHATSAPP_PHONE_NUMBER_ID,
+    });
+
+    try {
+      const body = whatsappEnvelope([
+        whatsappChange({
+          phoneNumberId: TEST_WHATSAPP_PHONE_NUMBER_ID,
+          messages: [
+            textWhatsAppMessage({
+              id: `wamid.h5-${randomUUID()}`,
+              from: "16505559999",
+              text: "Should not resurrect or hijack disconnected number",
+            }),
+          ],
+        }),
+      ]);
+
+      const response = await postWhatsApp(app, body);
+      assert.equal(response.status, 200);
+      assert.deepEqual(await readJson(response), { status: "ignored" });
+
+      const messageCount = await pool.query<{ count: number }>(
+        "SELECT count(*)::int AS count FROM whatsapp_messages",
+      );
+      assert.equal(messageCount.rows[0]?.count, 0);
+
+      const connectionRows = await pool.query<{
+        id: string;
+        workspace_id: string;
+        status: string;
+      }>(
+        `
+          SELECT id, workspace_id, status
+          FROM whatsapp_connections
+          WHERE phone_number_id = $1
+        `,
+        [TEST_WHATSAPP_PHONE_NUMBER_ID],
+      );
+      assert.equal(connectionRows.rows.length, 1);
+      assert.equal(connectionRows.rows[0]?.id, disconnectedId);
+      assert.equal(connectionRows.rows[0]?.workspace_id, owner.workspace.id);
+      assert.equal(connectionRows.rows[0]?.status, "disconnected");
+    } finally {
+      await stopServer(app.server);
+    }
+
+    await assert.rejects(
+      () =>
+        persistInboundMessages(pool, owner.workspace.id, [
+          inboundMessage({ phoneNumberId: TEST_WHATSAPP_PHONE_NUMBER_ID }),
+        ]),
+      WhatsAppPhoneNumberOwnedByAnotherWorkspaceError,
+    );
+  });
+});
+
+test("M2 another workspace can onboard a phone number after previous owner disconnected it, and concurrent claims map 23505 to 409", async () => {
+  const owner = requireSession();
+  const other = await registerUser({
+    email: `m2-prev-owner-${randomUUID()}@example.test`,
+    name: "M2 Previous Owner",
+  });
+  const third = await registerUser({
+    email: `m2-third-owner-${randomUUID()}@example.test`,
+    name: "M2 Third Owner",
+  });
+  const fourth = await registerUser({
+    email: `m2-fourth-owner-${randomUUID()}@example.test`,
+    name: "M2 Fourth Owner",
+  });
+
+  await withCredentialEncryption(async () => {
+    const app = await startOnboardingServer();
+
+    try {
+      // Workspace `other` connects the number, then disconnects it.
+      const sessionA = await createOnboardingState(app, other);
+      const onboardA = await completeOnboarding(app, other, sessionA.state);
+      assert.equal(onboardA.status, 200);
+      const connectionA = (await readJson<OnboardingCompletePayload>(onboardA))
+        .connection;
+
+      const disconnectA = await requestOn(
+        app,
+        other,
+        `/api/whatsapp/connections/${connectionA.id}/disconnect`,
+        "POST",
+      );
+      assert.equal(disconnectA.status, 200);
+
+      // Workspace `owner` can now onboard the freed number.
+      const sessionB = await createOnboardingState(app, owner);
+      const onboardB = await completeOnboarding(app, owner, sessionB.state);
+      assert.equal(onboardB.status, 200);
+      const payloadB = await readJson<OnboardingCompletePayload>(onboardB);
+      assert.equal(payloadB.connection.status, "active");
+
+      // Concurrent onboarding of the same fresh phone number cleanly resolves to [200, 409].
+      const freshPhoneNumberId = "106540000000901";
+      app.state.phoneNumbers = [
+        {
+          id: freshPhoneNumberId,
+          display_phone_number: "15550783901",
+          verified_name: "Concurrent Studio",
+        },
+      ];
+      const [s3, s4] = await Promise.all([
+        createOnboardingState(app, third),
+        createOnboardingState(app, fourth),
+      ]);
+      const [res3, res4] = await Promise.all([
+        completeOnboarding(app, third, s3.state, {
+          phoneNumberId: freshPhoneNumberId,
+        }),
+        completeOnboarding(app, fourth, s4.state, {
+          phoneNumberId: freshPhoneNumberId,
+        }),
+      ]);
+      const statuses = [res3.status, res4.status].sort();
+      assert.deepEqual(statuses, [200, 409]);
+
+      const loser = res3.status === 409 ? res3 : res4;
+      const loserPayload = await readJson<OnboardingErrorPayload>(loser);
+      assert.equal(loserPayload.code, "phone_number_unavailable");
+    } finally {
+      await stopServer(app.server);
+    }
+  });
+});
+
+test("M3 calling /verify on a disconnected connection returns 409 without reactivating it", async () => {
+  const owner = requireSession();
+
+  await withCredentialEncryption(async () => {
+    const connectionId = await registerTestConnection({
+      workspaceId: owner.workspace.id,
+      phoneNumberId: TEST_META_PHONE_NUMBER_ID,
+      accessToken: "EAABc0DisconnectedVerifyTokenMustStaySecret123",
+    });
+
+    const app = await startOnboardingServer();
+
+    try {
+      const disconnectResponse = await requestOn(
+        app,
+        owner,
+        `/api/whatsapp/connections/${connectionId}/disconnect`,
+        "POST",
+      );
+      assert.equal(disconnectResponse.status, 200);
+
+      const callsBeforeVerify = app.calls.length;
+      const verifyResponse = await requestOn(
+        app,
+        owner,
+        `/api/whatsapp/connections/${connectionId}/verify`,
+        "POST",
+      );
+      assert.equal(verifyResponse.status, 409);
+      const errorPayload = await readJson<OnboardingErrorPayload>(verifyResponse);
+      assert.equal(errorPayload.code, "connection_disconnected");
+      assert.equal(
+        app.calls.length,
+        callsBeforeVerify,
+        "A disconnected connection must not make any Meta API requests during /verify",
+      );
+
+      const dbState = await pool.query<{ status: string }>(
+        "SELECT status FROM whatsapp_connections WHERE id = $1",
+        [connectionId],
+      );
+      assert.equal(dbState.rows[0]?.status, "disconnected");
+
+      const directUpdate = await setWhatsAppConnectionVerificationState(pool, {
+        workspaceId: owner.workspace.id,
+        connectionId,
+        status: "active",
+        lastError: null,
+        webhookSubscribed: true,
+      });
+      assert.equal(directUpdate, null);
+    } finally {
+      await stopServer(app.server);
+    }
+  });
+});
+
+test("M8 loadEmbeddedSignupConfig reports configured: false when credential encryption key is missing or invalid", async () => {
+  const owner = requireSession();
+  const baseMetaEnv = {
+    META_APP_ID: TEST_META_APP_ID,
+    META_APP_SECRET: TEST_META_APP_SECRET,
+    META_EMBEDDED_SIGNUP_CONFIG_ID: TEST_META_CONFIG_ID,
+    META_GRAPH_API_VERSION: TEST_META_GRAPH_VERSION,
+  };
+
+  const withoutEncryptionKey = loadEmbeddedSignupConfig(baseMetaEnv);
+  assert.ok(withoutEncryptionKey);
+  assert.equal(withoutEncryptionKey.configured, false);
+  assert.ok((withoutEncryptionKey.issues?.length ?? 0) > 0);
+  assert.equal(toPublicEmbeddedSignupConfig(withoutEncryptionKey).configured, false);
+
+  const invalidEncryptionKey = loadEmbeddedSignupConfig({
+    ...baseMetaEnv,
+    WHATSAPP_CREDENTIAL_ENCRYPTION_KEY: "too-short",
+  });
+  assert.ok(invalidEncryptionKey);
+  assert.equal(invalidEncryptionKey.configured, false);
+  assert.equal(toPublicEmbeddedSignupConfig(invalidEncryptionKey).configured, false);
+
+  const configured = loadEmbeddedSignupConfig({
+    ...baseMetaEnv,
+    WHATSAPP_CREDENTIAL_ENCRYPTION_KEY: TEST_CREDENTIAL_ENCRYPTION_KEY,
+  });
+  assert.ok(configured);
+  assert.equal(configured.configured, true);
+  assert.deepEqual(configured.issues, []);
+  assert.equal(toPublicEmbeddedSignupConfig(configured).configured, true);
+
+  const app = await startOnboardingServer({ config: withoutEncryptionKey });
+  try {
+    const publicConfigResponse = await requestOn(
+      app,
+      owner,
+      "/api/whatsapp/onboarding/config",
+    );
+    assert.equal(publicConfigResponse.status, 200);
+    const publicConfigPayload = await readJson<{
+      config: { configured: boolean };
+    }>(publicConfigResponse);
+    assert.equal(publicConfigPayload.config.configured, false);
+
+    const sessionResponse = await requestOn(
+      app,
+      owner,
+      "/api/whatsapp/onboarding/sessions",
+      "POST",
+      {},
+    );
+    assert.equal(sessionResponse.status, 503);
+    const sessionError = await readJson<OnboardingErrorPayload>(sessionResponse);
+    assert.equal(sessionError.code, "not_configured");
+  } finally {
+    await stopServer(app.server);
+  }
 });

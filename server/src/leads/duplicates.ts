@@ -22,7 +22,7 @@
  */
 
 import type { PoolClient } from "pg";
-import { nationalFormsOfE164 } from "./phone.js";
+import { describeLeadNumber, nationalFormsOfE164 } from "./phone.js";
 
 /** A lead in the workspace whose number may conflict with a candidate. */
 export type LeadNumberConflict = Readonly<{
@@ -74,11 +74,18 @@ export async function findLeadNumberConflicts(
   );
 
   const conflicts: LeadNumberConflict[] = [];
+  const candidateIdentity = describeLeadNumber(candidateE164);
 
   for (const row of result.rows) {
     const stored = row.stored_number;
+    const storedIdentity = describeLeadNumber(stored);
 
-    if (stored.replace(/^\+/, "") === digits) {
+    if (
+      candidateIdentity.resolved &&
+      storedIdentity.resolved &&
+      candidateIdentity.e164 !== null &&
+      storedIdentity.e164 === candidateIdentity.e164
+    ) {
       conflicts.push({
         kind: "confirmed",
         leadId: row.id,
@@ -87,10 +94,9 @@ export async function findLeadNumberConflicts(
       continue;
     }
 
-    // The row stores a national number without its country. The digits are a
-    // valid national form of the candidate's country, but they may equally
-    // belong to a subscriber in another country, so the subscriber cannot be
-    // established.
+    // Either the row stores a bare number without an explicit international
+    // prefix or its E.164 identity is unverified, so its subscriber country
+    // cannot be confirmed from these digits alone.
     conflicts.push({
       kind: "unresolved",
       leadId: row.id,

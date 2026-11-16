@@ -1,4 +1,5 @@
 import type { Pool, PoolClient } from "pg";
+import { describeLeadNumber } from "../leads/phone.js";
 import type { OutboundMessageStatus } from "../messaging/types.js";
 import { encodeMessageCursor, type MessageCursor } from "./cursor.js";
 import { normalizeWhatsAppPhoneE164 } from "./phone.js";
@@ -220,27 +221,67 @@ export class WhatsAppWorkspaceNotFoundError extends Error {
  * number may resolve to only one workspace.
  */
 export class WhatsAppPhoneNumberOwnedByAnotherWorkspaceError extends Error {
-  constructor() {
-    super("This WhatsApp phone number is connected to another workspace.");
+  constructor(
+    message = "This WhatsApp phone number is connected to another workspace.",
+  ) {
+    super(message);
     this.name = "WhatsAppPhoneNumberOwnedByAnotherWorkspaceError";
   }
 }
 
 /**
- * Resolves the provider phone-number ID to a connection row for this
- * workspace, creating it on first use. The unique key makes concurrent webhook
- * deliveries converge on one connection.
+ * Resolves the provider phone-number ID to an active connection row for this
+ * workspace, creating it on first use only when no connection row already
+ * exists for the phone-number ID.
  *
- * The insert uses an unqualified `ON CONFLICT DO NOTHING` so it also respects
- * the global phone-number ownership index. When the number already belongs to
- * another workspace, no row is created and the event is rejected rather than
- * duplicated across tenants.
+ * If the workspace already has a non-active connection row (for example
+ * disconnected, pending, or error), or if any workspace already holds a row for
+ * this phone-number ID, fail closed rather than silently reactivating or
+ * claiming the number.
  */
 async function ensureWhatsAppConnection(
   client: PoolClient,
   workspaceId: string,
   phoneNumberId: string,
 ): Promise<string> {
+  const existingForWorkspace = await client.query<{
+    id: string;
+    status: string;
+  }>(
+    `
+      SELECT id, status
+      FROM whatsapp_connections
+      WHERE workspace_id = $1
+        AND phone_number_id = $2
+      LIMIT 1
+    `,
+    [workspaceId, phoneNumberId],
+  );
+
+  const workspaceRow = existingForWorkspace.rows[0];
+
+  if (workspaceRow) {
+    if (workspaceRow.status === "active") {
+      return workspaceRow.id;
+    }
+
+    throw new WhatsAppPhoneNumberOwnedByAnotherWorkspaceError();
+  }
+
+  const anyConnection = await client.query<{ id: string }>(
+    `
+      SELECT id
+      FROM whatsapp_connections
+      WHERE phone_number_id = $1
+      LIMIT 1
+    `,
+    [phoneNumberId],
+  );
+
+  if (anyConnection.rows.length > 0) {
+    throw new WhatsAppPhoneNumberOwnedByAnotherWorkspaceError();
+  }
+
   const created = await client.query<{ id: string }>(
     `
       INSERT INTO whatsapp_connections (
@@ -260,19 +301,20 @@ async function ensureWhatsAppConnection(
     return created.rows[0].id;
   }
 
-  const existing = await client.query<{ id: string }>(
+  const existing = await client.query<{ id: string; status: string }>(
     `
-      SELECT id
+      SELECT id, status
       FROM whatsapp_connections
       WHERE workspace_id = $1
         AND phone_number_id = $2
+      LIMIT 1
     `,
     [workspaceId, phoneNumberId],
   );
 
   const row = existing.rows[0];
 
-  if (!row) {
+  if (!row || row.status !== "active") {
     throw new WhatsAppPhoneNumberOwnedByAnotherWorkspaceError();
   }
 
@@ -482,35 +524,46 @@ async function findLeadIdForSender(
   workspaceId: string,
   senderPhoneNumber: string,
 ): Promise<string | null> {
-  // Both sides are compared as E.164. A Meta `from` value is international
-  // digits without a leading "+", so it is normalized to E.164 first; a sender
-  // that is not a valid E.164 number matches nothing.
+  // Both sides must have a verified international E.164 identity. A Meta `from`
+  // value is international digits without a leading "+", so normalize it to E.164
+  // and verify it via describeLeadNumber; a bare legacy lead number without a
+  // "+" prefix never has a resolved E.164 identity and must not match.
   //
-  // A lead number is stored in E.164 with a leading "+", so the "+" is
-  // stripped from the stored value before the comparison. A lead whose number
-  // is still a bare national number therefore never matches, because its
-  // country is unknown.
-  //
-  // The leads unique index makes this an exact, reliable identifier match.
   // Name similarities and business-scoped user IDs are deliberately not used.
   const senderE164 = normalizeWhatsAppPhoneE164(senderPhoneNumber);
+  const senderIdentity = describeLeadNumber(senderE164);
 
-  if (!senderE164) {
+  if (!senderIdentity.resolved || !senderIdentity.e164) {
     return null;
   }
 
-  const result = await client.query<{ id: string }>(
+  const result = await client.query<{
+    id: string;
+    whatsapp_number: string | null;
+  }>(
     `
-      SELECT id
+      SELECT id, whatsapp_number
       FROM leads
       WHERE workspace_id = $1
-        AND ltrim(whatsapp_number, '+') = ltrim($2, '+')
+        AND whatsapp_number = $2
       LIMIT 1
     `,
-    [workspaceId, senderE164],
+    [workspaceId, senderIdentity.e164],
   );
 
-  return result.rows[0]?.id ?? null;
+  const row = result.rows[0];
+
+  if (!row) {
+    return null;
+  }
+
+  const leadIdentity = describeLeadNumber(row.whatsapp_number);
+
+  if (!leadIdentity.resolved || leadIdentity.e164 !== senderIdentity.e164) {
+    return null;
+  }
+
+  return row.id;
 }
 
 async function updateConversationAfterMessage(

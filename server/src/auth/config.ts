@@ -1,7 +1,50 @@
 import { randomUUID } from "node:crypto";
+import { isIP } from "node:net";
 import { betterAuth } from "better-auth";
 import type { Pool } from "pg";
 import { ensureWorkspaceForUser } from "../workspaces/repository.js";
+
+/**
+ * Validates that an entry is a syntactically valid IPv4/IPv6 address or CIDR
+ * block (`ip/prefix` with `0..32` for IPv4 or `0..128` for IPv6).
+ */
+export function isValidProxyIpOrCidr(entry: string): boolean {
+  if (!entry) {
+    return false;
+  }
+
+  const slashIndex = entry.indexOf("/");
+
+  if (slashIndex === -1) {
+    return isIP(entry) === 4 || isIP(entry) === 6;
+  }
+
+  const parts = entry.split("/");
+
+  if (parts.length !== 2) {
+    return false;
+  }
+
+  const [ip, prefixText] = parts;
+
+  if (!ip || !prefixText || !/^(?:0|[1-9][0-9]*)$/.test(prefixText)) {
+    return false;
+  }
+
+  const family = isIP(ip);
+
+  if (family === 0) {
+    return false;
+  }
+
+  const prefix = Number(prefixText);
+
+  if (family === 4) {
+    return prefix >= 0 && prefix <= 32;
+  }
+
+  return prefix >= 0 && prefix <= 128;
+}
 
 export type AuthRateLimitOptions = Readonly<{
   enabled?: boolean;
@@ -34,7 +77,17 @@ export function createAuth({
   rateLimit,
   trustedProxyCidrs,
 }: CreateAuthOptions) {
-  const trustedProxies = [...new Set(trustedProxyCidrs ?? [])];
+  const trustedProxies = [
+    ...new Set((trustedProxyCidrs ?? []).map((entry) => entry.trim())),
+  ].filter(Boolean);
+
+  for (const entry of trustedProxies) {
+    if (!isValidProxyIpOrCidr(entry)) {
+      throw new Error(
+        `Invalid trusted proxy IP or CIDR in auth config: ${entry}`,
+      );
+    }
+  }
 
   return betterAuth({
     appName: "ReplyPilot",

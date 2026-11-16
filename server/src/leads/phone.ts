@@ -255,6 +255,8 @@ export function countryOfE164Number(
 export type LeadNumberIdentity = Readonly<{
   /** The comparable E.164 number, or null when it cannot be resolved. */
   e164: string | null;
+  /** Bare national digits when the stored number has no explicit international prefix. */
+  normalizedNational: string | null;
   /** True when the subscriber identity is fully established. */
   resolved: boolean;
 }>;
@@ -262,23 +264,47 @@ export type LeadNumberIdentity = Readonly<{
 /**
  * Resolves the comparable identity of a stored lead number.
  *
- * The resolution is deliberately strict: a number that does not yield a
- * comparable E.164 value is reported as unresolved so callers can refuse the
- * operation instead of guessing.
+ * The resolution is deliberately strict: only values with an explicit
+ * international prefix ("+" or "00") can resolve to an E.164 identity. Bare
+ * digits without an international prefix keep only `normalizedNational` and
+ * return `resolved: false` so they are never misclassified as another country's
+ * E.164 calling code.
  */
 export function describeLeadNumber(
   storedNumber: string | null | undefined,
 ): LeadNumberIdentity {
-  const e164 = normalizeComparableNumber(storedNumber);
+  if (!storedNumber) {
+    return { e164: null, normalizedNational: null, resolved: false };
+  }
 
-  if (!e164) {
-    return { e164: null, resolved: false };
+  const trimmed = storedNumber.trim();
+
+  if (!trimmed || !PHONE_SHAPE_PATTERN.test(trimmed)) {
+    return { e164: null, normalizedNational: null, resolved: false };
+  }
+
+  const hasPlusPrefix = trimmed.startsWith("+");
+  const hasDoubleZeroPrefix = trimmed.startsWith("00");
+
+  if (!hasPlusPrefix && !hasDoubleZeroPrefix) {
+    const digits = digitsOnly(trimmed);
+    return {
+      e164: null,
+      normalizedNational: DIGITS_PATTERN.test(digits) ? digits : null,
+      resolved: false,
+    };
+  }
+
+  const digits = digitsOnly(trimmed);
+  const internationalDigits = hasPlusPrefix ? digits : digits.slice(2);
+  const e164 = `+${internationalDigits}`;
+
+  if (!E164_PATTERN.test(e164)) {
+    return { e164: null, normalizedNational: null, resolved: false };
   }
 
   // The identity is only established when the number belongs to a real
-  // numbering plan. A syntactically plausible value that resolves to no
-  // country, such as a national number written without its calling code, is
-  // not an established subscriber identity and must never be linked.
+  // numbering plan.
   let parsed: ReturnType<typeof parsePhoneNumberFromString>;
 
   try {
@@ -288,10 +314,10 @@ export function describeLeadNumber(
   }
 
   if (!parsed || !parsed.isValid() || !parsed.country) {
-    return { e164: null, resolved: false };
+    return { e164: null, normalizedNational: null, resolved: false };
   }
 
-  return { e164, resolved: true };
+  return { e164: parsed.number, normalizedNational: null, resolved: true };
 }
 
 /**

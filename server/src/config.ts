@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { isValidProxyIpOrCidr } from "./auth/config.js";
 import { loadMetaOutboundConfig } from "./outbound/meta-config.js";
 import { loadWhatsAppConfig } from "./whatsapp/config.js";
 import {
@@ -10,6 +11,13 @@ import {
   type OnboardingRateLimitConfig,
 } from "./whatsapp/onboarding-rate-limit.js";
 import type { WhatsAppIntegrationConfig } from "./whatsapp/types.js";
+
+export class ConfigError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ConfigError";
+  }
+}
 
 function isPostgresConnectionString(value: string): boolean {
   try {
@@ -23,16 +31,39 @@ function isPostgresConnectionString(value: string): boolean {
   }
 }
 
-function isHttpUrl(value: string): boolean {
-  try {
-    const url = new URL(value);
-    return (
-      (url.protocol === "http:" || url.protocol === "https:") &&
-      url.hostname.length > 0
-    );
-  } catch {
-    return false;
+function normalizeHttpOrigin(value: string): string | null {
+  const trimmed = value.trim();
+
+  if (!trimmed || /[?#]/.test(trimmed)) {
+    return null;
   }
+
+  let url: URL;
+
+  try {
+    url = new URL(trimmed);
+  } catch {
+    return null;
+  }
+
+  if (
+    (url.protocol !== "http:" && url.protocol !== "https:") ||
+    url.hostname.length === 0
+  ) {
+    return null;
+  }
+
+  if (
+    url.username ||
+    url.password ||
+    url.pathname !== "/" ||
+    url.search !== "" ||
+    url.hash !== ""
+  ) {
+    return null;
+  }
+
+  return url.origin;
 }
 
 const environmentSchema = z
@@ -50,8 +81,10 @@ const environmentSchema = z
       .min(32, "must contain at least 32 characters"),
     BETTER_AUTH_URL: z
       .string()
-      .refine(isHttpUrl, {
-        message: "must be a valid http:// or https:// URL",
+      .trim()
+      .refine((value) => normalizeHttpOrigin(value) !== null, {
+        message:
+          "must be a valid http:// or https:// origin without a path, query, or fragment",
       })
       .optional(),
     BETTER_AUTH_TRUSTED_ORIGINS: z.string().optional(),
@@ -98,36 +131,69 @@ export type ServerConfig = Readonly<{
 function parseTrustedOrigins(
   value: string | undefined,
   fallback: string,
+  nodeEnv: "development" | "test" | "production",
 ): string[] {
   const configured = (value ?? "")
     .split(",")
     .map((origin) => origin.trim())
     .filter(Boolean);
 
+  const normalizedOrigins: string[] = [];
+
   for (const origin of configured) {
-    if (!isHttpUrl(origin)) {
-      throw new Error(
-        `BETTER_AUTH_TRUSTED_ORIGINS contains an invalid origin: ${origin}`,
+    const normalized = normalizeHttpOrigin(origin);
+
+    if (!normalized) {
+      throw new ConfigError(
+        `Invalid server environment: BETTER_AUTH_TRUSTED_ORIGINS contains an invalid origin: ${origin}`,
       );
     }
+
+    if (
+      nodeEnv === "production" &&
+      new URL(normalized).protocol !== "https:"
+    ) {
+      throw new ConfigError(
+        `Invalid server environment: BETTER_AUTH_TRUSTED_ORIGINS must use https in production: ${origin}`,
+      );
+    }
+
+    normalizedOrigins.push(normalized);
   }
 
-  return [...new Set([fallback, ...configured])];
+  const normalizedFallback = normalizeHttpOrigin(fallback);
+
+  if (!normalizedFallback) {
+    throw new ConfigError(
+      `Invalid server environment: BETTER_AUTH_URL is not a valid origin.`,
+    );
+  }
+
+  return [...new Set([normalizedFallback, ...normalizedOrigins])];
 }
 
 /**
- * Parses the reverse proxies that are allowed to set the client IP header.
+ * Parses and strictly validates the reverse proxies that are allowed to set the
+ * client IP header.
  *
  * Better Auth resolves the client IP from the forwarded header itself. A proxy
  * that appends to the header produces a chain, and the chain can only be
- * resolved when the trusted proxies are known. Without this list every client
- * shares a single rate-limit bucket per path.
+ * resolved when the trusted proxies are known. Failing closed on malformed
+ * entries avoids Better Auth silently discarding invalid proxy entries.
  */
 function parseTrustedProxyCidrs(value: string | undefined): string[] {
   const configured = (value ?? "")
     .split(",")
     .map((entry) => entry.trim())
     .filter(Boolean);
+
+  for (const entry of configured) {
+    if (!isValidProxyIpOrCidr(entry)) {
+      throw new ConfigError(
+        `Invalid server environment: BETTER_AUTH_TRUSTED_PROXY_CIDRS contains an invalid IP or CIDR: ${entry}`,
+      );
+    }
+  }
 
   return [...new Set(configured)];
 }
@@ -149,17 +215,26 @@ export function loadConfig(
       )
       .join("; ");
 
-    throw new Error(`Invalid server environment: ${details}`);
+    throw new ConfigError(`Invalid server environment: ${details}`);
   }
 
-  const betterAuthUrl =
+  const rawBetterAuthUrl =
     result.data.BETTER_AUTH_URL ??
     (result.data.NODE_ENV === "production"
       ? ""
       : "http://localhost:3000");
+  const betterAuthUrl = normalizeHttpOrigin(rawBetterAuthUrl);
+
+  if (!betterAuthUrl) {
+    throw new ConfigError(
+      "Invalid server environment: BETTER_AUTH_URL must be a valid origin.",
+    );
+  }
+
   const trustedOrigins = parseTrustedOrigins(
     result.data.BETTER_AUTH_TRUSTED_ORIGINS,
     betterAuthUrl,
+    result.data.NODE_ENV,
   );
 
   if (result.data.NODE_ENV !== "production") {

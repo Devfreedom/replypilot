@@ -152,3 +152,26 @@ test("the national forms of a number come from its own numbering plan", () => {
   // A number that belongs to no country has no national forms.
   assert.deepEqual(nationalFormsOfE164("+8031234567"), []);
 });
+
+test("M15 bare legacy digits without + or 00 remain unresolved rather than matching foreign E.164 calling codes", () => {
+  for (const bare of ["13055550123", "8123456789", "08031234567", "2348031234567"]) {
+    const identity = describeLeadNumber(bare);
+    assert.equal(identity.resolved, false, `Expected ${bare} to stay unresolved`);
+    assert.equal(identity.e164, null, `Expected ${bare} e164 to be null`);
+    assert.equal(identity.normalizedNational, bare);
+  }
+
+  const plusUs = describeLeadNumber("+13055550123");
+  assert.deepEqual(plusUs, {
+    e164: "+13055550123",
+    normalizedNational: null,
+    resolved: true,
+  });
+
+  const doubleZeroNg = describeLeadNumber("00 234 803 123 4567");
+  assert.deepEqual(doubleZeroNg, {
+    e164: "+2348031234567",
+    normalizedNational: null,
+    resolved: true,
+  });
+});

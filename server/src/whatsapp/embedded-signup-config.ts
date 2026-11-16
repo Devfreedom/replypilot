@@ -15,6 +15,10 @@
 import { z } from "zod";
 import { loadGraphApiVersion } from "../outbound/meta-config.js";
 import {
+  CREDENTIAL_ENCRYPTION_KEY_ENV,
+  isCredentialEncryptionConfigured,
+} from "./credentials.js";
+import {
   normalizeOrigin,
   resolveOnboardingOriginPolicy,
   type OnboardingOriginPolicy,
@@ -45,6 +49,10 @@ export type EmbeddedSignupConfig = Readonly<{
   allowedOrigin: string | null;
   /** Server-side origin policy enforced on state-changing onboarding routes. */
   originPolicy: OnboardingOriginPolicy;
+  /** True only when Meta Embedded Signup and token encryption are both configured. */
+  configured?: boolean;
+  /** Reasons onboarding is not ready when configured is false. */
+  issues?: readonly string[];
 }>;
 
 export type EmbeddedSignupPublicConfig = Readonly<{
@@ -167,6 +175,13 @@ export function loadEmbeddedSignupConfig(
     );
   }
 
+  const encryptionConfigured = isCredentialEncryptionConfigured(environment);
+  const readinessIssues = encryptionConfigured
+    ? []
+    : [
+        `${CREDENTIAL_ENCRYPTION_KEY_ENV} must be configured with a valid base64-encoded 32-byte key.`,
+      ];
+
   return {
     appId: appId.success ? appId.data : "",
     appSecret: appSecret.success ? appSecret.data : "",
@@ -174,6 +189,8 @@ export function loadEmbeddedSignupConfig(
     graphApiVersion: loadGraphApiVersion(environment),
     allowedOrigin: allowedOriginRaw,
     originPolicy: resolveOnboardingOriginPolicy(environment),
+    configured: encryptionConfigured,
+    issues: readinessIssues,
   };
 }
 
@@ -184,7 +201,7 @@ export function loadEmbeddedSignupConfig(
 export function toPublicEmbeddedSignupConfig(
   config: EmbeddedSignupConfig | null,
 ): EmbeddedSignupPublicConfig {
-  if (!config) {
+  if (!config || config.configured === false) {
     return {
       configured: false,
       originConfigured: false,

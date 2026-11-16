@@ -20,12 +20,14 @@ import type { Pool, PoolClient } from "pg";
 import type { EmbeddedSignupConfig } from "./embedded-signup-config.js";
 import {
   getWhatsAppConnection,
+  isPhoneNumberOwnershipConflictError,
   loadWhatsAppConnectionForVerification,
   setWhatsAppConnectionVerificationState,
   upsertVerifiedWhatsAppConnection,
   WhatsAppConnectionConflictError,
   type WhatsAppConnectionSummary,
 } from "./connections.js";
+import { WhatsAppPhoneNumberOwnedByAnotherWorkspaceError } from "./repository.js";
 import { decryptWhatsAppToken } from "./credentials.js";
 import {
   createMetaGraphClient,
@@ -61,7 +63,8 @@ export type OnboardingErrorCode =
   | "meta_unavailable"
   | "verification_failed"
   | "credentials_unavailable"
-  | "connection_not_found";
+  | "connection_not_found"
+  | "connection_disconnected";
 
 const ERROR_STATUS: Record<OnboardingErrorCode, number> = {
   not_configured: 503,
@@ -79,6 +82,7 @@ const ERROR_STATUS: Record<OnboardingErrorCode, number> = {
   verification_failed: 422,
   credentials_unavailable: 409,
   connection_not_found: 404,
+  connection_disconnected: 409,
 };
 
 export class OnboardingError extends Error {
@@ -572,6 +576,8 @@ export async function completeWhatsAppOnboarding(
         SELECT workspace_id
         FROM whatsapp_connections
         WHERE phone_number_id = $1
+          AND status <> 'disconnected'
+        ORDER BY created_at ASC, id ASC
         LIMIT 1
       `,
       [input.phoneNumberId],
@@ -646,7 +652,9 @@ export async function completeWhatsAppOnboarding(
     }
 
     const onboardingError =
-      error instanceof WhatsAppConnectionConflictError
+      error instanceof WhatsAppConnectionConflictError ||
+      error instanceof WhatsAppPhoneNumberOwnedByAnotherWorkspaceError ||
+      isPhoneNumberOwnershipConflictError(error)
         ? new OnboardingError(
             "phone_number_unavailable",
             "This WhatsApp phone number is unavailable for connection.",
@@ -721,7 +729,29 @@ export async function verifyWhatsAppConnection(
     );
   }
 
-  const existingSummary: WhatsAppConnectionSummary = current;
+  if (stored.status === "disconnected" || current.status === "disconnected") {
+    throw new OnboardingError(
+      "connection_disconnected",
+      "This WhatsApp connection has been disconnected and cannot be verified. Connect the number again.",
+    );
+  }
+
+  async function failMissingOrDisconnected(): Promise<never> {
+    const latest = await getWhatsAppConnection(
+      input.pool,
+      input.workspaceId,
+      input.connectionId,
+    );
+
+    if (latest?.status === "disconnected") {
+      throw new OnboardingError(
+        "connection_disconnected",
+        "This WhatsApp connection has been disconnected and cannot be verified. Connect the number again.",
+      );
+    }
+
+    throw new OnboardingError("connection_not_found", "Connection not found.");
+  }
 
   async function recordFailure(
     message: string,
@@ -736,8 +766,12 @@ export async function verifyWhatsAppConnection(
       verifiedAt: now,
     });
 
+    if (!updated) {
+      return failMissingOrDisconnected();
+    }
+
     return {
-      connection: updated ?? existingSummary,
+      connection: updated,
       verification: status,
       error: message,
     };
@@ -807,10 +841,7 @@ export async function verifyWhatsAppConnection(
   });
 
   if (!updated) {
-    throw new OnboardingError(
-      "connection_not_found",
-      "Connection not found.",
-    );
+    return failMissingOrDisconnected();
   }
 
   return {
