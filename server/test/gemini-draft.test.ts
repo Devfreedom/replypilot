@@ -5,6 +5,7 @@ import path from "node:path";
 import { after, before, beforeEach, test } from "node:test";
 import type { Pool } from "pg";
 import {
+  DEFAULT_GEMINI_MODEL,
   DEFAULT_GEMINI_TIMEOUT_MS,
   GeminiReplyDraftProvider,
   MockReplyDraftProvider,
@@ -911,7 +912,7 @@ test("GeminiReplyDraftProvider falls back cleanly from retired 404 models to def
   assert.equal(draft.provider, "gemini");
   assert.equal(calledUrls.length, 2);
   assert.ok(calledUrls[0]?.includes("/models/gemini-2.5-flash:generateContent"));
-  assert.ok(calledUrls[1]?.includes("/models/gemini-3.5-flash:generateContent"));
+  assert.ok(calledUrls[1]?.includes("/models/gemini-3.8-flash:generateContent"));
 
   const generic404Provider = new GeminiReplyDraftProvider({
     apiKey: SAMPLE_API_KEY,
@@ -943,8 +944,29 @@ test("resolveReplyDraftProviderKind distinguishes Gemini and mock providers", ()
   assert.equal(resolveReplyDraftProviderKind(undefined), "mock");
 });
 
-test("GEMINI_TIMEOUT_MS configures GeminiReplyDraftProvider timeout and defaults to 45_000 ms", () => {
+test("GEMINI_TIMEOUT_MS configures GeminiReplyDraftProvider timeout and defaults to 45_000 ms", async () => {
+  assert.equal(DEFAULT_GEMINI_MODEL, "gemini-3.8-flash");
   assert.equal(DEFAULT_GEMINI_TIMEOUT_MS, 45_000);
+
+  let defaultUrl = "";
+  const defaultModelProvider = new GeminiReplyDraftProvider({
+    apiKey: SAMPLE_API_KEY,
+    fetchImplementation: async (input) => {
+      defaultUrl = typeof input === "string" ? input : input.toString();
+      return geminiSuccessResponse({
+        intent: "pricing",
+        summary: "Customer asked for pricing.",
+        missingInformation: ["Event date"],
+        draftReply: "Hi Adaeze, please share your event date.",
+        citedFactIds: [],
+      });
+    },
+  });
+  await defaultModelProvider.draftReply(makeLead(), makeContext());
+  assert.equal(
+    defaultUrl,
+    "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent",
+  );
 
   const baseEnv = {
     NODE_ENV: "development",
@@ -982,7 +1004,7 @@ test("GeminiReplyDraftProvider classifies 429 rate limits, AbortSignal timeouts,
       error.code === "rate_limit" &&
       error.statusCode === 429 &&
       error.userMessage ===
-        "AI provider rate limit reached. Wait a moment and try again.",
+        "AI provider quota or rate limit reached. Wait a moment or check your API plan and try again.",
   );
 
   const timedOut = new GeminiReplyDraftProvider({

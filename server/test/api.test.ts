@@ -15448,7 +15448,7 @@ test("draft routes map upstream 429 rate limits and 504 timeouts to accurate HTT
         expectedStatus: 429,
         expectedCode: "rate_limit",
         expectedError:
-          "AI provider rate limit reached. Wait a moment and try again.",
+          "AI provider quota or rate limit reached. Wait a moment or check your API plan and try again.",
       },
       {
         mode: "timeout" as const,

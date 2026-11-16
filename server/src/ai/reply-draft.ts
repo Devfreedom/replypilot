@@ -55,7 +55,7 @@ export interface ReplyDraftProvider {
 }
 
 const MAX_REPLY_LENGTH = 1_900;
-const DEFAULT_GEMINI_MODEL = "gemini-3.5-flash";
+export const DEFAULT_GEMINI_MODEL = "gemini-3.8-flash";
 export const DEFAULT_GEMINI_TIMEOUT_MS = 45_000;
 
 function safeTrim(value: string | null | undefined): string {
@@ -91,7 +91,8 @@ const DEFAULT_USER_MESSAGE_BY_CODE: Record<
   ReplyDraftProviderErrorCode,
   string
 > = {
-  rate_limit: "AI provider rate limit reached. Wait a moment and try again.",
+  rate_limit:
+    "AI provider quota or rate limit reached. Wait a moment or check your API plan and try again.",
   timeout: "AI provider timed out. Please try again.",
   upstream_error:
     "AI provider could not generate a draft right now. Please try again.",
@@ -606,8 +607,6 @@ export class GeminiReplyDraftProvider implements ReplyDraftProvider {
           {
             code: "rate_limit",
             statusCode: 429,
-            userMessage:
-              "AI provider rate limit reached. Wait a moment and try again.",
           },
         );
       }
@@ -618,7 +617,6 @@ export class GeminiReplyDraftProvider implements ReplyDraftProvider {
           {
             code: "timeout",
             statusCode: 504,
-            userMessage: "AI provider timed out. Please try again.",
           },
         );
       }
