@@ -25,15 +25,21 @@ export const REPLY_DRAFT_INTENTS = [
 
 export const REPLY_DRAFT_PROVIDERS = ["mock", "gemini"] as const;
 
-export const replyDraftSchema = z.object({
-  intent: z.enum(REPLY_DRAFT_INTENTS),
-  summary: z.string().min(1).max(500),
-  missingInformation: z.array(z.string().min(1).max(200)).max(10),
-  draftReply: z.string().min(1).max(2_000),
-  provider: z.enum(REPLY_DRAFT_PROVIDERS),
-  isDemo: z.boolean(),
-  sources: replyDraftSourcesSchema.default([]),
-});
+export const replyDraftSchema = z
+  .object({
+    intent: z.enum(REPLY_DRAFT_INTENTS),
+    summary: z.string().min(1).max(500),
+    missingInformation: z.array(z.string().min(1).max(200)).max(10),
+    draftReply: z.string().min(1).max(2_000),
+    provider: z.enum(REPLY_DRAFT_PROVIDERS),
+    isDemo: z.boolean(),
+    sources: replyDraftSourcesSchema.default([]),
+  })
+  .refine(
+    (draft) =>
+      draft.provider === "mock" ? draft.isDemo === true : draft.isDemo === false,
+    { message: "Provider and demo flag do not match." },
+  );
 
 export type ReplyDraft = z.infer<typeof replyDraftSchema>;
 
@@ -350,7 +356,7 @@ function mergeMandatoryMissingInfo(
     mandatory.push(`An approved ${topic} policy`);
   }
 
-  const combined = [...modelMissing, ...mandatory];
+  const combined = [...mandatory, ...modelMissing];
   return combined.length > 0
     ? [...new Set(combined)].slice(0, 10)
     : baseMissingInformationFor(intent);
@@ -418,10 +424,11 @@ export class GeminiReplyDraftProvider implements ReplyDraftProvider {
         signal: AbortSignal.timeout(this.#timeoutMs),
       });
     } catch (error) {
+      const rawMessage =
+        error instanceof Error ? error.message : "unknown network error";
+      const safeMessage = rawMessage.split(this.#apiKey).join("[REDACTED]");
       throw new ReplyDraftProviderError(
-        `Gemini API request failed: ${
-          error instanceof Error ? error.message : "unknown network error"
-        }`,
+        `Gemini API request failed: ${safeMessage}`,
       );
     }
 

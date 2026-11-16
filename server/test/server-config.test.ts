@@ -33,3 +33,49 @@ test("an empty trusted proxy list leaves the client IP resolution unchanged", ()
 
   assert.deepEqual(config.trustedProxyCidrs, []);
 });
+
+test("gemini config is null when GEMINI_API_KEY is unset", () => {
+  const config = loadConfig(BASE_ENVIRONMENT);
+
+  assert.equal(config.gemini, null);
+});
+
+test("gemini config captures trimmed GEMINI_API_KEY and optional GEMINI_MODEL", () => {
+  const withoutModel = loadConfig({
+    ...BASE_ENVIRONMENT,
+    GEMINI_API_KEY: "  test-gemini-key-value  ",
+  });
+  assert.deepEqual(withoutModel.gemini, {
+    apiKey: "test-gemini-key-value",
+  });
+
+  const withModel = loadConfig({
+    ...BASE_ENVIRONMENT,
+    GEMINI_API_KEY: "test-gemini-key-value",
+    GEMINI_MODEL: "  gemini-2.5-pro  ",
+  });
+  assert.deepEqual(withModel.gemini, {
+    apiKey: "test-gemini-key-value",
+    model: "gemini-2.5-pro",
+  });
+});
+
+test("loadConfig rejects whitespace-only GEMINI_API_KEY values", () => {
+  assert.throws(
+    () =>
+      loadConfig({
+        ...BASE_ENVIRONMENT,
+        GEMINI_API_KEY: "   ",
+      }),
+    /Invalid server environment:.*GEMINI_API_KEY/,
+  );
+
+  assert.throws(
+    () =>
+      loadConfig({
+        ...BASE_ENVIRONMENT,
+        GEMINI_API_KEY: "",
+      }),
+    /Invalid server environment:.*GEMINI_API_KEY/,
+  );
+});

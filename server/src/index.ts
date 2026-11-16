@@ -30,6 +30,7 @@ async function start(): Promise<void> {
       trustedOrigins: config.trustedOrigins,
       trustedProxyCidrs: config.trustedProxyCidrs,
     },
+    replyDraftProvider,
     whatsapp: config.whatsapp,
     embeddedSignup: config.embeddedSignup,
     onboardingRateLimit: config.onboardingRateLimit,

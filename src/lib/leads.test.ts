@@ -4,6 +4,8 @@ import {
   dashboardViewHref,
   parseDashboardView,
   parseLeadCreationError,
+  parseReplyDraftResponse,
+  parseSavedReplyDraftResponse,
   LeadApiError,
   WHATSAPP_LEAD_DUPLICATE_NUMBER_CODE,
   WHATSAPP_LEAD_NUMBER_UNRESOLVED_CODE,
@@ -71,4 +73,65 @@ test("a lead API error carries its stable code to the caller", () => {
   const plain = new LeadApiError("Something went wrong");
   assert.equal(plain.code, undefined);
   assert.equal(plain.conflictingLeadId, undefined);
+});
+
+test("reply draft parsers accept valid mock and gemini metadata and reject mismatched demo flags", () => {
+  const baseDraft = {
+    intent: "pricing",
+    summary: "Customer asked about wedding photography pricing.",
+    missingInformation: ["Event date"],
+    draftReply: "Thanks for reaching out! Could you share your event date?",
+  };
+
+  assert.equal(
+    parseReplyDraftResponse({ ...baseDraft, provider: "gemini", isDemo: false })
+      ?.provider,
+    "gemini",
+  );
+  assert.equal(
+    parseReplyDraftResponse({ ...baseDraft, provider: "mock", isDemo: true })
+      ?.isDemo,
+    true,
+  );
+  assert.equal(
+    parseReplyDraftResponse({ ...baseDraft, provider: "gemini", isDemo: true }),
+    null,
+  );
+  assert.equal(
+    parseReplyDraftResponse({ ...baseDraft, provider: "mock", isDemo: false }),
+    null,
+  );
+
+  const savedBase = {
+    ...baseDraft,
+    id: "11111111-1111-4111-8111-111111111111",
+    leadId: "22222222-2222-4222-8222-222222222222",
+    status: "draft",
+    sources: [],
+    approvedAt: null,
+    approvedBy: null,
+    sendPolicyOverride: null,
+    approvalSendPolicy: null,
+    createdAt: "2026-11-16T04:00:00.000Z",
+    updatedAt: "2026-11-16T04:00:00.000Z",
+  };
+
+  const parsedSavedGemini = parseSavedReplyDraftResponse({
+    draft: { ...savedBase, provider: "gemini", isDemo: false },
+  });
+  assert.equal(parsedSavedGemini?.provider, "gemini");
+  assert.equal(parsedSavedGemini?.isDemo, false);
+
+  assert.equal(
+    parseSavedReplyDraftResponse({
+      draft: { ...savedBase, provider: "gemini", isDemo: true },
+    }),
+    null,
+  );
+  assert.equal(
+    parseSavedReplyDraftResponse({
+      draft: { ...savedBase, provider: "mock", isDemo: false },
+    }),
+    null,
+  );
 });

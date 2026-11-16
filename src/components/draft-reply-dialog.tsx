@@ -1565,7 +1565,11 @@ export function DraftReplyDialog({
               </div>
               <div>
                 <dt className="text-xs font-medium text-ink-soft">Provider</dt>
-                <dd className="font-medium text-ink">Mock demonstration</dd>
+                <dd className="font-medium text-ink">
+                  {selectedDraft.provider === "gemini" && !selectedDraft.isDemo
+                    ? "Gemini AI"
+                    : "Mock demonstration"}
+                </dd>
               </div>
             </dl>
             <div className="mt-3">

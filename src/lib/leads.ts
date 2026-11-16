@@ -120,7 +120,7 @@ const replyDraftSourceSchema = z.object({
   currencyCode: z.string().nullable(),
 });
 
-const replyDraftSchema = z.object({
+const replyDraftBaseSchema = z.object({
   intent: z.enum(REPLY_DRAFT_INTENTS),
   summary: z.string(),
   missingInformation: z.array(z.string()),
@@ -129,20 +129,37 @@ const replyDraftSchema = z.object({
   isDemo: z.boolean(),
 });
 
+function hasValidProviderDemoFlag(draft: {
+  provider: "mock" | "gemini";
+  isDemo: boolean;
+}): boolean {
+  return draft.provider === "mock"
+    ? draft.isDemo === true
+    : draft.isDemo === false;
+}
+
+const replyDraftSchema = replyDraftBaseSchema.refine(hasValidProviderDemoFlag, {
+  message: "Provider and demo flag do not match.",
+});
+
 const approvalSendPolicySchema = z.enum(APPROVAL_SEND_POLICIES);
 
-const savedReplyDraftSchema = replyDraftSchema.extend({
-  id: z.uuid(),
-  leadId: z.uuid(),
-  status: z.enum(REPLY_DRAFT_REVIEW_STATUSES),
-  sources: z.array(replyDraftSourceSchema),
-  approvedAt: z.iso.datetime({ offset: true }).nullable(),
-  approvedBy: z.uuid().nullable(),
-  sendPolicyOverride: approvalSendPolicySchema.nullable(),
-  approvalSendPolicy: approvalSendPolicySchema.nullable(),
-  createdAt: z.iso.datetime({ offset: true }),
-  updatedAt: z.iso.datetime({ offset: true }),
-});
+const savedReplyDraftSchema = replyDraftBaseSchema
+  .extend({
+    id: z.uuid(),
+    leadId: z.uuid(),
+    status: z.enum(REPLY_DRAFT_REVIEW_STATUSES),
+    sources: z.array(replyDraftSourceSchema),
+    approvedAt: z.iso.datetime({ offset: true }).nullable(),
+    approvedBy: z.uuid().nullable(),
+    sendPolicyOverride: approvalSendPolicySchema.nullable(),
+    approvalSendPolicy: approvalSendPolicySchema.nullable(),
+    createdAt: z.iso.datetime({ offset: true }),
+    updatedAt: z.iso.datetime({ offset: true }),
+  })
+  .refine(hasValidProviderDemoFlag, {
+    message: "Provider and demo flag do not match.",
+  });
 
 const replyDraftResponseSchema = z.object({ draft: savedReplyDraftSchema });
 const replyDraftsResponseSchema = z.object({
