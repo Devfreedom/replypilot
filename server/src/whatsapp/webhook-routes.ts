@@ -21,7 +21,7 @@ import type {
 
 // The webhook body is untrusted until its signature is checked, so the buffer
 // is kept small. Meta's message and status batches fit comfortably inside it.
-const WEBHOOK_BODY_LIMIT = "256kb";
+const WEBHOOK_BODY_LIMIT = "1mb";
 const CHALLENGE_MAX_LENGTH = 2_048;
 
 function queryString(value: unknown): string | null {
