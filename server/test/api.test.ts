@@ -4850,7 +4850,7 @@ test("the WhatsApp webhook rejects an oversized body before it is parsed", async
     // The body is untrusted until its signature is checked, so the buffer is
     // bounded. A body above the limit is rejected before it is read.
     const oversized = JSON.stringify({
-      entry: [{ changes: [{ value: { messages: [{ text: "x".repeat(400_000) }] } }] }],
+      entry: [{ changes: [{ value: { messages: [{ text: "x".repeat(3_200_000) }] } }] }],
     });
 
     const response = await postWhatsApp(app, oversized);

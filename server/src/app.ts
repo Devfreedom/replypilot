@@ -79,10 +79,7 @@ export function createApp({
     // HSTS is only sent over HTTPS. Sending it on a plain HTTP response
     // would pin a browser to HTTPS for a host that does not serve it.
     if (request.secure) {
-      response.setHeader(
-        "Strict-Transport-Security",
-        "max-age=31536000; includeSubDomains",
-      );
+      response.setHeader("Strict-Transport-Security", "max-age=31536000");
     }
 
     next();
