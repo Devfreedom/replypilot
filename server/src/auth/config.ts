@@ -15,6 +15,15 @@ export type CreateAuthOptions = Readonly<{
   baseURL?: string;
   trustedOrigins: string[];
   rateLimit?: AuthRateLimitOptions;
+  /**
+   * CIDR ranges of proxies that are allowed to set the client IP header.
+   *
+   * Better Auth resolves the client IP itself, and it can only do so when the
+   * forwarded header carries exactly one address, or when the proxies that may
+   * append to it are known. Without this list every client shares one
+   * rate-limit bucket per path behind a proxy.
+   */
+  trustedProxyCidrs?: string[];
 }>;
 
 export function createAuth({
@@ -23,7 +32,10 @@ export function createAuth({
   baseURL,
   trustedOrigins,
   rateLimit,
+  trustedProxyCidrs,
 }: CreateAuthOptions) {
+  const trustedProxies = [...new Set(trustedProxyCidrs ?? [])];
+
   return betterAuth({
     appName: "ReplyPilot",
     secret,
@@ -40,8 +52,19 @@ export function createAuth({
       enabled: rateLimit?.enabled ?? true,
       window: rateLimit?.window ?? 60,
       max: rateLimit?.max ?? 100,
+      customRules: {
+        "/sign-in/email": { window: 60, max: 10 },
+        "/sign-up/email": { window: 60, max: 5 },
+      },
     },
     advanced: {
+      // The Secure attribute is left to Better Auth, which derives it from the
+      // base URL protocol and falls back to NODE_ENV when there is no base URL.
+      // Overriding it with a NODE_ENV check would strip Secure from HTTPS
+      // deployments that do not set NODE_ENV=production.
+      ...(trustedProxies.length > 0
+        ? { ipAddress: { trustedProxies } }
+        : {}),
       database: {
         generateId: () => randomUUID(),
       },

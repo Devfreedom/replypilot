@@ -482,17 +482,32 @@ async function findLeadIdForSender(
   workspaceId: string,
   senderPhoneNumber: string,
 ): Promise<string | null> {
+  // Both sides are compared as E.164. A Meta `from` value is international
+  // digits without a leading "+", so it is normalized to E.164 first; a sender
+  // that is not a valid E.164 number matches nothing.
+  //
+  // A lead number is stored in E.164 with a leading "+", so the "+" is
+  // stripped from the stored value before the comparison. A lead whose number
+  // is still a bare national number therefore never matches, because its
+  // country is unknown.
+  //
   // The leads unique index makes this an exact, reliable identifier match.
   // Name similarities and business-scoped user IDs are deliberately not used.
+  const senderE164 = normalizeWhatsAppPhoneE164(senderPhoneNumber);
+
+  if (!senderE164) {
+    return null;
+  }
+
   const result = await client.query<{ id: string }>(
     `
       SELECT id
       FROM leads
       WHERE workspace_id = $1
-        AND whatsapp_number = $2
+        AND ltrim(whatsapp_number, '+') = ltrim($2, '+')
       LIMIT 1
     `,
-    [workspaceId, senderPhoneNumber],
+    [workspaceId, senderE164],
   );
 
   return result.rows[0]?.id ?? null;

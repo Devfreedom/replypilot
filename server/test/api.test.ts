@@ -58,6 +58,8 @@ import {
   type EmbeddedSignupConfig,
 } from "../src/whatsapp/embedded-signup-config.js";
 import type { OnboardingRateLimitConfig } from "../src/whatsapp/onboarding-rate-limit.js";
+import { verifyWhatsAppConnection } from "../src/whatsapp/onboarding.js";
+import { createMetaGraphClient } from "../src/whatsapp/meta-graph.js";
 import { normalizeWhatsAppPhoneE164 } from "../src/whatsapp/phone.js";
 import { persistInboundMessages } from "../src/whatsapp/repository.js";
 import {
@@ -102,6 +104,17 @@ type Lead = {
 type LeadPayload = { lead: Lead };
 type LeadsPayload = { leads: Lead[] };
 type ErrorPayload = { error: string; details?: unknown[] };
+
+/** Joins the validation messages of an error payload into one string. */
+function validationMessages(payload: ErrorPayload): string {
+  return (payload.details ?? [])
+    .map((detail) =>
+      typeof detail === "object" && detail !== null && "message" in detail
+        ? String(detail.message)
+        : "",
+    )
+    .join(" ");
+}
 
 type ReplyDraftSourcePayload = {
   id: string;
@@ -838,7 +851,7 @@ async function createLeadWithConversation(
   const senderWaId =
     messageOverrides.senderWaId ?? senderPhoneNumber ?? undefined;
   const lead = await createDraftLead({
-    whatsappNumber: senderPhoneNumber,
+    whatsappNumber: senderPhoneNumber ? `+${senderPhoneNumber}` : senderPhoneNumber,
     ...overrides,
   });
   const stored = await persistInboundMessages(
@@ -1339,17 +1352,18 @@ test("POST /api/leads normalizes and rejects duplicate WhatsApp numbers", async 
   });
   assert.equal(first.status, 201);
   const firstLead = (await readJson<LeadPayload>(first)).lead;
-  assert.equal(firstLead.whatsappNumber, "16505551234");
+  assert.equal(firstLead.whatsappNumber, "+16505551234");
 
   const duplicate = await postLead({
     name: "Duplicate Enquiry",
     service: "Wedding photography",
     lastMessage: "Another message from the same number.",
-    whatsappNumber: "16505551234",
+    whatsappNumber: "+16505551234",
   });
   assert.equal(duplicate.status, 409);
   assert.deepEqual(await readJson(duplicate), {
     error: "A lead with this WhatsApp number already exists.",
+    code: "WHATSAPP_LEAD_DUPLICATE_NUMBER",
   });
 
   const stored = await pool.query<{ count: number }>(
@@ -1359,7 +1373,7 @@ test("POST /api/leads normalizes and rejects duplicate WhatsApp numbers", async 
       WHERE workspace_id = $1
         AND whatsapp_number = $2
     `,
-    [requireSession().workspace.id, "16505551234"],
+    [requireSession().workspace.id, "+16505551234"],
   );
   assert.equal(stored.rows[0]?.count, 1);
 });
@@ -3544,7 +3558,9 @@ test("authentication rate limits repeated sign-in attempts", async () => {
   try {
     const statuses: number[] = [];
 
-    for (let attempt = 0; attempt < 4; attempt += 1) {
+    // The sign-in endpoint has its own tighter limit, so the global limit of
+    // 100 requests per minute never applies to it.
+    for (let attempt = 0; attempt < 11; attempt += 1) {
       const response = await nativeFetch(
         `${limited.baseUrl}/api/auth/sign-in/email`,
         {
@@ -3563,10 +3579,105 @@ test("authentication rate limits repeated sign-in attempts", async () => {
       statuses.push(response.status);
     }
 
-    assert.deepEqual(statuses, [200, 200, 200, 429]);
+    assert.deepEqual(
+      statuses.slice(0, 10),
+      Array.from({ length: 10 }, () => 200),
+      "The first ten sign-in attempts are allowed",
+    );
+    assert.equal(
+      statuses[10],
+      429,
+      "The eleventh sign-in attempt is rate limited",
+    );
   } finally {
     await stopServer(limited.server);
   }
+});
+
+test("authentication rate limits repeated sign-up attempts", async () => {
+  const limited = await startServer(pool, undefined, {
+    rateLimit: {
+      enabled: true,
+      window: 60,
+      max: 100,
+    },
+  });
+
+  try {
+    const statuses: number[] = [];
+
+    // The sign-up endpoint allows fewer attempts than the sign-in endpoint.
+    for (let attempt = 0; attempt < 6; attempt += 1) {
+      const response = await nativeFetch(
+        `${limited.baseUrl}/api/auth/sign-up/email`,
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            origin: TEST_AUTH_ORIGIN,
+            "x-forwarded-for": "198.51.100.77",
+          },
+          body: JSON.stringify({
+            email: `signup-limit-${randomUUID()}@example.test`,
+            password: "replypilot-test-password",
+            name: "Signup Limit",
+          }),
+        },
+      );
+      statuses.push(response.status);
+    }
+
+    assert.deepEqual(
+      statuses.slice(0, 5),
+      Array.from({ length: 5 }, () => 200),
+      "The first five sign-up attempts are allowed",
+    );
+    assert.equal(
+      statuses[5],
+      429,
+      "The sixth sign-up attempt is rate limited",
+    );
+  } finally {
+    await stopServer(limited.server);
+  }
+});
+
+test("the API sends security headers and only sends HSTS over HTTPS", async () => {
+  const response = await nativeFetch(`${baseUrl}/api/workspace`, {
+    headers: {
+      cookie: requireSession().cookie,
+      "x-forwarded-for": TEST_CLIENT_IP,
+    },
+  });
+
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("x-content-type-options"), "nosniff");
+  assert.equal(response.headers.get("x-frame-options"), "DENY");
+  assert.equal(
+    response.headers.get("referrer-policy"),
+    "strict-origin-when-cross-origin",
+  );
+  assert.equal(response.headers.get("x-powered-by"), null);
+  assert.equal(
+    response.headers.get("strict-transport-security"),
+    null,
+    "HSTS is not sent over a plain HTTP request",
+  );
+
+  const secureResponse = await nativeFetch(`${baseUrl}/api/workspace`, {
+    headers: {
+      cookie: requireSession().cookie,
+      "x-forwarded-for": TEST_CLIENT_IP,
+      "x-forwarded-proto": "https",
+    },
+  });
+
+  assert.equal(secureResponse.status, 200);
+  assert.match(
+    secureResponse.headers.get("strict-transport-security") ?? "",
+    /max-age=\d+/,
+    "HSTS is sent for a request the proxy marked as HTTPS",
+  );
 });
 
 test("legacy workspace bootstrap requires explicit guarded CLI input", async () => {
@@ -4730,6 +4841,34 @@ test("WhatsApp webhook is disabled when configuration is absent", async () => {
   ]);
   const post = await postWhatsApp({ baseUrl }, body);
   assert.equal(post.status, 503);
+});
+
+test("the WhatsApp webhook rejects an oversized body before it is parsed", async () => {
+  const app = await startWhatsAppServer();
+
+  try {
+    // The body is untrusted until its signature is checked, so the buffer is
+    // bounded. A body above the limit is rejected before it is read.
+    const oversized = JSON.stringify({
+      entry: [{ changes: [{ value: { messages: [{ text: "x".repeat(400_000) }] } }] }],
+    });
+
+    const response = await postWhatsApp(app, oversized);
+
+    assert.equal(response.status, 413);
+    assert.deepEqual(await readJson(response), { error: "Payload too large" });
+
+    const stored = await pool.query<{ count: number }>(
+      "SELECT count(*)::int AS count FROM whatsapp_messages",
+    );
+    assert.equal(
+      stored.rows[0]?.count,
+      0,
+      "An oversized body must not be stored",
+    );
+  } finally {
+    await stopServer(app.server);
+  }
 });
 
 test("WhatsApp webhook challenge requires the configured verify token and subscribe mode", async () => {
@@ -5984,7 +6123,7 @@ test("inbound opt-out suppresses idempotently and cancels queued sends without f
 test("signed current-time inbound fixture opens an active service window and respects approval rules", async () => {
   const lead = await createDraftLead({
     name: "Fictional Window Customer",
-    whatsappNumber: TEST_WHATSAPP_CUSTOMER_WA_ID,
+    whatsappNumber: `+${TEST_WHATSAPP_CUSTOMER_WA_ID}`,
   });
   const app = await startWhatsAppServer();
 
@@ -6049,7 +6188,7 @@ test("signed current-time inbound fixture opens an active service window and res
 test("a suppressed customer with an active service window is never sent to a provider", async () => {
   const lead = await createDraftLead({
     name: "Fictional Opt Out Customer",
-    whatsappNumber: TEST_WHATSAPP_CUSTOMER_WA_ID,
+    whatsappNumber: `+${TEST_WHATSAPP_CUSTOMER_WA_ID}`,
   });
   const app = await startWhatsAppServer();
 
@@ -6195,7 +6334,7 @@ test("WhatsApp conversations associate only with an exact existing lead number",
     name: "Exact Match",
     whatsappNumber: "+1 (650) 555-1234",
   });
-  assert.equal(lead.whatsappNumber, TEST_WHATSAPP_CUSTOMER_WA_ID);
+  assert.equal(lead.whatsappNumber, `+${TEST_WHATSAPP_CUSTOMER_WA_ID}`);
 
   const matchingBody = whatsappEnvelope([
     whatsappChange({
@@ -8429,7 +8568,7 @@ test("workspace approve-and-send default queues approved replies", async () => {
 
 test("approve-and-send requires an active linked conversation", async () => {
   const lead = await createDraftLead({
-    whatsappNumber: TEST_WHATSAPP_CUSTOMER_WA_ID,
+    whatsappNumber: `+${TEST_WHATSAPP_CUSTOMER_WA_ID}`,
   });
   const draft = await createSavedDraftPayload(lead.id);
   const approved = await approveSavedDraft(lead.id, draft.id, {
@@ -8440,7 +8579,7 @@ test("approve-and-send requires an active linked conversation", async () => {
   assert.equal(approved.status, 409);
   assert.match(
     (await readJson<ErrorPayload>(approved)).error,
-    /no active WhatsApp conversation/i,
+    /no WhatsApp conversation yet/i,
   );
 
   const drafts = await readJson<ReplyDraftsPayload>(
@@ -8459,7 +8598,7 @@ test("approve-and-send requires an active linked conversation", async () => {
   assert.equal(send.status, 409);
   assert.match(
     (await readJson<ErrorPayload>(send)).error,
-    /no active WhatsApp conversation/i,
+    /no WhatsApp conversation yet/i,
   );
 });
 
@@ -12102,11 +12241,21 @@ test("M14B onboarding refuses a phone number that already belongs to another wor
       const response = await completeOnboarding(app, owner, session.state);
       assert.equal(response.status, 409);
       const payload = await readJson<OnboardingErrorPayload>(response);
-      assert.equal(payload.code, "duplicate_phone");
+      assert.equal(payload.code, "phone_number_unavailable");
       assert.equal(
         payload.error.includes(other.workspace.id),
         false,
         "The error must not disclose the owning workspace",
+      );
+      assert.doesNotMatch(
+        payload.error,
+        /another workspace/i,
+        "The error must not disclose that another workspace holds the number",
+      );
+      assert.doesNotMatch(
+        payload.error,
+        /already connected/i,
+        "The error must not claim that the number is connected elsewhere",
       );
     } finally {
       await stopServer(app.server);
@@ -12127,6 +12276,67 @@ test("M14B onboarding refuses a phone number that already belongs to another wor
     assert.equal(rows.rows.length, 1);
     assert.equal(rows.rows[0]?.workspace_id, other.workspace.id);
     assert.equal(rows.rows[0]?.count, 1);
+  });
+});
+
+test("M14B verification decrypts stored credentials with the environment it is given", async () => {
+  const owner = requireSession();
+  const config = testEmbeddedSignupConfig();
+
+  await withCredentialEncryption(async () => {
+    const connectionId = await registerTestConnection({
+      workspaceId: owner.workspace.id,
+      phoneNumberId: TEST_META_PHONE_NUMBER_ID,
+      accessToken: "EAABc0VerificationEnvironmentTokenMustStaySecret",
+    });
+
+    const fake = createFakeMetaFetch();
+    const metaClient = createMetaGraphClient(config, fake.fetchImplementation);
+
+    // Credentials encrypted with one key cannot be decrypted with another.
+    // The environment the verification is given must be the one that is used.
+    const wrongKey = await verifyWhatsAppConnection({
+      pool,
+      config,
+      workspaceId: owner.workspace.id,
+      connectionId,
+      metaClient,
+      environment: {
+        ...process.env,
+        WHATSAPP_CREDENTIAL_ENCRYPTION_KEY: Buffer.alloc(32, 0x21).toString(
+          "base64",
+        ),
+        WHATSAPP_CREDENTIAL_KEY_VERSION: TEST_CREDENTIAL_KEY_VERSION,
+      },
+    });
+
+    assert.equal(wrongKey.verification, "error");
+    assert.match(
+      wrongKey.error ?? "",
+      /could not be decrypted/i,
+      "The injected environment is the one used to decrypt the credentials",
+    );
+
+    // The matching environment decrypts the credentials, so the verification
+    // continues to the Meta checks instead of failing on decryption.
+    const matchingKey = await verifyWhatsAppConnection({
+      pool,
+      config,
+      workspaceId: owner.workspace.id,
+      connectionId,
+      metaClient,
+      environment: {
+        ...process.env,
+        WHATSAPP_CREDENTIAL_ENCRYPTION_KEY: TEST_CREDENTIAL_ENCRYPTION_KEY,
+        WHATSAPP_CREDENTIAL_KEY_VERSION: TEST_CREDENTIAL_KEY_VERSION,
+      },
+    });
+
+    assert.doesNotMatch(
+      matchingKey.error ?? "",
+      /could not be decrypted/i,
+      "The matching environment decrypts the stored credentials",
+    );
   });
 });
 
@@ -13519,5 +13729,976 @@ test("M14D a database fault in the guarded sent transition is retried, not escal
     row.failure_reason ?? "",
     /simulated guarded transition failure/,
     "A raw database error must never be stored in the failure reason",
+  );
+});
+
+// ─── M14E Lead conversation linkage and phone normalization ────────────────
+//
+// A lead used to be linked to a WhatsApp conversation only as a side effect of
+// an inbound message, and the match compared the owner's raw number against the
+// sender's digits. A national number never matched, and there was no way to
+// link a conversation by hand.
+//
+// These tests cover the replacement: an explicit country for every new lead
+// number, an owner-scoped endpoint that links an existing conversation, and the
+// distinct errors for "no conversation", "wrong phone number" and
+// "disconnected connection".
+
+// A lead is entered in the national format an owner would type, together with
+// its country. Meta sends the same subscriber as international digits, so the
+// customer's E.164 and the lead's E.164 must agree.
+const M14E_NG_NATIONAL = "08031234567";
+const M14E_NG_E164 = "+2348031234567";
+const M14E_NG_SENDER = "2348031234567";
+const M14E_OTHER_NATIONAL = "08039876543";
+const M14E_OTHER_E164 = "+2348039876543";
+const M14E_OTHER_SENDER = "2348039876543";
+
+/** Creates a lead whose number is given with an explicit country. */
+async function createLeadWithCountry(
+  nationalNumber: string,
+  countryCode: string,
+  name = "M14E Lead",
+): Promise<Lead> {
+  const response = await postLead({
+    name,
+    service: "Wedding photography",
+    lastMessage: "Please share availability.",
+    whatsappNumber: nationalNumber,
+    whatsappCountryCode: countryCode,
+  });
+
+  assert.equal(response.status, 201);
+  return (await readJson<LeadPayload>(response)).lead;
+}
+
+/** Creates a customer and conversation by storing an inbound message. */
+async function createConversationForNumber(
+  senderPhoneNumber: string,
+): Promise<string> {
+  const stored = await persistInboundMessages(
+    pool,
+    requireSession().workspace.id,
+    [
+      inboundMessage({
+        senderWaId: senderPhoneNumber,
+        senderPhoneNumber,
+        contactName: "M14E Customer",
+      }),
+    ],
+  );
+
+  assert.equal(stored.stored, 1);
+
+  const conversation = await pool.query<{ id: string }>(
+    `
+      SELECT id
+      FROM whatsapp_conversations
+      WHERE workspace_id = $1
+      ORDER BY created_at DESC, id DESC
+      LIMIT 1
+    `,
+    [requireSession().workspace.id],
+  );
+
+  const id = conversation.rows[0]?.id;
+  assert.ok(id, "Expected a conversation to be created");
+
+  return id;
+}
+
+/** Reads the lead a conversation is linked to. */
+async function leadIdForConversation(
+  conversationId: string,
+): Promise<string | null> {
+  const result = await pool.query<{ lead_id: string | null }>(
+    `
+      SELECT lead_id
+      FROM whatsapp_conversations
+      WHERE workspace_id = $1
+        AND id = $2
+    `,
+    [requireSession().workspace.id, conversationId],
+  );
+
+  return result.rows[0]?.lead_id ?? null;
+}
+
+function linkConversationRequest(
+  leadId: string,
+  conversationId: string,
+  session: TestSession = requireSession(),
+): Promise<Response> {
+  return requestAs(
+    session,
+    `/api/leads/${leadId}/whatsapp-conversations`,
+    "POST",
+    { conversationId },
+  );
+}
+
+test("M14E a national lead number with an explicit country is stored in E.164", async () => {
+  const lead = await createLeadWithCountry(M14E_NG_NATIONAL, "NG");
+
+  assert.equal(lead.whatsappNumber, M14E_NG_E164);
+
+  const stored = await pool.query<{ whatsapp_number: string }>(
+    `
+      SELECT whatsapp_number
+      FROM leads
+      WHERE workspace_id = $1
+        AND id = $2
+    `,
+    [requireSession().workspace.id, lead.id],
+  );
+
+  assert.equal(stored.rows[0]?.whatsapp_number, M14E_NG_E164);
+});
+
+test("M14E the same number in another format is still a duplicate", async () => {
+  const first = await postLead({
+    name: "First Format",
+    service: "Wedding photography",
+    lastMessage: "Please share availability.",
+    whatsappNumber: `+${M14E_NG_SENDER}`,
+  });
+  assert.equal(first.status, 201);
+  assert.equal(
+    (await readJson<LeadPayload>(first)).lead.whatsappNumber,
+    M14E_NG_E164,
+  );
+
+  // The same subscriber written in the national format with its country must
+  // not create a second lead.
+  const second = await postLead({
+    name: "Second Format",
+    service: "Wedding photography",
+    lastMessage: "Another message about the same number.",
+    whatsappNumber: M14E_NG_NATIONAL,
+    whatsappCountryCode: "NG",
+  });
+  assert.equal(second.status, 409);
+  assert.deepEqual(await readJson(second), {
+    error: "A lead with this WhatsApp number already exists.",
+    code: "WHATSAPP_LEAD_DUPLICATE_NUMBER",
+  });
+
+  const stored = await pool.query<{ count: number }>(
+    `
+      SELECT count(*)::int AS count
+      FROM leads
+      WHERE workspace_id = $1
+        AND ltrim(whatsapp_number, '+') = $2
+    `,
+    [requireSession().workspace.id, M14E_NG_SENDER],
+  );
+  assert.equal(stored.rows[0]?.count, 1);
+});
+
+test("M14E a national lead number without a country is rejected as ambiguous", async () => {
+  const response = await postLead({
+    name: "Ambiguous Number",
+    service: "Wedding photography",
+    lastMessage: "Please share availability.",
+    whatsappNumber: M14E_NG_NATIONAL,
+  });
+
+  assert.equal(response.status, 400);
+
+  const payload = await readJson<ErrorPayload>(response);
+  assert.equal(payload.error, "Invalid request");
+  assert.ok(Array.isArray(payload.details));
+  assert.match(validationMessages(payload), /cannot guess a country code/i);
+});
+
+test("M14E a lead number that belongs to another country is rejected", async () => {
+  const response = await postLead({
+    name: "Wrong Country",
+    service: "Wedding photography",
+    lastMessage: "Please share availability.",
+    whatsappNumber: "+16505551234",
+    whatsappCountryCode: "NG",
+  });
+
+  assert.equal(response.status, 400);
+
+  const payload = await readJson<ErrorPayload>(response);
+  assert.match(validationMessages(payload), /belongs to US, not NG/i);
+});
+
+test("M14E an owner links an existing WhatsApp conversation to a lead", async () => {
+  // The customer messaged before the lead was recorded, so the conversation
+  // has no lead yet and only the owner can connect the two.
+  const conversationId = await createConversationForNumber(M14E_NG_SENDER);
+  const lead = await createLeadWithCountry(M14E_NG_NATIONAL, "NG");
+
+  assert.equal(
+    await leadIdForConversation(conversationId),
+    null,
+    "The conversation is not linked to any lead before the owner links it",
+  );
+
+  const response = await linkConversationRequest(lead.id, conversationId);
+  assert.equal(response.status, 200);
+  assert.deepEqual(await readJson(response), { conversationId });
+
+  assert.equal(
+    await leadIdForConversation(conversationId),
+    lead.id,
+    "The conversation is linked to the lead",
+  );
+
+  const conversations = await conversationIdsForLead(lead.id);
+  assert.deepEqual(conversations, [conversationId]);
+});
+
+test("M14E linking a conversation preserves its messages and history", async () => {
+  const conversationId = await createConversationForNumber(M14E_NG_SENDER);
+  const lead = await createLeadWithCountry(M14E_NG_NATIONAL, "NG");
+
+  const before = await pool.query<{ count: number }>(
+    `
+      SELECT count(*)::int AS count
+      FROM conversation_thread_messages
+      WHERE workspace_id = $1
+        AND conversation_id = $2
+    `,
+    [requireSession().workspace.id, conversationId],
+  );
+
+  const response = await linkConversationRequest(lead.id, conversationId);
+  assert.equal(response.status, 200);
+
+  const after = await pool.query<{ count: number }>(
+    `
+      SELECT count(*)::int AS count
+      FROM conversation_thread_messages
+      WHERE workspace_id = $1
+        AND conversation_id = $2
+    `,
+    [requireSession().workspace.id, conversationId],
+  );
+
+  assert.equal(
+    after.rows[0]?.count,
+    before.rows[0]?.count,
+    "Linking must not add or remove any message",
+  );
+  assert.ok((before.rows[0]?.count ?? 0) > 0);
+});
+
+test("M14E linking records who linked the conversation and when", async () => {
+  const owner = requireSession();
+  const conversationId = await createConversationForNumber(M14E_NG_SENDER);
+  const lead = await createLeadWithCountry(M14E_NG_NATIONAL, "NG");
+
+  const response = await linkConversationRequest(lead.id, conversationId);
+  assert.equal(response.status, 200);
+
+  const audit = await pool.query<{
+    lead_linked_by: string | null;
+    lead_linked_at: Date | null;
+  }>(
+    `
+      SELECT lead_linked_by, lead_linked_at
+      FROM whatsapp_conversations
+      WHERE workspace_id = $1
+        AND id = $2
+    `,
+    [owner.workspace.id, conversationId],
+  );
+
+  assert.equal(audit.rows[0]?.lead_linked_by, owner.user.id);
+  assert.ok(audit.rows[0]?.lead_linked_at);
+});
+
+test("M14E a conversation in another workspace cannot be linked", async () => {
+  const lead = await createLeadWithCountry(M14E_NG_NATIONAL, "NG");
+
+  const otherWorkspaceId = randomUUID();
+  await pool.query(
+    "INSERT INTO workspaces (id, name) VALUES ($1, 'M14E Other Workspace')",
+    [otherWorkspaceId],
+  );
+
+  const otherConnectionId = await registerTestConnection({
+    workspaceId: otherWorkspaceId,
+    phoneNumberId: "15550783881",
+    accessToken: "",
+  });
+  assert.ok(otherConnectionId);
+
+  const otherCustomer = await pool.query<{ id: string }>(
+    `
+      INSERT INTO customers (workspace_id, phone_e164, display_name)
+      VALUES ($1, '+2348031234567', 'M14E Other Customer')
+      RETURNING id
+    `,
+    [otherWorkspaceId],
+  );
+  const otherCustomerId = otherCustomer.rows[0]?.id;
+  assert.ok(otherCustomerId);
+
+  const otherConversation = await pool.query<{ id: string }>(
+    `
+      INSERT INTO whatsapp_conversations (
+        workspace_id,
+        phone_number_id,
+        customer_wa_id,
+        customer_id,
+        whatsapp_connection_id,
+        status
+      )
+      VALUES ($1, '15550783881', '2348031234567', $2, $3, 'open')
+      RETURNING id
+    `,
+    [otherWorkspaceId, otherCustomerId, otherConnectionId],
+  );
+  const otherConversationId = otherConversation.rows[0]?.id;
+  assert.ok(otherConversationId);
+
+  const response = await linkConversationRequest(lead.id, otherConversationId);
+  assert.equal(response.status, 404);
+  assert.equal(
+    await leadIdForConversation(otherConversationId),
+    null,
+    "The conversation in the other workspace must stay unlinked",
+  );
+});
+
+test("M14E a member cannot link a conversation to a lead", async () => {
+  const owner = requireSession();
+  const conversationId = await createConversationForNumber(M14E_NG_SENDER);
+  const lead = await createLeadWithCountry(M14E_NG_NATIONAL, "NG");
+
+  const member = await registerWorkspaceMember(owner.workspace.id);
+
+  const response = await linkConversationRequest(
+    lead.id,
+    conversationId,
+    member,
+  );
+  assert.equal(response.status, 403);
+  assert.equal(
+    await leadIdForConversation(conversationId),
+    null,
+    "A member must not be able to link a conversation",
+  );
+});
+
+test("M14E a conversation already linked to another lead cannot be stolen", async () => {
+  const conversationId = await createConversationForNumber(M14E_NG_SENDER);
+  const firstLead = await createLeadWithCountry(
+    M14E_NG_NATIONAL,
+    "NG",
+    "M14E First Lead",
+  );
+  const secondLead = await createLeadWithCountry(
+    M14E_OTHER_NATIONAL,
+    "NG",
+    "M14E Second Lead",
+  );
+
+  const firstLink = await linkConversationRequest(firstLead.id, conversationId);
+  assert.equal(firstLink.status, 200);
+
+  const secondLink = await linkConversationRequest(
+    secondLead.id,
+    conversationId,
+  );
+  assert.equal(secondLink.status, 409);
+
+  const payload = await readJson<{ error: string; code?: string }>(secondLink);
+  assert.equal(payload.code, "WHATSAPP_CONVERSATION_ALREADY_LINKED");
+  assert.match(payload.error, /already linked to another lead/i);
+
+  assert.equal(
+    await leadIdForConversation(conversationId),
+    firstLead.id,
+    "The conversation stays linked to its first lead",
+  );
+});
+
+test("M14E a conversation with a different phone number cannot be linked", async () => {
+  const conversationId = await createConversationForNumber(M14E_OTHER_SENDER);
+  const lead = await createLeadWithCountry(M14E_NG_NATIONAL, "NG");
+
+  const response = await linkConversationRequest(lead.id, conversationId);
+  assert.equal(response.status, 409);
+
+  const payload = await readJson<{ error: string; code?: string }>(response);
+  assert.equal(payload.code, "WHATSAPP_CONVERSATION_PHONE_MISMATCH");
+  assert.match(payload.error, /different phone number/i);
+
+  const customer = await pool.query<{ phone_e164: string }>(
+    `
+      SELECT customer.phone_e164
+      FROM whatsapp_conversations AS conversation
+      JOIN customers AS customer ON customer.id = conversation.customer_id
+      WHERE conversation.workspace_id = $1
+        AND conversation.id = $2
+    `,
+    [requireSession().workspace.id, conversationId],
+  );
+  assert.equal(
+    customer.rows[0]?.phone_e164,
+    M14E_OTHER_E164,
+    "The conversation belongs to the other customer",
+  );
+  assert.notEqual(
+    customer.rows[0]?.phone_e164,
+    M14E_NG_E164,
+    "The other customer is not the lead's customer",
+  );
+
+  assert.equal(
+    await leadIdForConversation(conversationId),
+    null,
+    "The conversation stays unlinked",
+  );
+});
+
+test("M14E the linkable conversation list is workspace scoped", async () => {
+  const owner = requireSession();
+  const lead = await createLeadWithCountry(M14E_NG_NATIONAL, "NG");
+
+  const response = await requestAs(
+    owner,
+    `/api/leads/${lead.id}/whatsapp-conversations`,
+  );
+  assert.equal(response.status, 200);
+
+  const payload = await readJson<{
+    conversations: { id: string; linkedLeadId: string | null }[];
+  }>(response);
+
+  assert.ok(Array.isArray(payload.conversations));
+
+  const foreignConversationId = randomUUID();
+  assert.equal(
+    payload.conversations.some(
+      (entry) => entry.id === foreignConversationId,
+    ),
+    false,
+    "Only this workspace's conversations are listed",
+  );
+});
+
+test("M14E the linkable conversation list is empty for a lead that does not exist", async () => {
+  const response = await requestAs(
+    requireSession(),
+    `/api/leads/${randomUUID()}/whatsapp-conversations`,
+  );
+  assert.equal(response.status, 404);
+});
+
+test("M14E the linkable conversation list reports the linked lead and the customer number", async () => {
+  const conversationId = await createConversationForNumber(M14E_NG_SENDER);
+  const lead = await createLeadWithCountry(M14E_NG_NATIONAL, "NG");
+
+  const response = await requestAs(
+    requireSession(),
+    `/api/leads/${lead.id}/whatsapp-conversations`,
+  );
+  assert.equal(response.status, 200);
+
+  const payload = await readJson<{
+    conversations: {
+      id: string;
+      customerPhoneE164: string | null;
+      linkedLeadId: string | null;
+      status: string;
+    }[];
+    pagination: {
+      limit: number;
+      offset: number;
+      hasMore: boolean;
+      nextOffset: number | null;
+    };
+  }>(response);
+
+  const conversation = payload.conversations.find(
+    (entry) => entry.id === conversationId,
+  );
+  assert.ok(conversation, "The conversation is listed as linkable");
+  assert.equal(conversation.status, "open");
+  assert.equal(conversation.customerPhoneE164, M14E_NG_E164);
+  assert.equal(conversation.linkedLeadId, null);
+
+  assert.equal(payload.pagination.limit, 25);
+  assert.equal(payload.pagination.offset, 0);
+  assert.equal(payload.pagination.hasMore, false);
+  assert.equal(payload.pagination.nextOffset, null);
+});
+
+test("M14E sending is still blocked when the WhatsApp connection is disconnected", async () => {
+  const owner = requireSession();
+  const conversationId = await createConversationForNumber(M14E_NG_SENDER);
+  const lead = await createLeadWithCountry(M14E_NG_NATIONAL, "NG");
+
+  await pool.query(
+    `
+      UPDATE whatsapp_connections
+      SET status = 'disconnected', updated_at = now()
+      WHERE workspace_id = $1
+    `,
+    [owner.workspace.id],
+  );
+
+  const linked = await linkConversationRequest(lead.id, conversationId);
+  assert.equal(linked.status, 200);
+
+  const draft = await createSavedDraftPayload(lead.id);
+  const approved = await approveSavedDraft(lead.id, draft.id, {
+    status: "approved",
+    sendPolicy: "approve_only",
+  });
+  assert.equal(approved.status, 200);
+
+  const sent = await sendSavedDraft(draft.id);
+  assert.equal(sent.status, 409);
+
+  const payload = await readJson<{ error: string; code?: string }>(sent);
+  assert.equal(payload.code, "WHATSAPP_CONNECTION_DISCONNECTED");
+  assert.match(payload.error, /disconnected/i);
+
+  const outbound = await pool.query<{ count: number }>(
+    "SELECT count(*)::int AS count FROM outbound_messages WHERE workspace_id = $1",
+    [owner.workspace.id],
+  );
+  assert.equal(
+    outbound.rows[0]?.count,
+    0,
+    "A disconnected connection must not queue an outbound message",
+  );
+});
+
+test("M14E a lead with no conversation reports an actionable error with a stable code", async () => {
+  const lead = await createDraftLead({ name: "M14E No Conversation" });
+  const draft = await createSavedDraftPayload(lead.id);
+
+  const approved = await approveSavedDraft(lead.id, draft.id, {
+    status: "approved",
+    sendPolicy: "approve_and_send",
+  });
+  assert.equal(approved.status, 409);
+
+  const payload = await readJson<{ error: string; code?: string }>(approved);
+  assert.equal(payload.code, "WHATSAPP_CONVERSATION_REQUIRED");
+  assert.match(payload.error, /no WhatsApp conversation yet/i);
+  assert.match(payload.error, /link an existing conversation/i);
+});
+
+// ─── M14E follow-up: identity safety, duplicate detection and invariants ────
+
+const M14E_GH_NATIONAL = "0241234567";
+const M14E_GH_E164 = "+233241234567";
+
+/**
+ * Inserts a lead row directly, the way a pre-migration database holds it.
+ *
+ * The API no longer accepts a national number without a country, so a legacy
+ * row can only be produced by writing it directly.
+ */
+async function insertLegacyLead(
+  whatsappNumber: string,
+  name = "M14E Legacy Lead",
+): Promise<string> {
+  const id = randomUUID();
+  await pool.query(
+    `
+      INSERT INTO leads (
+        id,
+        workspace_id,
+        name,
+        service,
+        channel,
+        status,
+        last_message,
+        whatsapp_number
+      )
+      VALUES ($1, $2, $3, 'Wedding photography', 'Manual', 'New', 'Legacy enquiry', $4)
+    `,
+    [id, requireSession().workspace.id, name, whatsappNumber],
+  );
+
+  return id;
+}
+
+test("M14E a national lead number links to an inbound sender from the same subscriber", async () => {
+  // The defect this fixes: a lead entered as "08031234567" never matched the
+  // international sender Meta sends for the same subscriber.
+  const lead = await createLeadWithCountry(M14E_NG_NATIONAL, "NG");
+
+  const stored = await persistInboundMessages(
+    pool,
+    requireSession().workspace.id,
+    [
+      inboundMessage({
+        senderWaId: M14E_NG_SENDER,
+        senderPhoneNumber: M14E_NG_SENDER,
+        contactName: "M14E Inbound Customer",
+      }),
+    ],
+  );
+
+  assert.equal(stored.stored, 1);
+
+  const conversationIds = await conversationIdsForLead(lead.id);
+  assert.deepEqual(
+    conversationIds.length,
+    1,
+    "The inbound conversation is linked to the lead automatically",
+  );
+});
+
+test("M14E a legacy national row reports an unresolved possible duplicate, not a confirmed one", async () => {
+  await insertLegacyLead(M14E_NG_NATIONAL, "M14E Legacy National Lead");
+
+  const response = await postLead({
+    name: "M14E Duplicate Of Legacy",
+    service: "Wedding photography",
+    lastMessage: "Same subscriber in international form.",
+    whatsappNumber: `+${M14E_NG_SENDER}`,
+  });
+
+  assert.equal(response.status, 409);
+
+  const payload = await readJson<{ error: string; code?: string }>(response);
+  assert.equal(payload.code, "WHATSAPP_LEAD_NUMBER_UNRESOLVED");
+  assert.match(payload.error, /may already hold this WhatsApp number/i);
+  assert.doesNotMatch(
+    payload.error,
+    /already exists/i,
+    "An unresolved conflict must not claim that a duplicate exists",
+  );
+
+  // The subscriber is still represented by exactly one lead: the legacy row.
+  const stored = await pool.query<{ count: number }>(
+    `
+      SELECT count(*)::int AS count
+      FROM leads
+      WHERE workspace_id = $1
+        AND whatsapp_number IN ($2, $3)
+    `,
+    [
+      requireSession().workspace.id,
+      M14E_NG_NATIONAL,
+      M14E_NG_E164,
+    ],
+  );
+  assert.equal(stored.rows[0]?.count, 1);
+});
+
+test("M14E a legacy row in another country does not block a different subscriber", async () => {
+  // The Ghanaian row is ambiguous, but it only ever matches a Ghanaian
+  // candidate because the comparison uses the candidate's own numbering plan.
+  await insertLegacyLead(M14E_GH_NATIONAL, "M14E Legacy Ghanaian Lead");
+
+  const nigerian = await postLead({
+    name: "M14E Nigerian Lead",
+    service: "Wedding photography",
+    lastMessage: "A different subscriber.",
+    whatsappNumber: M14E_NG_NATIONAL,
+    whatsappCountryCode: "NG",
+  });
+
+  assert.equal(
+    nigerian.status,
+    201,
+    "A number from another country is not treated as a duplicate",
+  );
+
+  const ghanaian = await postLead({
+    name: "M14E Ghanaian Lead",
+    service: "Wedding photography",
+    lastMessage: "The same Ghanaian subscriber.",
+    whatsappNumber: M14E_GH_NATIONAL,
+    whatsappCountryCode: "GH",
+  });
+
+  assert.equal(
+    ghanaian.status,
+    409,
+    "The same subscriber is still rejected in its own country",
+  );
+
+  const ghanaianPayload = await readJson<{ error: string; code?: string }>(
+    ghanaian,
+  );
+  assert.equal(
+    ghanaianPayload.code,
+    "WHATSAPP_LEAD_NUMBER_UNRESOLVED",
+    "The legacy row's country is unknown, so the conflict is not confirmed",
+  );
+
+  const stored = await pool.query<{ count: number }>(
+    `
+      SELECT count(*)::int AS count
+      FROM leads
+      WHERE workspace_id = $1
+        AND whatsapp_number IN ($2, $3)
+    `,
+    [
+      requireSession().workspace.id,
+      M14E_GH_E164,
+      M14E_NG_E164,
+    ],
+  );
+  assert.equal(
+    stored.rows[0]?.count,
+    1,
+    "Only the Nigerian lead was created",
+  );
+});
+
+test("M14E a lead whose number cannot be identified refuses manual linking", async () => {
+  const leadId = await insertLegacyLead(
+    M14E_NG_NATIONAL,
+    "M14E Unknown Identity Lead",
+  );
+  const conversationId = await createConversationForNumber(M14E_NG_SENDER);
+
+  const response = await linkConversationRequest(leadId, conversationId);
+  assert.equal(response.status, 409);
+
+  const payload = await readJson<{ error: string; code?: string }>(response);
+  assert.equal(payload.code, "WHATSAPP_CONVERSATION_LEAD_NUMBER_UNKNOWN");
+  assert.match(payload.error, /not in international format/i);
+
+  assert.equal(
+    await leadIdForConversation(conversationId),
+    null,
+    "The conversation stays unlinked",
+  );
+});
+
+test("M14E a lead keeps at most one active conversation", async () => {
+  const lead = await createLeadWithCountry(M14E_NG_NATIONAL, "NG");
+  const firstConversation = await createConversationForNumber(M14E_NG_SENDER);
+  const secondConversation = await createConversationForNumber(M14E_OTHER_SENDER);
+
+  const first = await linkConversationRequest(lead.id, firstConversation);
+  assert.equal(first.status, 200);
+
+  const second = await linkConversationRequest(lead.id, secondConversation);
+  assert.equal(second.status, 409);
+
+  const payload = await readJson<{ error: string; code?: string }>(second);
+  assert.equal(payload.code, "WHATSAPP_CONVERSATION_LEAD_ALREADY_LINKED");
+
+  assert.equal(await leadIdForConversation(firstConversation), lead.id);
+  assert.equal(await leadIdForConversation(secondConversation), null);
+});
+
+test("M14E concurrent links to one lead keep exactly one active conversation", async () => {
+  const lead = await createLeadWithCountry(M14E_NG_NATIONAL, "NG");
+  const firstConversation = await createConversationForNumber(M14E_NG_SENDER);
+  const secondConversation = await createConversationForNumber(M14E_OTHER_SENDER);
+
+  const responses = await Promise.all([
+    linkConversationRequest(lead.id, firstConversation),
+    linkConversationRequest(lead.id, secondConversation),
+  ]);
+
+  const statuses = responses.map((response) => response.status).sort();
+  assert.deepEqual(
+    statuses,
+    [200, 409],
+    "Exactly one concurrent link may attach a conversation to the lead",
+  );
+
+  const linked = await pool.query<{ count: number }>(
+    `
+      SELECT count(*)::int AS count
+      FROM whatsapp_conversations
+      WHERE workspace_id = $1
+        AND lead_id = $2
+        AND status IN ('open', 'closed')
+    `,
+    [requireSession().workspace.id, lead.id],
+  );
+  assert.equal(linked.rows[0]?.count, 1);
+});
+
+test("M14E the linkable conversation list is paginated and only offers linkable rows", async () => {
+  const lead = await createLeadWithCountry(M14E_NG_NATIONAL, "NG");
+  const conversationId = await createConversationForNumber(M14E_NG_SENDER);
+
+  const response = await requestAs(
+    requireSession(),
+    `/api/leads/${lead.id}/whatsapp-conversations?limit=1&offset=0`,
+  );
+  assert.equal(response.status, 200);
+
+  const payload = await readJson<{
+    conversations: { id: string }[];
+    pagination: { limit: number; hasMore: boolean; nextOffset: number | null };
+  }>(response);
+
+  assert.equal(payload.pagination.limit, 1);
+  assert.equal(payload.conversations.length, 1);
+  assert.equal(payload.conversations[0]?.id, conversationId);
+  assert.equal(payload.pagination.hasMore, false);
+  assert.equal(payload.pagination.nextOffset, null);
+
+  const invalid = await requestAs(
+    requireSession(),
+    `/api/leads/${lead.id}/whatsapp-conversations?limit=1000`,
+  );
+  assert.equal(invalid.status, 400);
+});
+
+// ─── M14F duplicate classification, explicit confirmation and startup guard ──
+//
+// A lead number can only be confirmed as a duplicate when both leads provably
+// describe the same subscriber. A legacy lead that stores a national number
+// has no recorded country, so a conflict with it is a *possible* duplicate
+// rather than a confirmed one, and the owner resolves it explicitly.
+
+const M14F_GH_NATIONAL = "0241234567";
+const M14F_GH_OTHER_NATIONAL = "0501234567";
+const M14F_ZA_NATIONAL = "0241234567";
+
+test("M14F a confirmed duplicate keeps its own code and cannot be overridden", async () => {
+  const first = await postLead({
+    name: "M14F First Lead",
+    service: "Wedding photography",
+    lastMessage: "Please share availability.",
+    whatsappNumber: "+2348031234567",
+  });
+  assert.equal(first.status, 201);
+
+  const duplicate = await postLead({
+    name: "M14F Duplicate",
+    service: "Wedding photography",
+    lastMessage: "The same subscriber.",
+    whatsappNumber: "+2348031234567",
+  });
+
+  assert.equal(duplicate.status, 409);
+  const payload = await readJson<{ error: string; code?: string }>(duplicate);
+  assert.equal(payload.code, "WHATSAPP_LEAD_DUPLICATE_NUMBER");
+  assert.match(payload.error, /already exists/i);
+
+  const overridden = await postLead({
+    name: "M14F Duplicate Override Attempt",
+    service: "Wedding photography",
+    lastMessage: "The same subscriber again.",
+    whatsappNumber: "+2348031234567",
+    confirmUnresolvedNumber: true,
+  });
+
+  assert.equal(
+    overridden.status,
+    409,
+    "A confirmed duplicate can never be overridden",
+  );
+  const overriddenPayload = await readJson<{ error: string; code?: string }>(
+    overridden,
+  );
+  assert.equal(overriddenPayload.code, "WHATSAPP_LEAD_DUPLICATE_NUMBER");
+
+  const stored = await pool.query<{ count: number }>(
+    `
+      SELECT count(*)::int AS count
+      FROM leads
+      WHERE workspace_id = $1
+        AND ltrim(whatsapp_number, '+') = '2348031234567'
+    `,
+    [requireSession().workspace.id],
+  );
+  assert.equal(stored.rows[0]?.count, 1);
+});
+
+test("M14F a legacy national row does not block a different customer in the same country", async () => {
+  await insertLegacyLead(M14F_GH_NATIONAL, "M14F Legacy Ghanaian Lead");
+
+  const response = await postLead({
+    name: "M14F Other Ghanaian Customer",
+    service: "Wedding photography",
+    lastMessage: "A different subscriber.",
+    whatsappNumber: M14F_GH_OTHER_NATIONAL,
+    whatsappCountryCode: "GH",
+  });
+
+  assert.equal(
+    response.status,
+    201,
+    "An unrelated customer is never blocked by a legacy row",
+  );
+});
+
+test("M14F a legacy national row blocks a customer in another country only as an unresolved possible duplicate", async () => {
+  // The legacy row stores a Ghanaian number without its country. The same
+  // digits are also a valid South African number, so the two leads may be
+  // different customers and ReplyPilot must not claim that a duplicate
+  // exists.
+  const legacyLeadId = await insertLegacyLead(
+    M14F_GH_NATIONAL,
+    "M14F Legacy Ambiguous Lead",
+  );
+
+  const response = await postLead({
+    name: "M14F South African Customer",
+    service: "Wedding photography",
+    lastMessage: "A customer in another country.",
+    whatsappNumber: M14F_ZA_NATIONAL,
+    whatsappCountryCode: "ZA",
+  });
+
+  assert.equal(response.status, 409);
+
+  const payload = await readJson<{
+    error: string;
+    code?: string;
+    conflictingLeadId?: string;
+  }>(response);
+  assert.equal(payload.code, "WHATSAPP_LEAD_NUMBER_UNRESOLVED");
+  assert.doesNotMatch(
+    payload.error,
+    /already exists/i,
+    "The response must not claim that a duplicate exists",
+  );
+  assert.match(payload.error, /review that lead/i);
+  assert.equal(
+    payload.conflictingLeadId,
+    legacyLeadId,
+    "The response names the lead the owner has to review",
+  );
+});
+
+test("M14F the owner can confirm explicitly that an unresolved number is a different customer", async () => {
+  const legacyLeadId = await insertLegacyLead(
+    M14F_GH_NATIONAL,
+    "M14F Legacy Lead To Confirm",
+  );
+
+  const response = await postLead({
+    name: "M14F Confirmed Different Customer",
+    service: "Wedding photography",
+    lastMessage: "Checked: a different customer.",
+    whatsappNumber: M14F_ZA_NATIONAL,
+    whatsappCountryCode: "ZA",
+    confirmUnresolvedNumber: true,
+  });
+
+  assert.equal(response.status, 201);
+
+  const lead = (await readJson<LeadPayload>(response)).lead;
+  assert.equal(lead.whatsappNumber, "+27241234567");
+
+  const legacyRows = await pool.query<{ whatsapp_number: string }>(
+    `
+      SELECT whatsapp_number
+      FROM leads
+      WHERE workspace_id = $1 AND id = $2
+    `,
+    [requireSession().workspace.id, legacyLeadId],
+  );
+  assert.equal(
+    legacyRows.rows[0]?.whatsapp_number,
+    M14F_GH_NATIONAL,
+    "The legacy row is left untouched",
   );
 });

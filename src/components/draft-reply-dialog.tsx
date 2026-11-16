@@ -35,6 +35,14 @@ import {
   parseConversationsResponse,
   type WhatsAppConversation,
 } from "@/lib/whatsapp";
+import { useAuth } from "./auth-provider";
+import {
+  apiErrorMessage,
+  isConversationLinkable,
+  linkableConversationLabel,
+  parseLinkableConversations,
+  type LinkableConversation,
+} from "@/lib/conversation-linking";
 
 async function readJson(response: Response): Promise<unknown> {
   try {
@@ -45,16 +53,10 @@ async function readJson(response: Response): Promise<unknown> {
 }
 
 function errorMessage(data: unknown, fallback: string): string {
-  if (
-    typeof data === "object" &&
-    data !== null &&
-    "error" in data &&
-    typeof data.error === "string"
-  ) {
-    return data.error;
-  }
-
-  return fallback;
+  // The shared helper prefers the server's own message and falls back to the
+  // guidance for the stable code, so a coded body never shows a generic
+  // sentence.
+  return apiErrorMessage(data, fallback);
 }
 
 function formatDraftTime(timestamp: string): string {
@@ -169,9 +171,14 @@ export function DraftReplyDialog({
   onClose: () => void;
 }) {
   const dialogRef = useRef<HTMLDialogElement>(null);
+  const { role } = useAuth();
+  // Linking a conversation changes workspace data, so it is an owner action,
+  // the same as approving and sending.
+  const canLinkConversation = role === "owner";
   const requestIdRef = useRef(0);
   const approvalContextRequestIdRef = useRef(0);
   const outboundRequestIdRef = useRef(0);
+  const linkableConversationsRequestIdRef = useRef(0);
   const conversationsRequestIdRef = useRef(0);
   const loadedLeadIdRef = useRef<string | null>(null);
   const conversationsRef = useRef<WhatsAppConversation[]>([]);
@@ -206,6 +213,16 @@ export function DraftReplyDialog({
   const [outboundLoadError, setOutboundLoadError] = useState<string | null>(
     null,
   );
+  const [linkableConversations, setLinkableConversations] = useState<
+    LinkableConversation[]
+  >([]);
+  const [linkableLoading, setLinkableLoading] = useState(false);
+  const [linkingConversationId, setLinkingConversationId] = useState<
+    string | null
+  >(null);
+  const [selectedLinkableConversationId, setSelectedLinkableConversationId] =
+    useState("");
+  const [linkingError, setLinkingError] = useState<string | null>(null);
 
   const selectedDraft =
     drafts.find((draft) => draft.id === selectedDraftId) ?? null;
@@ -486,6 +503,98 @@ export function DraftReplyDialog({
       }
   }
 
+  async function loadLinkableConversations(selectedLead: Lead) {
+    // Linking a conversation changes workspace data, so it is an owner action.
+    // A member never sees the list, so the request is never made.
+    if (!canLinkConversation) {
+      setLinkableConversations([]);
+      return;
+    }
+
+    const requestId = ++linkableConversationsRequestIdRef.current;
+
+    setLinkableLoading(true);
+    setLinkingError(null);
+
+    try {
+      const response = await fetch(
+        `/api/leads/${selectedLead.id}/whatsapp-conversations?limit=100`,
+      );
+      const data = await readJson(response);
+
+      if (requestId !== linkableConversationsRequestIdRef.current) return;
+
+      if (!response.ok) {
+        setLinkingError(
+          apiErrorMessage(data, "Unable to load WhatsApp conversations."),
+        );
+        return;
+      }
+
+      const page = parseLinkableConversations(data);
+
+      if (!page) {
+        setLinkingError(
+          "The conversation service returned an unexpected response.",
+        );
+        return;
+      }
+
+      setLinkableConversations(page.conversations);
+    } catch {
+      if (requestId !== linkableConversationsRequestIdRef.current) return;
+
+      setLinkingError("Unable to load WhatsApp conversations.");
+    } finally {
+      if (requestId === linkableConversationsRequestIdRef.current) {
+        setLinkableLoading(false);
+      }
+    }
+  }
+
+  async function linkConversation(conversationId: string) {
+    if (!lead || !conversationId) {
+      return;
+    }
+
+    setLinkingConversationId(conversationId);
+    setLinkingError(null);
+    setActionError(null);
+
+    try {
+      const response = await fetch(
+        `/api/leads/${lead.id}/whatsapp-conversations`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ conversationId }),
+        },
+      );
+      const data = await readJson(response);
+
+      if (!response.ok) {
+        setLinkingError(
+          apiErrorMessage(data, "Unable to link this WhatsApp conversation."),
+        );
+        return;
+      }
+
+      setSelectedLinkableConversationId("");
+      setNotice(
+        "WhatsApp conversation linked to this lead. You can now queue a reply.",
+      );
+
+      await Promise.all([
+        loadLinkableConversations(lead),
+        loadApprovalContext(lead),
+      ]);
+    } catch {
+      setLinkingError("Unable to link this WhatsApp conversation.");
+    } finally {
+      setLinkingConversationId(null);
+    }
+  }
+
   async function loadDrafts(selectedLead: Lead) {
       const requestId = ++requestIdRef.current;
       setIsLoading(true);
@@ -570,6 +679,9 @@ export function DraftReplyDialog({
 
   const loadApprovalContextForEffect = useEffectEvent(loadApprovalContext);
   const loadDraftsForEffect = useEffectEvent(loadDrafts);
+  const loadLinkableConversationsForEffect = useEffectEvent(
+    loadLinkableConversations,
+  );
 
   useEffect(() => {
     const dialog = dialogRef.current;
@@ -586,10 +698,15 @@ export function DraftReplyDialog({
         approvalContextRequestIdRef.current += 1;
         outboundRequestIdRef.current += 1;
         conversationsRequestIdRef.current += 1;
+        linkableConversationsRequestIdRef.current += 1;
         setSendPolicyChoice("default");
         setSelectedConversationId("");
+        setLinkableConversations([]);
+        setSelectedLinkableConversationId("");
+        setLinkingError(null);
         void loadDraftsForEffect(lead);
         void loadApprovalContextForEffect(lead);
+        void loadLinkableConversationsForEffect(lead);
       }
     } else {
       requestIdRef.current += 1;
@@ -667,7 +784,7 @@ export function DraftReplyDialog({
 
       if (eligibleConversations.length === 0) {
         setActionError(
-          "This lead has no active WhatsApp conversation. Link a conversation before using approve and send.",
+          "This lead has no WhatsApp conversation yet. Link an existing conversation to this lead, or wait until the customer messages the business number.",
         );
         return;
       }
@@ -818,7 +935,7 @@ export function DraftReplyDialog({
 
     if (eligibleConversations.length === 0) {
       setActionError(
-        "This lead has no active WhatsApp conversation. Link a conversation before sending.",
+        "This lead has no WhatsApp conversation yet. Link an existing conversation to this lead, or wait until the customer messages the business number.",
       );
       return;
     }
@@ -1273,6 +1390,89 @@ export function DraftReplyDialog({
               {outboundLoadError ? (
                 <p role="alert" className="mt-2 text-xs text-danger-ink">
                   {outboundLoadError}
+                </p>
+              ) : null}
+            </section>
+          ) : null}
+
+          {eligibleConversations.length === 0 &&
+          !retryBlockedByInactiveConversation &&
+          canLinkConversation ? (
+            <section
+              aria-labelledby="link-conversation-title"
+              className="rounded-xl border border-line bg-hushed p-4"
+            >
+              <h3
+                id="link-conversation-title"
+                className="text-sm font-semibold text-ink"
+              >
+                Link a WhatsApp conversation
+              </h3>
+              <p className="mt-1 text-xs leading-5 text-ink-soft">
+                A conversation is linked automatically when the customer
+                messages the business number. You can also link an existing
+                conversation to this lead now.
+              </p>
+
+              {linkableLoading ? (
+                <p role="status" className="mt-2 text-xs text-ink-soft">
+                  Loading conversations…
+                </p>
+              ) : null}
+
+              {linkableConversations.filter((conversation) =>
+                isConversationLinkable(conversation, lead?.id ?? ""),
+              ).length > 0 ? (
+                <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-end">
+                  <label className={`${labelClass} min-w-0 flex-1`}>
+                    Conversation
+                    <select
+                      value={selectedLinkableConversationId}
+                      onChange={(event) =>
+                        setSelectedLinkableConversationId(event.target.value)
+                      }
+                      disabled={isBusy}
+                      className={inputClass}
+                    >
+                      <option value="">Choose a conversation</option>
+                      {linkableConversations
+                        .filter((conversation) =>
+                          isConversationLinkable(conversation, lead?.id ?? ""),
+                        )
+                        .map((conversation) => (
+                          <option key={conversation.id} value={conversation.id}>
+                            {linkableConversationLabel(conversation)} ·{" "}
+                            {conversation.status}
+                          </option>
+                        ))}
+                    </select>
+                  </label>
+                  <button
+                    type="button"
+                    className="btn btn-secondary"
+                    disabled={
+                      isBusy ||
+                      !selectedLinkableConversationId ||
+                      linkingConversationId !== null
+                    }
+                    onClick={() =>
+                      void linkConversation(selectedLinkableConversationId)
+                    }
+                  >
+                    {linkingConversationId ? "Linking…" : "Link conversation"}
+                  </button>
+                </div>
+              ) : linkableLoading ? null : (
+                <p className="mt-3 text-xs leading-5 text-ink-soft">
+                  There is no conversation in this workspace that can be linked
+                  to this lead yet. A conversation appears when a customer
+                  messages the business number.
+                </p>
+              )}
+
+              {linkingError ? (
+                <p role="alert" className="mt-3 text-xs text-danger-ink">
+                  {linkingError}
                 </p>
               ) : null}
             </section>

@@ -29,6 +29,77 @@ const leadSchema = z.object({
 
 const leadsResponseSchema = z.object({ leads: z.array(leadSchema) });
 const leadResponseSchema = z.object({ lead: leadSchema });
+
+/**
+ * Stable machine-readable code for a confirmed duplicate lead number.
+ *
+ * A duplicate is confirmed when another lead in the workspace holds exactly
+ * the same subscriber number.
+ */
+export const WHATSAPP_LEAD_DUPLICATE_NUMBER_CODE =
+  "WHATSAPP_LEAD_DUPLICATE_NUMBER";
+
+/**
+ * Stable machine-readable code for a possible duplicate that could not be
+ * resolved.
+ *
+ * Another lead stores the number in a national format whose country is not
+ * recorded, so the API cannot confirm whether it is the same customer.
+ */
+export const WHATSAPP_LEAD_NUMBER_UNRESOLVED_CODE =
+  "WHATSAPP_LEAD_NUMBER_UNRESOLVED";
+
+/** The error payload the API returns when a lead cannot be created. */
+export const leadCreationErrorSchema = z.object({
+  error: z.string(),
+  code: z.string().optional(),
+  conflictingLeadId: z.uuid().optional(),
+});
+
+export type LeadCreationErrorPayload = z.infer<typeof leadCreationErrorSchema>;
+
+/**
+ * An error returned by the lead API.
+ *
+ * The stable code travels with the error so the UI can react to the specific
+ * situation instead of showing one generic message.
+ */
+export class LeadApiError extends Error {
+  readonly code: string | undefined;
+
+  readonly conflictingLeadId: string | undefined;
+
+  constructor(
+    message: string,
+    options: Readonly<{
+      code?: string;
+      conflictingLeadId?: string;
+    }> = {},
+  ) {
+    super(message);
+    this.name = "LeadApiError";
+    this.code = options.code;
+    this.conflictingLeadId = options.conflictingLeadId;
+  }
+}
+
+/**
+ * Reads a lead creation error body.
+ *
+ * Returns null for a body that is not an error payload, so a caller can fall
+ * back to its own message.
+ */
+export function parseLeadCreationError(
+  data: unknown,
+): LeadCreationErrorPayload | null {
+  const parsed = leadCreationErrorSchema.safeParse(data);
+
+  if (!parsed.success) {
+    return null;
+  }
+
+  return parsed.data;
+}
 export const REPLY_DRAFT_INTENTS = [
   "availability",
   "pricing",

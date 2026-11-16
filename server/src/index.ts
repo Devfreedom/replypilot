@@ -1,18 +1,26 @@
 import { createApp } from "./app.js";
 import { loadConfig } from "./config.js";
 import { createPool } from "./db/pool.js";
+import { assertRequiredMigrations } from "./db/schema.js";
 
 const SHUTDOWN_TIMEOUT_MS = 10_000;
 
-function start(): void {
+async function start(): Promise<void> {
   const config = loadConfig();
   const pool = createPool(config.databaseUrl);
+
+  // The running code depends on a specific schema. Starting against a
+  // database that has not applied it would fail later, inside a request, with
+  // an opaque database error.
+  await assertRequiredMigrations(pool);
+
   const app = createApp({
     pool,
     auth: {
       secret: config.betterAuthSecret,
       baseURL: config.betterAuthUrl,
       trustedOrigins: config.trustedOrigins,
+      trustedProxyCidrs: config.trustedProxyCidrs,
     },
     whatsapp: config.whatsapp,
     embeddedSignup: config.embeddedSignup,
@@ -90,7 +98,7 @@ function start(): void {
 }
 
 try {
-  start();
+  await start();
 } catch (error) {
   console.error(
     "Failed to start ReplyPilot API:",

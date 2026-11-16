@@ -33,6 +33,7 @@ export type AppAuthOptions = Readonly<{
   baseURL?: string;
   trustedOrigins?: string[];
   rateLimit?: AuthRateLimitOptions;
+  trustedProxyCidrs?: string[];
 }>;
 
 export function createApp({
@@ -59,9 +60,33 @@ export function createApp({
     baseURL: authOptions.baseURL,
     trustedOrigins: authOptions.trustedOrigins ?? [],
     rateLimit: authOptions.rateLimit,
+    trustedProxyCidrs: authOptions.trustedProxyCidrs,
   });
 
   app.disable("x-powered-by");
+
+  app.set("trust proxy", 1);
+
+  app.use((request: Request, response: Response, next: NextFunction) => {
+    response.setHeader("X-Content-Type-Options", "nosniff");
+    response.setHeader("X-Frame-Options", "DENY");
+    response.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
+    response.setHeader(
+      "Permissions-Policy",
+      "camera=(), microphone=(), geolocation=()",
+    );
+
+    // HSTS is only sent over HTTPS. Sending it on a plain HTTP response
+    // would pin a browser to HTTPS for a host that does not serve it.
+    if (request.secure) {
+      response.setHeader(
+        "Strict-Transport-Security",
+        "max-age=31536000; includeSubDomains",
+      );
+    }
+
+    next();
+  });
 
   // Better Auth must receive the raw request before a JSON body parser.
   // Browser requests reach this handler through the Next.js /api rewrite.
@@ -135,6 +160,19 @@ export function createApp({
         error.status === 400
       ) {
         response.status(400).json({ error: "Invalid JSON body" });
+        return;
+      }
+
+      // A body that exceeds the limit is rejected before it is parsed. It is
+      // an expected condition, not an internal failure, so it must not be
+      // logged as one.
+      if (
+        typeof error === "object" &&
+        error !== null &&
+        "type" in error &&
+        error.type === "entity.too.large"
+      ) {
+        response.status(413).json({ error: "Payload too large" });
         return;
       }
 

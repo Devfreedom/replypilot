@@ -227,6 +227,7 @@ export function createWhatsAppConnectionsRouter({
           workspaceId: workspace.id,
           connectionId: connectionId.data,
           metaClient: metaClient(signupConfig),
+          environment: process.env,
         });
 
         response.status(200).json(result);

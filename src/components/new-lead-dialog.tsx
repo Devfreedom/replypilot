@@ -1,12 +1,25 @@
 "use client";
 
 import { useEffect, useRef, useState, type FormEvent } from "react";
+import { PHONE_COUNTRY_OPTIONS } from "@/lib/countries";
+import {
+  LeadApiError,
+  WHATSAPP_LEAD_NUMBER_UNRESOLVED_CODE,
+} from "@/lib/leads";
+import { SearchableCombobox } from "./searchable-combobox";
 
 export type NewLeadValues = {
   name: string;
   service: string;
   message: string;
   whatsappNumber: string;
+  whatsappCountryCode: string;
+  /**
+   * Confirms that the WhatsApp number belongs to a different customer when
+   * another lead may already hold it in a national format whose country is
+   * not recorded.
+   */
+  confirmUnresolvedNumber: boolean;
   nextFollowUpAt: string;
 };
 
@@ -58,10 +71,13 @@ export function NewLeadDialog({
     service: "",
     message: "",
     whatsappNumber: "",
+    whatsappCountryCode: "",
+    confirmUnresolvedNumber: false,
     nextFollowUpAt: "",
   });
   const [errors, setErrors] = useState<FieldErrors>({});
   const [submitError, setSubmitError] = useState<string | null>(null);
+  const [unresolvedNumber, setUnresolvedNumber] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   useEffect(() => {
@@ -70,9 +86,18 @@ export function NewLeadDialog({
     if (!dialog) return;
 
     if (open && !dialog.open) {
-      setValues({ name: "", service: "", message: "", whatsappNumber: "", nextFollowUpAt: "" });
+      setValues({
+        name: "",
+        service: "",
+        message: "",
+        whatsappNumber: "",
+        whatsappCountryCode: "",
+        confirmUnresolvedNumber: false,
+        nextFollowUpAt: "",
+      });
       setErrors({});
       setSubmitError(null);
+      setUnresolvedNumber(false);
       dialog.showModal();
     } else if (!open && dialog.open) {
       dialog.close();
@@ -107,6 +132,19 @@ export function NewLeadDialog({
         "Enter 5 to 32 digits, including the country code.";
     }
 
+    // The country is explicit whenever a number is given, so the stored
+    // number always carries its calling code and never depends on a guess.
+    // A number written in international format already states its country, so
+    // it does not need a selection.
+    const isInternational =
+      values.whatsappNumber.trim().startsWith("+") ||
+      !values.whatsappNumber.trim();
+
+    if (!isInternational && !values.whatsappCountryCode.trim()) {
+      nextErrors.whatsappCountryCode =
+        "Choose the country for this WhatsApp number.";
+    }
+
     if (Object.values(nextErrors).some(Boolean)) {
       setErrors(nextErrors);
       return;
@@ -121,10 +159,28 @@ export function NewLeadDialog({
         service: values.service.trim(),
         message: values.message.trim(),
         whatsappNumber: values.whatsappNumber.trim(),
+        whatsappCountryCode: values.whatsappCountryCode.trim(),
+        confirmUnresolvedNumber: values.confirmUnresolvedNumber,
         nextFollowUpAt: values.nextFollowUpAt,
       });
       dialogRef.current?.close();
     } catch (error) {
+      // A number that another lead may already hold in a national format
+      // cannot be resolved by the API. The owner is asked to confirm that it
+      // is a different customer instead of being told a duplicate exists.
+      const unresolved =
+        error instanceof LeadApiError &&
+        error.code === WHATSAPP_LEAD_NUMBER_UNRESOLVED_CODE;
+
+      setUnresolvedNumber(unresolved);
+
+      if (unresolved) {
+        setValues((current) => ({
+          ...current,
+          confirmUnresolvedNumber: false,
+        }));
+      }
+
       setSubmitError(
         error instanceof Error ? error.message : "Unable to save this lead.",
       );
@@ -207,26 +263,41 @@ export function NewLeadDialog({
           />
         </Field>
 
-        <Field
-          id="lead-whatsapp-number"
-          label="WhatsApp number (optional)"
-          error={errors.whatsappNumber}
-          hint="Used only for an exact match with WhatsApp test-inbox senders."
-        >
-          <input
-            id="lead-whatsapp-number"
-            name="whatsappNumber"
-            inputMode="tel"
-            value={values.whatsappNumber}
-            onChange={(event) => setField("whatsappNumber", event.target.value)}
-            aria-invalid={Boolean(errors.whatsappNumber)}
-            aria-describedby={
-              errors.whatsappNumber ? "lead-whatsapp-number-error" : undefined
-            }
-            placeholder="e.g. 2348031234567"
-            className={inputClassName}
+        <div className="grid gap-4 sm:grid-cols-[minmax(0,14rem)_minmax(0,1fr)]">
+          <SearchableCombobox
+            id="lead-whatsapp-country"
+            label="WhatsApp country"
+            value={values.whatsappCountryCode}
+            options={PHONE_COUNTRY_OPTIONS}
+            onChange={(value) => setField("whatsappCountryCode", value)}
+            placeholder="Select a country"
+            error={errors.whatsappCountryCode}
+            disabled={isSubmitting}
+            allowClear
+            helpText="The country that owns this WhatsApp number. A number written as +234 803 123 4567 already states its country."
           />
-        </Field>
+
+          <Field
+            id="lead-whatsapp-number"
+            label="WhatsApp number (optional)"
+            error={errors.whatsappNumber}
+            hint="Used to match inbound WhatsApp conversations to this lead."
+          >
+            <input
+              id="lead-whatsapp-number"
+              name="whatsappNumber"
+              inputMode="tel"
+              value={values.whatsappNumber}
+              onChange={(event) => setField("whatsappNumber", event.target.value)}
+              aria-invalid={Boolean(errors.whatsappNumber)}
+              aria-describedby={
+                errors.whatsappNumber ? "lead-whatsapp-number-error" : undefined
+              }
+              placeholder="e.g. 08031234567"
+              className={inputClassName}
+            />
+          </Field>
+        </div>
 
         <Field
           id="lead-follow-up"
@@ -254,6 +325,33 @@ export function NewLeadDialog({
           >
             {submitError}
           </p>
+        ) : null}
+
+        {unresolvedNumber ? (
+          <label
+            htmlFor="lead-confirm-unresolved-number"
+            className="flex items-start gap-2 rounded-xl border border-line bg-hushed px-3.5 py-3 text-xs leading-5 text-ink-soft"
+          >
+            <input
+              id="lead-confirm-unresolved-number"
+              name="confirmUnresolvedNumber"
+              type="checkbox"
+              checked={values.confirmUnresolvedNumber}
+              onChange={(event) =>
+                setValues((current) => ({
+                  ...current,
+                  confirmUnresolvedNumber: event.target.checked,
+                }))
+              }
+              disabled={isSubmitting}
+              className="mt-0.5"
+            />
+            <span>
+              This number belongs to a different customer. Check the existing
+              lead before you confirm: ReplyPilot cannot compare the two
+              because the other lead&apos;s number has no country recorded.
+            </span>
+          </label>
         ) : null}
 
         <div className="flex flex-col-reverse gap-3 pt-2 sm:flex-row sm:justify-end">

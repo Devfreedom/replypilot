@@ -75,6 +75,8 @@ openssl rand -base64 32
 
 Put the generated value only in your local `.env` (or your deployment's secret store), then set `BETTER_AUTH_URL` to the public frontend origin. Add any additional production frontend origins to `BETTER_AUTH_TRUSTED_ORIGINS`; do not add wildcard or attacker-controlled origins.
 
+When the API is reached through a reverse proxy that appends to the client IP header, list that proxy in `BETTER_AUTH_TRUSTED_PROXY_CIDRS` (comma-separated addresses or CIDR ranges). Better Auth resolves the client IP from the forwarded header chain to key its rate limits, and without this list every client shares one rate-limit bucket per path. Leave it empty when the API is reached directly.
+
 ### Run the API
 
 ```bash

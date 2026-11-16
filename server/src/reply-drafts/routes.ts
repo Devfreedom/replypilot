@@ -8,6 +8,10 @@ import {
 } from "../auth/middleware.js";
 import { queueManualSend } from "../outbound/service.js";
 import {
+  WHATSAPP_CONVERSATION_REQUIRED_CODE,
+  WHATSAPP_CONVERSATION_REQUIRED_MESSAGE,
+} from "../leads/errors.js";
+import {
   replyDraftIdSchema,
   sendReplyDraftSchema,
 } from "./schemas.js";
@@ -78,8 +82,8 @@ export function createReplyDraftsRouter({
 
     if (result.kind === "conversation-required") {
       response.status(409).json({
-        error:
-          "This lead has no active WhatsApp conversation. Link a conversation before sending.",
+        error: WHATSAPP_CONVERSATION_REQUIRED_MESSAGE,
+        code: WHATSAPP_CONVERSATION_REQUIRED_CODE,
       });
       return;
     }

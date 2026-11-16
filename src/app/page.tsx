@@ -20,8 +20,10 @@ import {
   formatFollowUpDate,
   isFollowUpDue,
   parseDashboardView,
+  parseLeadCreationError,
   parseLeadResponse,
   parseLeadsResponse,
+  LeadApiError,
   type Lead,
   type LeadFilter,
   type LeadStatus,
@@ -360,6 +362,8 @@ function Dashboard() {
         service: values.service,
         lastMessage: values.message,
         whatsappNumber: values.whatsappNumber || null,
+        whatsappCountryCode: values.whatsappCountryCode || null,
+        confirmUnresolvedNumber: values.confirmUnresolvedNumber,
         channel: "Manual",
         status: "New",
         nextFollowUpAt,
@@ -368,7 +372,15 @@ function Dashboard() {
     const data = await readJson(response);
 
     if (!response.ok) {
-      throw new Error(errorMessage(data, "Unable to create this lead."));
+      const failure = parseLeadCreationError(data);
+
+      throw new LeadApiError(
+        failure?.error ?? errorMessage(data, "Unable to create this lead."),
+        {
+          code: failure?.code,
+          conflictingLeadId: failure?.conflictingLeadId,
+        },
+      );
     }
 
     const newLead = parseLeadResponse(data);

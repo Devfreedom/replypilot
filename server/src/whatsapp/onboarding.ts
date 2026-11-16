@@ -57,7 +57,7 @@ export type OnboardingErrorCode =
   | "missing_permissions"
   | "waba_not_accessible"
   | "phone_not_in_waba"
-  | "duplicate_phone"
+  | "phone_number_unavailable"
   | "meta_unavailable"
   | "verification_failed"
   | "credentials_unavailable"
@@ -74,7 +74,7 @@ const ERROR_STATUS: Record<OnboardingErrorCode, number> = {
   missing_permissions: 403,
   waba_not_accessible: 403,
   phone_not_in_waba: 422,
-  duplicate_phone: 409,
+  phone_number_unavailable: 409,
   meta_unavailable: 502,
   verification_failed: 422,
   credentials_unavailable: 409,
@@ -579,9 +579,12 @@ export async function completeWhatsAppOnboarding(
     const existingRow = existing.rows[0];
 
     if (existingRow && existingRow.workspace_id !== input.workspaceId) {
+      // The response must not reveal that another workspace holds this number.
+      // The conflict is reported in neutral terms so no cross-tenant state is
+      // disclosed.
       throw new OnboardingError(
-        "duplicate_phone",
-        "This WhatsApp phone number is already connected to another workspace.",
+        "phone_number_unavailable",
+        "This WhatsApp phone number is unavailable for connection.",
       );
     }
 
@@ -645,8 +648,8 @@ export async function completeWhatsAppOnboarding(
     const onboardingError =
       error instanceof WhatsAppConnectionConflictError
         ? new OnboardingError(
-            "duplicate_phone",
-            "This WhatsApp phone number is already connected to another workspace.",
+            "phone_number_unavailable",
+            "This WhatsApp phone number is unavailable for connection.",
           )
         : metaFailure(error);
 
@@ -667,6 +670,14 @@ export type VerifyConnectionInput = Readonly<{
   connectionId: string;
   metaClient?: MetaGraphClient;
   now?: Date;
+  /**
+   * The environment the stored credentials are decrypted with.
+   *
+   * Every other credential path takes the environment explicitly, so a caller
+   * can supply the key material it expects instead of the ambient process
+   * environment.
+   */
+  environment?: NodeJS.ProcessEnv;
 }>;
 
 export type VerifyConnectionResult = Readonly<{
@@ -742,7 +753,10 @@ export async function verifyWhatsAppConnection(
   let accessToken: string;
 
   try {
-    accessToken = decryptWhatsAppToken(stored.encryptedToken);
+    accessToken = decryptWhatsAppToken(
+      stored.encryptedToken,
+      input.environment ?? process.env,
+    );
   } catch {
     return recordFailure(
       "Stored credentials could not be decrypted. Connect the number again.",

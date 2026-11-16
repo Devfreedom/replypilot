@@ -55,6 +55,7 @@ const environmentSchema = z
       })
       .optional(),
     BETTER_AUTH_TRUSTED_ORIGINS: z.string().optional(),
+    BETTER_AUTH_TRUSTED_PROXY_CIDRS: z.string().optional(),
   })
   .superRefine((value, context) => {
     if (value.NODE_ENV === "production" && !value.BETTER_AUTH_URL) {
@@ -85,6 +86,7 @@ export type ServerConfig = Readonly<{
   betterAuthSecret: string;
   betterAuthUrl: string;
   trustedOrigins: string[];
+  trustedProxyCidrs: string[];
   whatsapp: WhatsAppIntegrationConfig | null;
   embeddedSignup: EmbeddedSignupConfig | null;
   onboardingRateLimit: OnboardingRateLimitConfig;
@@ -108,6 +110,23 @@ function parseTrustedOrigins(
   }
 
   return [...new Set([fallback, ...configured])];
+}
+
+/**
+ * Parses the reverse proxies that are allowed to set the client IP header.
+ *
+ * Better Auth resolves the client IP from the forwarded header itself. A proxy
+ * that appends to the header produces a chain, and the chain can only be
+ * resolved when the trusted proxies are known. Without this list every client
+ * shares a single rate-limit bucket per path.
+ */
+function parseTrustedProxyCidrs(value: string | undefined): string[] {
+  const configured = (value ?? "")
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+
+  return [...new Set(configured)];
 }
 
 export function loadConfig(
@@ -154,6 +173,9 @@ export function loadConfig(
     betterAuthSecret: result.data.BETTER_AUTH_SECRET,
     betterAuthUrl,
     trustedOrigins: [...new Set(trustedOrigins)],
+    trustedProxyCidrs: parseTrustedProxyCidrs(
+      result.data.BETTER_AUTH_TRUSTED_PROXY_CIDRS,
+    ),
     whatsapp: loadWhatsAppConfig(environment),
     embeddedSignup,
     onboardingRateLimit,
