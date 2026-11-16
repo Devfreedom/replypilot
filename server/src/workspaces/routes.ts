@@ -1,5 +1,6 @@
 import { Router } from "express";
 import type { Pool } from "pg";
+import type { ReplyDraftProviderKind } from "../ai/reply-draft.js";
 import type { AuthInstance } from "../auth/config.js";
 import {
   createRequireWorkspace,
@@ -9,9 +10,11 @@ import {
 export function createWorkspaceRouter({
   pool,
   auth,
+  replyDraftProvider = "mock",
 }: {
   pool: Pool;
   auth: AuthInstance;
+  replyDraftProvider?: ReplyDraftProviderKind;
 }): Router {
   const router = Router();
   const requireMember = createRequireWorkspace({
@@ -27,6 +30,7 @@ export function createWorkspaceRouter({
       user,
       workspace,
       role: membership.role,
+      replyDraftProvider,
     });
   });
 

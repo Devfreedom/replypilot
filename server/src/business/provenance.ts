@@ -53,7 +53,9 @@ function formatVisibleTerm(term: string): string {
 }
 
 function sourceReason(lead: Lead, searchableText: string): string {
-  const enquiryTerms = searchTerms(`${lead.service} ${lead.lastMessage}`);
+  const enquiryTerms = searchTerms(
+    `${lead.service ?? ""} ${lead.lastMessage ?? ""}`,
+  );
   const sharedTerms = [...searchTerms(searchableText)]
     .filter((term) => enquiryTerms.has(term))
     .sort();
@@ -79,9 +81,10 @@ function sourceReason(lead: Lead, searchableText: string): string {
 
 function catalogueContent(entry: CatalogueEntry): string {
   const details: string[] = [];
+  const description = (entry.description ?? "").trim();
 
-  if (entry.description.trim()) {
-    details.push(entry.description.trim());
+  if (description) {
+    details.push(description);
   }
 
   if (entry.priceMinor === null) {
@@ -92,8 +95,10 @@ function catalogueContent(entry: CatalogueEntry): string {
     );
   }
 
-  if (entry.availabilityNotes?.trim()) {
-    details.push(`Availability: ${entry.availabilityNotes.trim()}`);
+  const availabilityNotes = (entry.availabilityNotes ?? "").trim();
+
+  if (availabilityNotes) {
+    details.push(`Availability: ${availabilityNotes}`);
   }
 
   return details.join("\n");
@@ -103,12 +108,15 @@ export function buildCatalogueReplySource(
   entry: CatalogueEntry,
   lead: Lead,
 ): ReplyDraftSource {
+  const name = entry.name ?? "";
+  const description = entry.description ?? "";
+
   return {
     id: entry.id,
     type: "catalogue",
-    title: entry.name,
+    title: name,
     content: catalogueContent(entry),
-    reason: sourceReason(lead, `${entry.name} ${entry.description}`),
+    reason: sourceReason(lead, `${name} ${description}`),
     priceMinor: entry.priceMinor,
     currencyCode: entry.currencyCode,
   };
@@ -118,12 +126,15 @@ export function buildKnowledgeReplySource(
   entry: KnowledgeEntry,
   lead: Lead,
 ): ReplyDraftSource {
+  const title = entry.title ?? "";
+  const answer = (entry.answer ?? "").trim();
+
   return {
     id: entry.id,
     type: entry.entryType,
-    title: entry.title,
-    content: entry.answer.trim(),
-    reason: sourceReason(lead, `${entry.title} ${entry.answer}`),
+    title,
+    content: answer,
+    reason: sourceReason(lead, `${title} ${answer}`),
     priceMinor: null,
     currencyCode: null,
   };

@@ -25,6 +25,7 @@ export const REPLY_DRAFT_INTENTS = [
 ] as const;
 
 export const REPLY_DRAFT_PROVIDERS = ["mock", "gemini"] as const;
+export type ReplyDraftProviderKind = (typeof REPLY_DRAFT_PROVIDERS)[number];
 
 export const replyDraftSchema = z
   .object({
@@ -45,6 +46,7 @@ export const replyDraftSchema = z
 export type ReplyDraft = z.infer<typeof replyDraftSchema>;
 
 export interface ReplyDraftProvider {
+  readonly provider?: ReplyDraftProviderKind;
   /**
    * Generates a grounded reply draft using approved business catalogue and
    * knowledge entries.
@@ -53,8 +55,25 @@ export interface ReplyDraftProvider {
 }
 
 const MAX_REPLY_LENGTH = 1_900;
-const DEFAULT_GEMINI_MODEL = "gemini-2.5-flash";
-const DEFAULT_GEMINI_TIMEOUT_MS = 10_000;
+const DEFAULT_GEMINI_MODEL = "gemini-3.5-flash";
+const DEFAULT_GEMINI_TIMEOUT_MS = 30_000;
+
+function safeTrim(value: string | null | undefined): string {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+export function resolveReplyDraftProviderKind(
+  provider?: ReplyDraftProvider,
+): ReplyDraftProviderKind {
+  if (
+    provider?.provider === "gemini" ||
+    provider instanceof GeminiReplyDraftProvider
+  ) {
+    return "gemini";
+  }
+
+  return "mock";
+}
 
 export class ReplyDraftProviderError extends Error {
   constructor(message: string) {
@@ -63,8 +82,8 @@ export class ReplyDraftProviderError extends Error {
   }
 }
 
-function getIntent(message: string): ReplyDraft["intent"] {
-  const normalized = message.toLowerCase();
+function getIntent(message: string | null | undefined): ReplyDraft["intent"] {
+  const normalized = safeTrim(message).toLowerCase();
 
   if (/available|availability|free|open/.test(normalized)) {
     return "availability";
@@ -101,30 +120,35 @@ function baseMissingInformationFor(intent: ReplyDraft["intent"]): string[] {
 }
 
 function replyFor(intent: ReplyDraft["intent"], lead: Lead): string {
-  const name = lead.name.trim();
+  const name = safeTrim(lead.name) || "there";
+  const service = safeTrim(lead.service) || "your enquiry";
 
   switch (intent) {
     case "availability":
-      return `Hi ${name}, thanks for reaching out about ${lead.service}. Could you please share your preferred date, time, and location so we can understand your enquiry better?`;
+      return `Hi ${name}, thanks for reaching out about ${service}. Could you please share your preferred date, time, and location so we can understand your enquiry better?`;
     case "pricing":
-      return `Hi ${name}, thanks for asking about ${lead.service}. Could you share the event date, location, and what you need so we can provide relevant information?`;
+      return `Hi ${name}, thanks for asking about ${service}. Could you share the event date, location, and what you need so we can provide relevant information?`;
     case "booking":
-      return `Hi ${name}, thanks for your interest in ${lead.service}. Could you share your preferred date, time, and location so we can discuss your enquiry?`;
+      return `Hi ${name}, thanks for your interest in ${service}. Could you share your preferred date, time, and location so we can discuss your enquiry?`;
     case "service-details":
-      return `Hi ${name}, thanks for reaching out about ${lead.service}. Could you tell us more about what you need and your preferred date?`;
+      return `Hi ${name}, thanks for reaching out about ${service}. Could you tell us more about what you need and your preferred date?`;
     case "general-enquiry":
-      return `Hi ${name}, thanks for your message about ${lead.service}. Could you share a little more about what you need, along with your preferred date and location?`;
+      return `Hi ${name}, thanks for your message about ${service}. Could you share a little more about what you need, along with your preferred date and location?`;
   }
 }
 
 function summaryFor(lead: Lead): string {
-  const summary = `Enquiry from ${lead.name} about ${lead.service}: ${lead.lastMessage}`;
+  const name = safeTrim(lead.name) || "Customer";
+  const service = safeTrim(lead.service) || "general enquiry";
+  const lastMessage = safeTrim(lead.lastMessage);
+  const summary = `Enquiry from ${name} about ${service}: ${lastMessage}`;
 
   return summary.length <= 500 ? summary : `${summary.slice(0, 497)}...`;
 }
 
 function catalogueFact(entry: CatalogueEntry): string {
-  const name = `Our approved catalogue lists ${entry.name}`;
+  const entryName = safeTrim(entry.name) || "Service";
+  const name = `Our approved catalogue lists ${entryName}`;
 
   if (entry.priceMinor === null) {
     return `${name}, but no price is set, so the price needs confirmation.`;
@@ -138,13 +162,14 @@ function catalogueFact(entry: CatalogueEntry): string {
 
 function knowledgeFact(entry: KnowledgeEntry): string {
   const label = entry.entryType === "faq" ? "FAQ" : "policy";
-  const answer = entry.answer.replace(/\s+/g, " ").trim();
+  const title = safeTrim(entry.title) || "Approved entry";
+  const answer = safeTrim(entry.answer).replace(/\s+/g, " ");
 
   if (answer.length > 700) {
-    return `Approved ${label} — ${entry.title}: the full approved text needs confirmation before it is quoted.`;
+    return `Approved ${label} — ${title}: the full approved text needs confirmation before it is quoted.`;
   }
 
-  return `Approved ${label} — ${entry.title}: ${answer}`;
+  return `Approved ${label} — ${title}: ${answer}`;
 }
 
 type GroundedFact = {
@@ -158,13 +183,16 @@ function groundedFacts(lead: Lead, context?: ReplyContext): GroundedFact[] {
     return [];
   }
 
+  const catalogue = context.catalogue ?? [];
+  const knowledge = context.knowledge ?? [];
+
   return [
-    ...context.catalogue.map((entry, index) => ({
+    ...catalogue.map((entry, index) => ({
       id: `cat:${index}`,
       text: catalogueFact(entry),
       source: buildCatalogueReplySource(entry, lead),
     })),
-    ...context.knowledge.map((entry, index) => ({
+    ...knowledge.map((entry, index) => ({
       id: `know:${index}`,
       text: knowledgeFact(entry),
       source: buildKnowledgeReplySource(entry, lead),
@@ -195,8 +223,8 @@ function appendFacts(
   return { draftReply: result, sources };
 }
 
-function policyTopic(message: string): string | null {
-  const normalized = message.toLowerCase();
+function policyTopic(message: string | null | undefined): string | null {
+  const normalized = safeTrim(message).toLowerCase();
 
   if (/refund/.test(normalized)) return "refund";
   if (/cancel/.test(normalized)) return "cancellation";
@@ -234,6 +262,8 @@ function missingInformationFor(
 }
 
 export class MockReplyDraftProvider implements ReplyDraftProvider {
+  readonly provider = "mock" as const;
+
   async draftReply(lead: Lead, context?: ReplyContext): Promise<ReplyDraft> {
     const intent = getIntent(lead.lastMessage);
     const grounded = appendFacts(
@@ -324,15 +354,19 @@ function buildUserPrompt(lead: Lead, facts: GroundedFact[]): string {
       ? "NONE (No approved catalogue prices or knowledge entries matched this enquiry.)"
       : facts.map((fact) => `[${fact.id}] ${escapeXmlTag(fact.text)}`).join("\n");
 
+  const customerName = safeTrim(lead.name) || "Customer";
+  const requestedService = safeTrim(lead.service) || "General enquiry";
+  const customerMessage = safeTrim(lead.lastMessage) || "(No message text)";
+
   return [
     "<approved_business_facts>",
     factsBlock,
     "</approved_business_facts>",
     "",
     "<untrusted_customer_enquiry>",
-    `Customer Name: ${escapeXmlTag(lead.name.trim())}`,
-    `Requested Service: ${escapeXmlTag(lead.service.trim())}`,
-    `Customer Message: ${escapeXmlTag(lead.lastMessage.trim())}`,
+    `Customer Name: ${escapeXmlTag(customerName)}`,
+    `Requested Service: ${escapeXmlTag(requestedService)}`,
+    `Customer Message: ${escapeXmlTag(customerMessage)}`,
     "</untrusted_customer_enquiry>",
   ].join("\n");
 }
@@ -373,6 +407,7 @@ export type GeminiReplyDraftProviderOptions = Readonly<{
 }>;
 
 export class GeminiReplyDraftProvider implements ReplyDraftProvider {
+  readonly provider = "gemini" as const;
   readonly #apiKey: string;
   readonly #model: string;
   readonly #timeoutMs: number;
@@ -390,19 +425,13 @@ export class GeminiReplyDraftProvider implements ReplyDraftProvider {
     this.#fetch = options.fetchImplementation ?? globalThis.fetch;
   }
 
-  async draftReply(lead: Lead, context?: ReplyContext): Promise<ReplyDraft> {
-    const facts = groundedFacts(lead, context);
-    const factMap = new Map<string, GroundedFact>(
-      facts.map((fact) => [fact.id, fact]),
-    );
-
+  async #requestModel(model: string, userPrompt: string): Promise<Response> {
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(
-      this.#model,
+      model,
     )}:generateContent`;
 
-    let response: Response;
     try {
-      response = await this.#fetch(url, {
+      return await this.#fetch(url, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -415,7 +444,7 @@ export class GeminiReplyDraftProvider implements ReplyDraftProvider {
           contents: [
             {
               role: "user",
-              parts: [{ text: buildUserPrompt(lead, facts) }],
+              parts: [{ text: userPrompt }],
             },
           ],
           generationConfig: {
@@ -427,12 +456,49 @@ export class GeminiReplyDraftProvider implements ReplyDraftProvider {
         signal: AbortSignal.timeout(this.#timeoutMs),
       });
     } catch (error) {
+      const causeMessage =
+        error instanceof Error && error.cause instanceof Error
+          ? ` (${error.cause.message})`
+          : "";
       const rawMessage =
-        error instanceof Error ? error.message : "unknown network error";
+        error instanceof Error
+          ? `${error.message}${causeMessage}`
+          : "unknown network error";
       const safeMessage = rawMessage.split(this.#apiKey).join("[REDACTED]");
       throw new ReplyDraftProviderError(
         `Gemini API request failed: ${safeMessage}`,
       );
+    }
+  }
+
+  async draftReply(lead: Lead, context?: ReplyContext): Promise<ReplyDraft> {
+    const facts = groundedFacts(lead, context);
+    const factMap = new Map<string, GroundedFact>(
+      facts.map((fact) => [fact.id, fact]),
+    );
+    const userPrompt = buildUserPrompt(lead, facts);
+
+    let response = await this.#requestModel(this.#model, userPrompt);
+
+    // If a configured model (such as retired gemini-2.5-flash) returns 404
+    // because Google retired it for new users, retry once with the current
+    // default Flash model rather than failing draft generation with HTTP 500.
+    if (response.status === 404 && this.#model !== DEFAULT_GEMINI_MODEL) {
+      const errorPayload = (await response
+        .clone()
+        .json()
+        .catch(() => null)) as { error?: { message?: unknown } } | null;
+      const upstreamMessage =
+        typeof errorPayload?.error?.message === "string"
+          ? errorPayload.error.message
+          : "";
+
+      if (/no longer available|deprecated|retired/i.test(upstreamMessage)) {
+        console.warn(
+          `Configured Gemini model "${this.#model}" is unavailable (HTTP 404); falling back to "${DEFAULT_GEMINI_MODEL}".`,
+        );
+        response = await this.#requestModel(DEFAULT_GEMINI_MODEL, userPrompt);
+      }
     }
 
     if (!response.ok) {

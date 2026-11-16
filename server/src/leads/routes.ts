@@ -84,6 +84,13 @@ const listLinkableConversationsQuerySchema = z
   })
   .strict();
 
+function sanitizeDraftError(error: unknown): string {
+  const raw = error instanceof Error ? error.message : "Unknown draft error";
+  const apiKey = process.env.GEMINI_API_KEY?.trim();
+  const redacted = apiKey ? raw.split(apiKey).join("[REDACTED]") : raw;
+  return redacted.replace(/AIza[0-9A-Za-z_-]{16,}/g, "[REDACTED]");
+}
+
 function sendValidationError(
   response: Response,
   error: ZodError,
@@ -217,7 +224,8 @@ export function createLeadsRouter({
         replyDraftProvider,
       );
       response.status(200).json(legacyReplyDraft(draft));
-    } catch {
+    } catch (error) {
+      console.error("Failed to generate reply draft:", sanitizeDraftError(error));
       response.status(500).json({ error: "Internal server error" });
     }
   });
@@ -420,7 +428,11 @@ export function createLeadsRouter({
           lead,
           replyDraftProvider,
         );
-      } catch {
+      } catch (error) {
+        console.error(
+          "Failed to generate saved reply draft:",
+          sanitizeDraftError(error),
+        );
         response.status(500).json({ error: "Internal server error" });
         return;
       }

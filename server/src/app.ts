@@ -6,7 +6,10 @@ import express, {
   type Response,
 } from "express";
 import type { Pool } from "pg";
-import type { ReplyDraftProvider } from "./ai/reply-draft.js";
+import {
+  resolveReplyDraftProviderKind,
+  type ReplyDraftProvider,
+} from "./ai/reply-draft.js";
 import {
   createAuth,
   type AuthRateLimitOptions,
@@ -214,7 +217,11 @@ export function createApp({
 
   app.use(
     "/api/workspace",
-    createWorkspaceRouter({ pool, auth }),
+    createWorkspaceRouter({
+      pool,
+      auth,
+      replyDraftProvider: resolveReplyDraftProviderKind(replyDraftProvider),
+    }),
   );
   app.use(
     "/api/leads",

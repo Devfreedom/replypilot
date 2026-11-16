@@ -7,6 +7,7 @@ import { after, before, beforeEach, test } from "node:test";
 import { join } from "node:path";
 import { Pool } from "pg";
 import {
+  GeminiReplyDraftProvider,
   MockReplyDraftProvider,
   formatMinorUnits,
   type ReplyDraftProvider,
@@ -15337,4 +15338,92 @@ test("M8 loadEmbeddedSignupConfig reports configured: false when credential encr
   } finally {
     await stopServer(app.server);
   }
+});
+
+test("GET /api/workspace exposes active replyDraftProvider and draft routes log sanitized errors on 500", async () => {
+  const defaultWorkspaceResponse = await fetch(`${baseUrl}/api/workspace`);
+  assert.equal(defaultWorkspaceResponse.status, 200);
+  const defaultWorkspacePayload = await readJson<{
+    replyDraftProvider?: string;
+  }>(defaultWorkspaceResponse);
+  assert.equal(defaultWorkspacePayload.replyDraftProvider, "mock");
+
+  const fakeGeminiKey = "AIzaSyTestFakeKeyShouldBeRedactedInLogs1234";
+  const previousGeminiKey = process.env.GEMINI_API_KEY;
+  process.env.GEMINI_API_KEY = fakeGeminiKey;
+
+  const failingGeminiProvider = new GeminiReplyDraftProvider({
+    apiKey: fakeGeminiKey,
+    fetchImplementation: async () => {
+      throw new Error(`network issue mentioning ${fakeGeminiKey}`);
+    },
+  });
+
+  const geminiApp = await startServer(pool, failingGeminiProvider);
+  const errorLogs: string[] = [];
+  const originalError = console.error;
+  console.error = (...args: unknown[]) => {
+    errorLogs.push(args.map((arg) => String(arg)).join(" "));
+  };
+
+  try {
+    const geminiWorkspaceResponse = await nativeFetch(
+      `${geminiApp.baseUrl}/api/workspace`,
+      {
+        headers: {
+          cookie: requireSession().cookie,
+          "x-forwarded-for": TEST_CLIENT_IP,
+        },
+      },
+    );
+    assert.equal(geminiWorkspaceResponse.status, 200);
+    const geminiWorkspacePayload = await readJson<{
+      replyDraftProvider?: string;
+    }>(geminiWorkspaceResponse);
+    assert.equal(geminiWorkspacePayload.replyDraftProvider, "gemini");
+
+    const lead = await createDraftLead();
+    const draftReplyRes = await nativeFetch(
+      `${geminiApp.baseUrl}/api/leads/${lead.id}/draft-reply`,
+      {
+        method: "POST",
+        headers: {
+          cookie: requireSession().cookie,
+          "x-forwarded-for": TEST_CLIENT_IP,
+        },
+      },
+    );
+    assert.equal(draftReplyRes.status, 500);
+
+    const savedDraftRes = await nativeFetch(
+      `${geminiApp.baseUrl}/api/leads/${lead.id}/reply-drafts`,
+      {
+        method: "POST",
+        headers: {
+          cookie: requireSession().cookie,
+          "content-type": "application/json",
+          "x-forwarded-for": TEST_CLIENT_IP,
+        },
+        body: JSON.stringify({}),
+      },
+    );
+    assert.equal(savedDraftRes.status, 500);
+  } finally {
+    console.error = originalError;
+    if (previousGeminiKey === undefined) {
+      delete process.env.GEMINI_API_KEY;
+    } else {
+      process.env.GEMINI_API_KEY = previousGeminiKey;
+    }
+    await stopServer(geminiApp.server);
+  }
+
+  const joinedLogs = errorLogs.join("\n");
+  assert.match(joinedLogs, /Failed to generate reply draft:/);
+  assert.match(joinedLogs, /Failed to generate saved reply draft:/);
+  assert.equal(
+    joinedLogs.includes(fakeGeminiKey),
+    false,
+    "GEMINI_API_KEY must never appear in console.error logs",
+  );
 });

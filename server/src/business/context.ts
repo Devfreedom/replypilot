@@ -112,19 +112,19 @@ export async function buildReplyContext(
     listKnowledge(pool, workspaceId, true),
   ]);
 
-  const enquiry = `${lead.service} ${lead.lastMessage}`;
+  const enquiry = `${lead.service ?? ""} ${lead.lastMessage ?? ""}`;
 
   return {
     profile,
     catalogue: relevant<CatalogueEntry>(
       catalogue,
       enquiry,
-      (entry) => `${entry.name} ${entry.description}`,
+      (entry) => `${entry.name ?? ""} ${entry.description ?? ""}`,
     ),
     knowledge: relevant<KnowledgeEntry>(
       knowledge,
       enquiry,
-      (entry) => `${entry.title} ${entry.answer}`,
+      (entry) => `${entry.title ?? ""} ${entry.answer ?? ""}`,
     ),
   };
 }

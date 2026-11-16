@@ -5,6 +5,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useAuth } from "./auth-provider";
 import { ThemeSelect } from "./theme";
 import { dashboardViewHref, type View } from "@/lib/leads";
+import { assistantProviderBadgeLabel } from "@/lib/workspace";
 
 export type ShellActiveKey =
   | "dashboard"
@@ -224,6 +225,9 @@ function UserFooter({ onSignOut }: { onSignOut: () => Promise<void> }) {
 }
 
 function AssistantNote({ canManage }: { canManage: boolean }) {
+  const { replyDraftProvider } = useAuth();
+  const isGemini = replyDraftProvider === "gemini";
+
   return (
     <div className="rounded-2xl border border-line bg-hushed p-4">
       <p className="text-sm font-semibold text-ink">Reply drafts</p>
@@ -235,9 +239,11 @@ function AssistantNote({ canManage }: { canManage: boolean }) {
       <span className="mt-3 inline-flex items-center gap-1.5 rounded-full bg-raised px-2.5 py-1 text-xs font-medium text-ink-soft ring-1 ring-line">
         <span
           aria-hidden="true"
-          className="h-1.5 w-1.5 rounded-full bg-ink-faint"
+          className={`h-1.5 w-1.5 rounded-full ${
+            isGemini ? "bg-success" : "bg-ink-faint"
+          }`}
         />
-        Mock provider · no live AI
+        {assistantProviderBadgeLabel(replyDraftProvider)}
       </span>
     </div>
   );

@@ -8,6 +8,7 @@ import {
   GeminiReplyDraftProvider,
   MockReplyDraftProvider,
   ReplyDraftProviderError,
+  resolveReplyDraftProviderKind,
   type ReplyDraftProvider,
 } from "../src/ai/reply-draft.js";
 import {
@@ -800,4 +801,135 @@ test("M14 bounds long keyword-match sourceReason strings to <= 300 chars and cap
   assert.equal(sentFactCount, MAX_SOURCES);
   assert.equal(generated.sources.length, 2);
   assert.ok(generated.sources.every((source) => source.reason.length <= 300));
+});
+
+test("GeminiReplyDraftProvider and MockReplyDraftProvider handle nullish runtime fields without crashing on trim", async () => {
+  const partialLead = {
+    ...makeLead(),
+    name: undefined as unknown as string,
+    service: null as unknown as string,
+    lastMessage: undefined as unknown as string,
+  };
+  const partialContext = makeContext({
+    catalogue: [
+      {
+        ...makeCatalogueEntry(),
+        name: "Event Coverage",
+        description: undefined as unknown as string,
+        availabilityNotes: undefined as unknown as string | null,
+      },
+    ],
+    knowledge: [
+      {
+        ...makeCatalogueEntry(),
+        id: randomUUID(),
+        title: "Deposit Policy",
+        answer: undefined as unknown as string,
+        entryType: "policy",
+      } as unknown as KnowledgeEntry,
+    ],
+  });
+
+  const gemini = new GeminiReplyDraftProvider({
+    apiKey: SAMPLE_API_KEY,
+    fetchImplementation: async (_input, init) => {
+      const body = JSON.parse(String(init?.body)) as {
+        contents: Array<{ parts: Array<{ text: string }> }>;
+      };
+      const prompt = body.contents[0]?.parts[0]?.text ?? "";
+      assert.ok(prompt.includes("Customer Name: Customer"));
+      assert.ok(prompt.includes("Requested Service: General enquiry"));
+      assert.ok(prompt.includes("Customer Message: (No message text)"));
+
+      return geminiSuccessResponse({
+        intent: "general-enquiry",
+        summary: "Customer submitted an enquiry with missing fields.",
+        missingInformation: ["What the customer needs"],
+        draftReply: "Hi there, could you share more details about what you need?",
+        citedFactIds: [],
+      });
+    },
+  });
+
+  const geminiDraft = await gemini.draftReply(partialLead, partialContext);
+  assert.equal(geminiDraft.provider, "gemini");
+  assert.equal(geminiDraft.isDemo, false);
+
+  const mockDraft = await new MockReplyDraftProvider().draftReply(
+    partialLead,
+    partialContext,
+  );
+  assert.equal(mockDraft.provider, "mock");
+  assert.equal(mockDraft.isDemo, true);
+});
+
+test("GeminiReplyDraftProvider falls back cleanly from retired 404 models to default model and fails closed on generic 404", async () => {
+  const calledUrls: string[] = [];
+
+  const fallbackProvider = new GeminiReplyDraftProvider({
+    apiKey: SAMPLE_API_KEY,
+    model: "gemini-2.5-flash",
+    fetchImplementation: async (input) => {
+      const url = typeof input === "string" ? input : input.toString();
+      calledUrls.push(url);
+
+      if (url.includes("/models/gemini-2.5-flash:")) {
+        return new Response(
+          JSON.stringify({
+            error: {
+              code: 404,
+              message:
+                "This model models/gemini-2.5-flash is no longer available to new users.",
+              status: "NOT_FOUND",
+            },
+          }),
+          { status: 404, headers: { "Content-Type": "application/json" } },
+        );
+      }
+
+      return geminiSuccessResponse({
+        intent: "pricing",
+        summary: "Customer asked for wedding photography pricing.",
+        missingInformation: ["Event date"],
+        draftReply:
+          "Hi Adaeze, our package is £1,500.00. Could you share your event date?",
+        citedFactIds: ["cat:0"],
+      });
+    },
+  });
+
+  const draft = await fallbackProvider.draftReply(makeLead(), makeContext());
+  assert.equal(draft.provider, "gemini");
+  assert.equal(calledUrls.length, 2);
+  assert.ok(calledUrls[0]?.includes("/models/gemini-2.5-flash:generateContent"));
+  assert.ok(calledUrls[1]?.includes("/models/gemini-3.5-flash:generateContent"));
+
+  const generic404Provider = new GeminiReplyDraftProvider({
+    apiKey: SAMPLE_API_KEY,
+    fetchImplementation: async () =>
+      new Response(JSON.stringify({ error: { message: "Not found" } }), {
+        status: 404,
+      }),
+  });
+
+  await assert.rejects(
+    () => generic404Provider.draftReply(makeLead(), makeContext()),
+    (error: unknown) =>
+      error instanceof ReplyDraftProviderError &&
+      /HTTP 404/.test(error.message),
+  );
+});
+
+test("resolveReplyDraftProviderKind distinguishes Gemini and mock providers", () => {
+  assert.equal(
+    resolveReplyDraftProviderKind(
+      new GeminiReplyDraftProvider({ apiKey: SAMPLE_API_KEY }),
+    ),
+    "gemini",
+  );
+  assert.equal(
+    resolveReplyDraftProviderKind(new MockReplyDraftProvider()),
+    "mock",
+  );
+  assert.equal(resolveReplyDraftProviderKind(undefined), "mock");
 });
