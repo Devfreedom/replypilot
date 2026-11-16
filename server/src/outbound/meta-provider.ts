@@ -174,19 +174,54 @@ export class MetaWhatsAppCloudProvider implements OutboundMessageProvider {
   ): Promise<OutboundProviderSendResult> {
     const { workspaceId, conversationId, content, recipientPhone } = input;
 
-    // 1. Workspace restriction — always server-side, never from frontend input.
-    if (!isWorkspaceAllowedForMetaSending(this.#config, workspaceId)) {
-      throw new OutboundProviderError(
-        "Outbound send rejected: workspace is not authorised for real Meta sending.",
-      );
-    }
+    let resolvedPhone: string;
 
-    // 2. Resolve recipient phone from input or conversation customer.
-    //    recipientPhone is populated by claimQueuedOutboundMessages; if it is
-    //    null we do a fallback lookup (defensive; normally it should be set).
-    let resolvedPhone = recipientPhone;
+    try {
+      // 1. Workspace restriction — always server-side, never from frontend input.
+      if (!isWorkspaceAllowedForMetaSending(this.#config, workspaceId)) {
+        throw new OutboundProviderError(
+          "Outbound send rejected: workspace is not authorised for real Meta sending.",
+        );
+      }
 
-    if (!resolvedPhone) {
+      // 2. Resolve recipient phone from input or conversation customer.
+      //    recipientPhone is populated by claimQueuedOutboundMessages; if it is
+      //    null we do a fallback lookup (defensive; normally it should be set).
+      let candidatePhone = recipientPhone;
+
+      if (!candidatePhone) {
+        const customer = await resolveConversationCustomer(
+          this.#pool,
+          workspaceId,
+          conversationId,
+        );
+
+        if (!customer) {
+          throw new OutboundProviderError(
+            "Outbound send rejected: conversation not found in workspace.",
+          );
+        }
+
+        candidatePhone = customer.phoneE164;
+      }
+
+      if (!candidatePhone) {
+        throw new OutboundProviderError(
+          "Outbound send rejected: customer has no phone number. Only phone-number customers can receive free-form text messages.",
+        );
+      }
+
+      resolvedPhone = candidatePhone;
+
+      // 3. Recipient allowlist — reject before any HTTP request to Meta.
+      if (!isRecipientAllowlisted(this.#config, resolvedPhone)) {
+        throw new OutboundProviderError(
+          "Outbound send rejected: recipient phone number is not in the configured test allowlist.",
+        );
+      }
+
+      // 4. Customer suppression check.
+      //    Resolve customerId if not already available.
       const customer = await resolveConversationCustomer(
         this.#pool,
         workspaceId,
@@ -195,63 +230,47 @@ export class MetaWhatsAppCloudProvider implements OutboundMessageProvider {
 
       if (!customer) {
         throw new OutboundProviderError(
-          "Outbound send rejected: conversation not found in workspace.",
+          "Outbound send rejected: conversation customer cannot be resolved.",
         );
       }
 
-      resolvedPhone = customer.phoneE164;
-    }
+      if (await isCustomerSuppressed(this.#pool, workspaceId, customer.customerId)) {
+        throw new OutboundProviderError(
+          "Outbound send rejected: customer is suppressed.",
+        );
+      }
 
-    if (!resolvedPhone) {
-      throw new OutboundProviderError(
-        "Outbound send rejected: customer has no phone number. Only phone-number customers can receive free-form text messages.",
+      // 5. Service window check — revalidated immediately before provider request.
+      const windowResult = await checkServiceWindow(
+        this.#pool,
+        workspaceId,
+        customer.customerId,
       );
-    }
 
-    // 3. Recipient allowlist — reject before any HTTP request to Meta.
-    if (!isRecipientAllowlisted(this.#config, resolvedPhone)) {
-      throw new OutboundProviderError(
-        "Outbound send rejected: recipient phone number is not in the configured test allowlist.",
-      );
-    }
+      if (windowResult.kind !== "open") {
+        const reason =
+          windowResult.kind === "expired"
+            ? `24-hour customer service window expired at ${windowResult.expiresAt.toISOString()}`
+            : windowResult.kind === "no-inbound-message"
+              ? "No inbound message found for this customer; the 24-hour service window cannot be determined"
+              : "Customer service window timestamp is invalid or missing";
 
-    // 4. Customer suppression check.
-    //    Resolve customerId if not already available.
-    const customer = await resolveConversationCustomer(
-      this.#pool,
-      workspaceId,
-      conversationId,
-    );
+        throw new OutboundProviderError(
+          `Outbound send rejected: ${reason}. Do not send free-form messages outside the service window.`,
+        );
+      }
+    } catch (error) {
+      if (error instanceof OutboundProviderError) {
+        throw error;
+      }
 
-    if (!customer) {
-      throw new OutboundProviderError(
-        "Outbound send rejected: conversation customer cannot be resolved.",
-      );
-    }
-
-    if (await isCustomerSuppressed(this.#pool, workspaceId, customer.customerId)) {
-      throw new OutboundProviderError(
-        "Outbound send rejected: customer is suppressed.",
-      );
-    }
-
-    // 5. Service window check — revalidated immediately before provider request.
-    const windowResult = await checkServiceWindow(
-      this.#pool,
-      workspaceId,
-      customer.customerId,
-    );
-
-    if (windowResult.kind !== "open") {
       const reason =
-        windowResult.kind === "expired"
-          ? `24-hour customer service window expired at ${windowResult.expiresAt.toISOString()}`
-          : windowResult.kind === "no-inbound-message"
-            ? "No inbound message found for this customer; the 24-hour service window cannot be determined"
-            : "Customer service window timestamp is invalid or missing";
-
+        error instanceof Error ? error.message : "Pre-send validation failed";
       throw new OutboundProviderError(
-        `Outbound send rejected: ${reason}. Do not send free-form messages outside the service window.`,
+        truncateToCodePoints(
+          `Outbound send rejected before provider request: ${reason}`,
+          MAX_PROVIDER_ERROR_LENGTH,
+        ),
       );
     }
 
@@ -306,6 +325,12 @@ export class MetaWhatsAppCloudProvider implements OutboundMessageProvider {
         // 2xx with unparseable body — treat as ambiguous.
         throw new OutboundProviderAmbiguousError(
           "Meta API returned a non-JSON body with a success status (outcome unknown).",
+        );
+      }
+
+      if (response.status >= 500) {
+        throw new OutboundProviderAmbiguousError(
+          `Meta API server error HTTP ${response.status} with a non-JSON body (outcome unknown).`,
         );
       }
 

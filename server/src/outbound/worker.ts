@@ -190,19 +190,38 @@ export async function runOutboundWorkerOnce(
   let skipped = 0;
 
   for (const row of claimed) {
-    if (!(await isOutboundClaimAuthorized(pool, row))) {
-      if (await cancelOutboundClaim(pool, row)) {
-        cancelled += 1;
-      } else {
-        skipped += 1;
-      }
-      continue;
-    }
-
     const retryDelayMs = Math.min(
       baseRetryDelayMs * 2 ** Math.max(0, row.attempts - 1),
       MAX_RETRY_DELAY_MS,
     );
+
+    try {
+      if (!(await isOutboundClaimAuthorized(pool, row))) {
+        if (await cancelOutboundClaim(pool, row)) {
+          cancelled += 1;
+        } else {
+          skipped += 1;
+        }
+        continue;
+      }
+    } catch {
+      const outcome = await failClosedOutbound(
+        pool,
+        row,
+        "Outbound send was not attempted: claim authorization could not be verified.",
+        retryDelayMs,
+      );
+
+      if (outcome === "failed") {
+        failed += 1;
+      } else if (outcome === "retried") {
+        retried += 1;
+      } else {
+        skipped += 1;
+      }
+
+      continue;
+    }
 
     // Independent connection check. The provider is not called at all when the
     // conversation's connection cannot deliver, so no request reaches Meta and
@@ -255,49 +274,16 @@ export async function runOutboundWorkerOnce(
       continue;
     }
 
+    let sendResult: Awaited<ReturnType<OutboundMessageProvider["send"]>>;
+
     try {
-      const result = await provider.send({
+      sendResult = await provider.send({
         conversationId: row.conversation_id,
         content: row.content,
         idempotencyKey: row.idempotency_key,
         recipientPhone: row.customer_phone_e164,
         workspaceId: row.workspace_id,
       });
-
-      if (provider.name === MOCK_OUTBOUND_PROVIDER_NAME) {
-        // A simulated delivery cannot observe the connection, so the sent
-        // transition is guarded by the connection state itself. A disconnect
-        // that lands between the check above and this transition must not be
-        // recorded as a successful send.
-        const outcome = await recordMockDelivery(
-          pool,
-          row,
-          result.providerMessageId,
-          retryDelayMs,
-        );
-
-        if (outcome === "sent") {
-          sent += 1;
-        } else if (outcome === "failed") {
-          failed += 1;
-        } else if (outcome === "retried") {
-          retried += 1;
-        } else {
-          skipped += 1;
-        }
-      } else {
-        const updated = await markOutboundSent(
-          pool,
-          row,
-          result.providerMessageId,
-        );
-
-        if (updated) {
-          sent += 1;
-        } else {
-          skipped += 1;
-        }
-      }
     } catch (error) {
       const ambiguous =
         error instanceof OutboundProviderAmbiguousError ||
@@ -308,27 +294,72 @@ export async function runOutboundWorkerOnce(
           : "Outbound provider returned an unknown failure.",
       );
 
-      const updated =
-        ambiguous &&
-        (provider.idempotency !== "guaranteed" ||
-          row.attempts >= row.max_attempts)
-          ? await markOutboundManualReview(
-              pool,
-              row,
-              boundedFailureReason(
-                `Provider outcome is ambiguous: ${failureReason} Reconcile with the provider before any further send.`,
-              ),
-            )
-          : await markOutboundFailed(pool, row, failureReason, retryDelayMs);
+      try {
+        const updated =
+          ambiguous &&
+          (provider.idempotency !== "guaranteed" ||
+            row.attempts >= row.max_attempts)
+            ? await markOutboundManualReview(
+                pool,
+                row,
+                boundedFailureReason(
+                  `Provider outcome is ambiguous: ${failureReason} Reconcile with the provider before any further send.`,
+                ),
+              )
+            : await markOutboundFailed(pool, row, failureReason, retryDelayMs);
 
-      if (!updated) {
+        if (!updated) {
+          skipped += 1;
+        } else if (updated.status === "manual_review") {
+          manualReview += 1;
+        } else if (updated.status === "failed") {
+          failed += 1;
+        } else {
+          retried += 1;
+        }
+      } catch {
         skipped += 1;
-      } else if (updated.status === "manual_review") {
-        manualReview += 1;
-      } else if (updated.status === "failed") {
+      }
+
+      continue;
+    }
+
+    if (provider.name === MOCK_OUTBOUND_PROVIDER_NAME) {
+      // A simulated delivery cannot observe the connection, so the sent
+      // transition is guarded by the connection state itself. A disconnect
+      // that lands between the check above and this transition must not be
+      // recorded as a successful send.
+      const outcome = await recordMockDelivery(
+        pool,
+        row,
+        sendResult.providerMessageId,
+        retryDelayMs,
+      );
+
+      if (outcome === "sent") {
+        sent += 1;
+      } else if (outcome === "failed") {
         failed += 1;
-      } else {
+      } else if (outcome === "retried") {
         retried += 1;
+      } else {
+        skipped += 1;
+      }
+    } else {
+      try {
+        const updated = await markOutboundSent(
+          pool,
+          row,
+          sendResult.providerMessageId,
+        );
+
+        if (updated) {
+          sent += 1;
+        } else {
+          skipped += 1;
+        }
+      } catch {
+        skipped += 1;
       }
     }
   }

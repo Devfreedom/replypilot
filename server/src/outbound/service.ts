@@ -157,17 +157,19 @@ export async function queueManualSend(
       };
     }
 
+    const resolvedProvider = await resolveOutboundProviderName(
+      client,
+      input.workspaceId,
+      conversation.conversationId,
+    );
+
     let outboundMessage = await insertQueuedOutboundMessage(client, {
       workspaceId: input.workspaceId,
       conversationId: conversation.conversationId,
       replyDraftId: input.draftId,
       content: draft.draft_reply,
       idempotencyKey: `reply-draft:${input.draftId}`,
-      provider: await resolveOutboundProviderName(
-        client,
-        input.workspaceId,
-        conversation.conversationId,
-      ),
+      provider: resolvedProvider,
     });
 
     if (!outboundMessage) {
@@ -188,6 +190,7 @@ export async function queueManualSend(
           client,
           input.workspaceId,
           outboundMessage.id,
+          resolvedProvider,
         )) ?? outboundMessage;
     } else if (outboundMessage.status === "manual_review") {
       await client.query("ROLLBACK");

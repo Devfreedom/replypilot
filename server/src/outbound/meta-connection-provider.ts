@@ -121,86 +121,113 @@ export class ConnectionAwareMetaProvider implements OutboundMessageProvider {
   ): Promise<OutboundProviderSendResult> {
     const { workspaceId, conversationId, content, recipientPhone } = input;
 
-    const connection = await resolveConversationConnection(
-      this.#pool,
-      workspaceId,
-      conversationId,
-    );
+    let connection: ConversationConnection | null;
+    let credentials: Readonly<{
+      accessToken: string;
+      graphApiVersion: string;
+      enforceRecipientAllowlist: boolean;
+      legacyConfig: MetaOutboundConfig | null;
+    }>;
+    let resolvedPhone: string;
 
-    if (!connection) {
-      throw new OutboundProviderError(
-        "Outbound send rejected: conversation has no WhatsApp connection in this workspace.",
+    try {
+      connection = await resolveConversationConnection(
+        this.#pool,
+        workspaceId,
+        conversationId,
       );
-    }
 
-    if (connection.workspaceId !== workspaceId) {
-      throw new OutboundProviderError(
-        "Outbound send rejected: conversation connection belongs to another workspace.",
-      );
-    }
-
-    const credentials = this.#resolveCredentials(connection, workspaceId);
-
-    const customer = await resolveConversationCustomer(
-      this.#pool,
-      workspaceId,
-      conversationId,
-    );
-
-    if (!customer) {
-      throw new OutboundProviderError(
-        "Outbound send rejected: conversation customer cannot be resolved.",
-      );
-    }
-
-    const resolvedPhone = recipientPhone ?? customer.phoneE164;
-
-    if (!resolvedPhone) {
-      throw new OutboundProviderError(
-        "Outbound send rejected: customer has no phone number. Only phone-number customers can receive free-form text messages.",
-      );
-    }
-
-    if (credentials.enforceRecipientAllowlist) {
-      if (
-        !credentials.legacyConfig ||
-        !isRecipientAllowlisted(credentials.legacyConfig, resolvedPhone)
-      ) {
+      if (!connection) {
         throw new OutboundProviderError(
-          "Outbound send rejected: recipient phone number is not in the configured test allowlist.",
+          "Outbound send rejected: conversation has no WhatsApp connection in this workspace.",
         );
       }
-    }
 
-    if (
-      await isCustomerSuppressed(
+      if (connection.workspaceId !== workspaceId) {
+        throw new OutboundProviderError(
+          "Outbound send rejected: conversation connection belongs to another workspace.",
+        );
+      }
+
+      credentials = this.#resolveCredentials(connection, workspaceId);
+
+      const customer = await resolveConversationCustomer(
+        this.#pool,
+        workspaceId,
+        conversationId,
+      );
+
+      if (!customer) {
+        throw new OutboundProviderError(
+          "Outbound send rejected: conversation customer cannot be resolved.",
+        );
+      }
+
+      const candidatePhone = recipientPhone ?? customer.phoneE164;
+
+      if (!candidatePhone) {
+        throw new OutboundProviderError(
+          "Outbound send rejected: customer has no phone number. Only phone-number customers can receive free-form text messages.",
+        );
+      }
+
+      resolvedPhone = candidatePhone;
+
+      if (credentials.enforceRecipientAllowlist) {
+        if (
+          !credentials.legacyConfig ||
+          !isRecipientAllowlisted(credentials.legacyConfig, resolvedPhone)
+        ) {
+          throw new OutboundProviderError(
+            "Outbound send rejected: recipient phone number is not in the configured test allowlist.",
+          );
+        }
+      }
+
+      if (
+        await isCustomerSuppressed(
+          this.#pool,
+          workspaceId,
+          customer.customerId,
+        )
+      ) {
+        throw new OutboundProviderError(
+          "Outbound send rejected: customer is suppressed.",
+        );
+      }
+
+      const windowResult = await checkServiceWindow(
         this.#pool,
         workspaceId,
         customer.customerId,
-      )
-    ) {
-      throw new OutboundProviderError(
-        "Outbound send rejected: customer is suppressed.",
+        this.#now(),
+        connection.connectionId,
       );
-    }
 
-    const windowResult = await checkServiceWindow(
-      this.#pool,
-      workspaceId,
-      customer.customerId,
-      this.#now(),
-    );
+      if (windowResult.kind !== "open") {
+        const reason =
+          windowResult.kind === "expired"
+            ? `24-hour customer service window expired at ${windowResult.expiresAt.toISOString()}`
+            : windowResult.kind === "no-inbound-message"
+              ? "No inbound message found for this customer; the 24-hour service window cannot be determined"
+              : "Customer service window timestamp is invalid or missing";
 
-    if (windowResult.kind !== "open") {
+        throw new OutboundProviderError(
+          `Outbound send rejected: ${reason}. Do not send free-form messages outside the service window.`,
+        );
+      }
+    } catch (error) {
+      if (error instanceof OutboundProviderError) {
+        throw error;
+      }
+
       const reason =
-        windowResult.kind === "expired"
-          ? `24-hour customer service window expired at ${windowResult.expiresAt.toISOString()}`
-          : windowResult.kind === "no-inbound-message"
-            ? "No inbound message found for this customer; the 24-hour service window cannot be determined"
-            : "Customer service window timestamp is invalid or missing";
-
+        error instanceof Error ? error.message : "Pre-send validation failed";
       throw new OutboundProviderError(
-        `Outbound send rejected: ${reason}. Do not send free-form messages outside the service window.`,
+        truncateToCodePoints(
+          `Outbound send rejected before provider request: ${reason}`,
+          MAX_PROVIDER_ERROR_LENGTH,
+        ),
       );
     }
 
@@ -246,6 +273,12 @@ export class ConnectionAwareMetaProvider implements OutboundMessageProvider {
       if (response.ok) {
         throw new OutboundProviderAmbiguousError(
           "Meta API returned a non-JSON body with a success status (outcome unknown).",
+        );
+      }
+
+      if (response.status >= 500) {
+        throw new OutboundProviderAmbiguousError(
+          `Meta API server error HTTP ${response.status} with a non-JSON body (outcome unknown).`,
         );
       }
 

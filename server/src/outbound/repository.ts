@@ -250,11 +250,18 @@ export async function resetFailedOutboundForRetry(
   client: PoolClient,
   workspaceId: string,
   outboundMessageId: string,
+  provider?: string,
 ): Promise<OutboundMessageRecord | null> {
   const result = await client.query<OutboundMessageRow>(
     `
       UPDATE outbound_messages
       SET status = 'queued',
+          provider = COALESCE($3, provider),
+          provider_message_id = NULL,
+          provider_status_at = NULL,
+          sent_at = NULL,
+          delivered_at = NULL,
+          queued_at = now(),
           attempts = 0,
           failure_reason = NULL,
           next_attempt_at = NULL,
@@ -265,7 +272,7 @@ export async function resetFailedOutboundForRetry(
         AND status = 'failed'
       RETURNING ${OUTBOUND_MESSAGE_COLUMNS}
     `,
-    [workspaceId, outboundMessageId],
+    [workspaceId, outboundMessageId, provider ?? null],
   );
 
   const row = result.rows[0];
@@ -562,30 +569,157 @@ export async function cancelOutboundClaim(
   return (result.rowCount ?? 0) > 0;
 }
 
+type OutboundMessageSentRow = OutboundMessageRow &
+  Readonly<{ provider_status_at: Date | null }>;
+
+type PendingDeliveryEventRow = Readonly<{
+  id: string;
+  provider_status: string;
+  provider_timestamp: Date;
+  failure_reason: string | null;
+}>;
+
 export async function markOutboundSent(
   pool: Pool,
   row: OutboundMessageRow,
   providerMessageId: string,
 ): Promise<OutboundMessageRecord | null> {
-  const result = await pool.query<OutboundMessageRow>(
-    `
-      UPDATE outbound_messages
-      SET status = 'sent',
-          provider_message_id = $3,
-          sent_at = now(),
-          failure_reason = NULL,
-          next_attempt_at = NULL,
-          updated_at = now()
-      WHERE id = $1
-        AND status = 'sending'
-        AND attempts = $2
-      RETURNING ${OUTBOUND_MESSAGE_COLUMNS}
-    `,
-    [row.id, row.attempts, providerMessageId],
-  );
+  const client = await pool.connect();
 
-  const updated = result.rows[0];
-  return updated ? mapOutboundMessageRow(updated) : null;
+  try {
+    await client.query("BEGIN");
+
+    const result = await client.query<OutboundMessageSentRow>(
+      `
+        UPDATE outbound_messages
+        SET status = 'sent',
+            provider_message_id = $3,
+            sent_at = now(),
+            failure_reason = NULL,
+            next_attempt_at = NULL,
+            updated_at = now()
+        WHERE id = $1
+          AND status = 'sending'
+          AND attempts = $2
+        RETURNING ${OUTBOUND_MESSAGE_COLUMNS}, provider_status_at
+      `,
+      [row.id, row.attempts, providerMessageId],
+    );
+
+    let currentRow = result.rows[0];
+
+    if (!currentRow) {
+      await client.query("ROLLBACK");
+      return null;
+    }
+
+    const pendingEvents = await client.query<PendingDeliveryEventRow>(
+      `
+        SELECT id, provider_status, provider_timestamp, failure_reason
+        FROM whatsapp_delivery_events
+        WHERE workspace_id = $1
+          AND provider_message_id = $2
+          AND outbound_message_id IS NULL
+          AND processing_outcome = 'ignored'
+        ORDER BY provider_timestamp ASC, received_at ASC, id ASC
+        FOR UPDATE
+      `,
+      [row.workspace_id, providerMessageId],
+    );
+
+    for (const pending of pendingEvents.rows) {
+      const supportedRank = deliveryStatusRank(pending.provider_status);
+
+      if (
+        supportedRank === 0 ||
+        !canAdvanceDeliveryStatus(
+          currentRow.status,
+          currentRow.provider_status_at,
+          pending.provider_status,
+          pending.provider_timestamp,
+        )
+      ) {
+        await client.query(
+          `
+            UPDATE whatsapp_delivery_events
+            SET outbound_message_id = $3,
+                processing_reason = $4
+            WHERE id = $1
+              AND workspace_id = $2
+          `,
+          [
+            pending.id,
+            row.workspace_id,
+            currentRow.id,
+            supportedRank === 0
+              ? "Unsupported provider status."
+              : "Event is stale or cannot advance the current outbound status.",
+          ],
+        );
+        continue;
+      }
+
+      const nextFailureReason =
+        pending.provider_status === "failed"
+          ? (pending.failure_reason ?? "Meta reported delivery failure.")
+          : null;
+      const updated = await client.query<OutboundMessageSentRow>(
+        `
+          UPDATE outbound_messages
+          SET status = $3,
+              provider_status_at = $4,
+              sent_at = CASE
+                WHEN $3 = 'sent' THEN COALESCE(sent_at, $4)
+                ELSE sent_at
+              END,
+              delivered_at = CASE
+                WHEN $3 IN ('delivered', 'read') THEN COALESCE(delivered_at, $4)
+                ELSE delivered_at
+              END,
+              failure_reason = $5,
+              updated_at = now()
+          WHERE id = $1
+            AND workspace_id = $2
+          RETURNING ${OUTBOUND_MESSAGE_COLUMNS}, provider_status_at
+        `,
+        [
+          currentRow.id,
+          row.workspace_id,
+          pending.provider_status,
+          pending.provider_timestamp,
+          nextFailureReason,
+        ],
+      );
+
+      if (updated.rows[0]) {
+        currentRow = updated.rows[0];
+      }
+
+      await client.query(
+        `
+          UPDATE whatsapp_delivery_events
+          SET outbound_message_id = $3,
+              processing_outcome = 'processed',
+              processing_reason = NULL
+          WHERE id = $1
+            AND workspace_id = $2
+        `,
+        [pending.id, row.workspace_id, currentRow.id],
+      );
+    }
+
+    await client.query("COMMIT");
+    return mapOutboundMessageRow(currentRow);
+  } catch (error) {
+    try {
+      await client.query("ROLLBACK");
+    } catch {
+      // Preserve the original failure.
+    }
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 /**
@@ -838,6 +972,42 @@ function deliveryStatusRank(status: string): number {
   }
 }
 
+function canAdvanceDeliveryStatus(
+  currentStatus: string,
+  currentTimestamp: Date | null,
+  eventStatus: string,
+  eventTimestamp: Date,
+): boolean {
+  const supportedRank = deliveryStatusRank(eventStatus);
+
+  if (supportedRank === 0) {
+    return false;
+  }
+
+  const isOlder =
+    currentTimestamp !== null &&
+    eventTimestamp.getTime() < currentTimestamp.getTime();
+  const isSameTimestamp =
+    currentTimestamp !== null &&
+    eventTimestamp.getTime() === currentTimestamp.getTime();
+  const currentRank = deliveryStatusRank(currentStatus);
+  const isTieRegression = isSameTimestamp && supportedRank <= currentRank;
+  const isTerminalPositive =
+    (currentStatus === "read" && eventStatus !== "read") ||
+    (currentStatus === "delivered" &&
+      (eventStatus === "sent" || eventStatus === "failed")) ||
+    (currentStatus === "failed" && eventStatus === "sent");
+  const isTerminalInternal =
+    currentStatus === "cancelled" || currentStatus === "manual_review";
+
+  return !(
+    isOlder ||
+    isTieRegression ||
+    isTerminalPositive ||
+    isTerminalInternal
+  );
+}
+
 export type DeliveryEventProcessingOutcome = "processed" | "ignored" | "duplicate";
 
 /**
@@ -951,11 +1121,12 @@ export async function processOutboundDeliveryEvent(
         `
           UPDATE whatsapp_delivery_events
           SET processing_outcome = 'ignored',
-              processing_reason = 'No outbound message matches this wamid in the configured workspace.'
+              processing_reason = 'No outbound message matches this wamid in the configured workspace.',
+              failure_reason = $3
           WHERE workspace_id = $1
             AND event_key = $2
         `,
-        [workspaceId, eventKey],
+        [workspaceId, eventKey, boundedReason],
       );
       await client.query("COMMIT");
       return "ignored";
@@ -987,28 +1158,13 @@ export async function processOutboundDeliveryEvent(
       return "ignored";
     }
 
-    const currentTimestamp = message.provider_status_at;
-    const isOlder =
-      currentTimestamp !== null &&
-      event.providerTimestamp.getTime() < currentTimestamp.getTime();
-    const isSameTimestamp =
-      currentTimestamp !== null &&
-      event.providerTimestamp.getTime() === currentTimestamp.getTime();
-    const currentRank = deliveryStatusRank(message.status);
-    const isTieRegression =
-      isSameTimestamp && supportedRank <= currentRank;
-    const isTerminalPositive =
-      (message.status === "read" && event.status !== "read") ||
-      (message.status === "delivered" &&
-        (event.status === "sent" || event.status === "failed"));
-    const isTerminalInternal =
-      message.status === "cancelled" || message.status === "manual_review";
-
     if (
-      isOlder ||
-      isTieRegression ||
-      isTerminalPositive ||
-      isTerminalInternal
+      !canAdvanceDeliveryStatus(
+        message.status,
+        message.provider_status_at,
+        event.status,
+        event.providerTimestamp,
+      )
     ) {
       await client.query(
         `

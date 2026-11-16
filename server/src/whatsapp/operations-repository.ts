@@ -238,6 +238,7 @@ export type ConversationProtection = Readonly<{
 
 type ConversationCustomerRow = Readonly<{
   customer_id: string;
+  whatsapp_connection_id: string | null;
   display_name: string | null;
   phone_e164: string | null;
   provider_contact_id: string | null;
@@ -253,6 +254,7 @@ export async function getConversationProtection(
     `
       SELECT
         conversation.customer_id,
+        conversation.whatsapp_connection_id,
         COALESCE(customer.display_name, conversation.contact_name) AS display_name,
         customer.phone_e164,
         customer.provider_contact_id
@@ -274,7 +276,13 @@ export async function getConversationProtection(
   }
 
   const [serviceWindow, suppression] = await Promise.all([
-    checkServiceWindow(pool, workspaceId, row.customer_id, now),
+    checkServiceWindow(
+      pool,
+      workspaceId,
+      row.customer_id,
+      now,
+      row.whatsapp_connection_id,
+    ),
     pool.query<{
       id: string;
       workspace_id: string;
