@@ -56,23 +56,37 @@ test("a body that is not a lead error payload does not parse", () => {
   assert.equal(parseLeadCreationError("nope"), null);
 });
 
-test("a lead API error carries its stable code to the caller", () => {
-  const error = new LeadApiError("Something went wrong", {
+test("a lead API error carries its stable code and validation details to the caller", () => {
+  const error = new LeadApiError("Invalid request", {
     code: WHATSAPP_LEAD_NUMBER_UNRESOLVED_CODE,
     conflictingLeadId: "22222222-2222-4222-8222-222222222222",
+    details: [
+      {
+        field: "body.whatsappNumber",
+        message: "Enter a valid WhatsApp number for NG.",
+      },
+    ],
   });
 
   assert.ok(error instanceof Error);
-  assert.equal(error.message, "Something went wrong");
+  assert.equal(error.message, "Invalid request");
   assert.equal(error.code, WHATSAPP_LEAD_NUMBER_UNRESOLVED_CODE);
   assert.equal(
     error.conflictingLeadId,
     "22222222-2222-4222-8222-222222222222",
   );
+  assert.equal(error.details?.[0]?.field, "body.whatsappNumber");
+
+  const parsed = parseLeadCreationError({
+    error: "Invalid request",
+    details: [{ field: "body.name", message: "Name is required" }],
+  });
+  assert.equal(parsed?.details?.[0]?.field, "body.name");
 
   const plain = new LeadApiError("Something went wrong");
   assert.equal(plain.code, undefined);
   assert.equal(plain.conflictingLeadId, undefined);
+  assert.equal(plain.details, undefined);
 });
 
 test("reply draft parsers accept valid mock and gemini metadata and reject mismatched demo flags", () => {

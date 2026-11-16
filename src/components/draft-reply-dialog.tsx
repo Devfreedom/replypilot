@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  Activity,
   useCallback,
   useEffect,
   useEffectEvent,
@@ -8,6 +9,11 @@ import {
   useRef,
   useState,
 } from "react";
+import { BRAND } from "@/lib/brand";
+import {
+  REPLY_DRAFT_MAX_LENGTH,
+  validateDraftReplyText,
+} from "@/lib/lead-validation";
 import {
   parseReplyDraftApprovalResponse,
   parseReplyDraftsResponse,
@@ -231,6 +237,9 @@ export function DraftReplyDialog({
   const [selectedLinkableConversationId, setSelectedLinkableConversationId] =
     useState("");
   const [linkingError, setLinkingError] = useState<string | null>(null);
+  const [activeTab, setActiveTab] = useState<"compose" | "context" | "history">(
+    "compose",
+  );
 
   const selectedDraft =
     drafts.find((draft) => draft.id === selectedDraftId) ?? null;
@@ -362,6 +371,7 @@ export function DraftReplyDialog({
     setValidationError(null);
     setNotice(null);
     setCopyMessage(null);
+    setActiveTab("compose");
     setOutboundForLead(lead?.id ?? "", null);
     setOutboundLoadError(null);
     if (lead) {
@@ -630,6 +640,7 @@ export function DraftReplyDialog({
       setLinkableConversations([]);
       setSelectedLinkableConversationId("");
       setLinkingError(null);
+      setActiveTab("compose");
       setOutboundForLead(selectedLead.id, null);
       setOutboundLoadError(null);
       setOutboundLoading(false);
@@ -735,6 +746,7 @@ export function DraftReplyDialog({
     setLinkingConversationId(null);
     setSelectedLinkableConversationId("");
     setLinkingError(null);
+    setActiveTab("compose");
   }, [invalidateLeadRequests]);
 
   function handleDialogClose() {
@@ -789,8 +801,11 @@ export function DraftReplyDialog({
   async function saveReply() {
     if (!lead || !selectedDraft) return;
 
-    if (!editedReply.trim()) {
-      setValidationError("Reply text cannot be empty.");
+    const replyError = validateDraftReplyText(editedReply);
+
+    if (replyError) {
+      setValidationError(replyError);
+      document.getElementById("draft-reply")?.focus();
       return;
     }
 
@@ -1192,6 +1207,12 @@ export function DraftReplyDialog({
     }
   }
 
+  const linkableChoices = lead
+    ? linkableConversations.filter((conversation) =>
+        isConversationLinkable(conversation, lead.id),
+      )
+    : [];
+
   return (
     <dialog
       ref={dialogRef}
@@ -1199,10 +1220,10 @@ export function DraftReplyDialog({
       onClick={handleBackdropClick}
       aria-labelledby="draft-reply-title"
       aria-describedby="draft-reply-demo"
-      className="m-auto max-h-[90dvh] w-[calc(100%-2rem)] max-w-3xl overflow-y-auto rounded-2xl bg-raised p-6 text-ink shadow-2xl sm:p-8"
+      className="m-auto max-h-[90dvh] w-[calc(100%-1.5rem)] max-w-3xl overflow-y-auto rounded-2xl border border-line bg-surface p-5 text-ink shadow-2xl sm:p-7"
     >
-      <div className="flex items-start justify-between gap-4">
-        <div>
+      <div className="flex items-start justify-between gap-4 border-b border-line pb-4">
+        <div className="min-w-0">
           <h2
             id="draft-reply-title"
             className="text-xl font-bold text-ink"
@@ -1210,8 +1231,8 @@ export function DraftReplyDialog({
             Draft reply
           </h2>
           {lead ? (
-            <p className="mt-2 text-sm leading-6 text-ink-soft">
-              For {lead.name} · {lead.service}
+            <p className="mt-1 truncate text-sm leading-6 text-ink-soft">
+              {lead.name} ({lead.service})
             </p>
           ) : null}
         </div>
@@ -1219,7 +1240,7 @@ export function DraftReplyDialog({
           type="button"
           onClick={() => dialogRef.current?.close()}
           aria-label="Close draft reply"
-          className="rounded-lg px-3 py-1 text-2xl leading-none text-ink-faint hover:bg-hushed hover:text-ink"
+          className="flex min-h-11 min-w-11 shrink-0 cursor-pointer items-center justify-center rounded-xl text-2xl leading-none text-ink-soft hover:bg-hushed hover:text-ink"
         >
           &times;
         </button>
@@ -1228,28 +1249,26 @@ export function DraftReplyDialog({
       {selectedDraft && !selectedDraft.isDemo ? (
         <p
           id="draft-reply-demo"
-          className="mt-5 rounded-xl border border-line bg-hushed px-4 py-3 text-sm leading-6 text-ink-soft"
+          className="mt-4 rounded-xl border border-line bg-hushed/80 px-4 py-3 text-xs leading-5 text-ink-soft sm:text-sm sm:leading-6"
         >
-          AI-generated draft grounded in your approved business profile and
-          catalogue. Review and edit before approving; approve and queue adds
-          the approved snapshot to the server-selected outbound worker.
+          AI-suggested reply grounded in your saved business profile and
+          catalogue. Review and edit before approving; nothing is sent without
+          your approval.
         </p>
       ) : (
         <p
           id="draft-reply-demo"
-          className="mt-5 rounded-xl border border-[color-mix(in_oklab,var(--rp-warning)_25%,transparent)] bg-warning-soft px-4 py-3 text-sm leading-6 text-warning-ink"
+          className="mt-4 rounded-xl border border-[color-mix(in_oklab,var(--rp-warning)_32%,transparent)] bg-warning-soft px-4 py-3 text-xs leading-5 text-warning-ink sm:text-sm sm:leading-6"
         >
-          Demonstration output from ReplyPilot&apos;s mock provider. No live AI
-          model was used. Approval records your review; approve and queue adds the
-          approved snapshot to the server-selected outbound worker. Meta delivery
-          requires restricted server-side test configuration and is unavailable
-          in production.
+          Demonstration output from {BRAND.name}&apos;s mock provider (no live
+          AI model is enabled). Approval records your review; nothing sends
+          automatically without your explicit action.
         </p>
       )}
 
       {isLoading ? (
         <div role="status" className="py-12 text-center text-sm text-ink-soft">
-          Loading saved drafts and preparing demonstration content…
+          Preparing reply draft from your business details…
         </div>
       ) : error ? (
         <div role="alert" className="py-10 text-center">
@@ -1261,633 +1280,763 @@ export function DraftReplyDialog({
             <button
               type="button"
               onClick={() => void loadDrafts(lead)}
-              className="btn btn-quiet mt-4"
+              className="btn btn-secondary mt-4"
             >
               Try again
             </button>
           ) : null}
         </div>
       ) : selectedDraft ? (
-        <div className="mt-6 space-y-6" aria-busy={isBusy}>
+        <div className="mt-5 space-y-5" aria-busy={isBusy}>
+          {/* Status + section navigation tabs */}
           <div className="flex flex-wrap items-center justify-between gap-3">
-            <StatusBadge status={selectedDraft.status} />
-            {selectedDraft.approvedAt ? (
-              <p className="text-xs text-ink-soft">
-                Approved {formatDraftTime(selectedDraft.approvedAt)}
-              </p>
-            ) : null}
+            <div className="flex flex-wrap items-center gap-2">
+              <StatusBadge status={selectedDraft.status} />
+              <span className="badge badge-neutral">
+                {intentLabels[selectedDraft.intent]}
+              </span>
+              {selectedDraft.approvedAt ? (
+                <span className="numeric-tabular text-xs text-ink-soft">
+                  Approved {formatDraftTime(selectedDraft.approvedAt)}
+                </span>
+              ) : null}
+            </div>
           </div>
 
-          {selectedDraft.status === "draft" ? (
-            <section
-              aria-labelledby="approval-behaviour-title"
-              className="rounded-xl border border-line bg-hushed p-4"
+          <div
+            role="tablist"
+            aria-label="Draft workspace sections"
+            className="grid grid-cols-3 gap-1.5 rounded-xl border border-line bg-hushed p-1"
+          >
+            <button
+              id="draft-tab-compose"
+              type="button"
+              role="tab"
+              aria-selected={activeTab === "compose"}
+              aria-controls="draft-panel-compose"
+              onClick={() => setActiveTab("compose")}
+              className={`min-h-10 cursor-pointer rounded-lg px-2.5 py-2 text-xs font-semibold transition-colors sm:text-sm ${
+                activeTab === "compose"
+                  ? "bg-surface text-ink shadow-xs"
+                  : "text-ink-soft hover:text-ink"
+              }`}
             >
-              <h3
-                id="approval-behaviour-title"
-                className="text-sm font-semibold text-ink"
-              >
-                Approval behaviour
-              </h3>
-              <p className="mt-1 text-xs leading-5 text-ink-soft">
-                Workspace default:{" "}
-                <strong className="text-ink">
-                  {APPROVAL_SEND_POLICY_LABELS[defaultApprovalSendPolicy]}
-                </strong>
-                . Approving always records your review; approve and queue also
-                adds the reply to the server-selected outbound queue.
-              </p>
-              <label className={`${labelClass} mt-3`}>
-                On approval
-                <select
-                  value={sendPolicyChoice}
-                  onChange={(event) =>
-                    setSendPolicyChoice(
-                      event.target.value as SendPolicyChoice,
-                    )
-                  }
-                  disabled={isBusy}
-                  className={inputClass}
-                >
-                  <option value="default">
-                    Use workspace default (
-                    {APPROVAL_SEND_POLICY_LABELS[defaultApprovalSendPolicy]})
-                  </option>
-                  {APPROVAL_SEND_POLICIES.map((policy) => (
-                    <option key={policy} value={policy}>
-                      {APPROVAL_SEND_POLICY_LABELS[policy]}
-                    </option>
-                  ))}
-                </select>
-              </label>
+              Compose
+            </button>
+            <button
+              id="draft-tab-context"
+              type="button"
+              role="tab"
+              aria-selected={activeTab === "context"}
+              aria-controls="draft-panel-context"
+              onClick={() => setActiveTab("context")}
+              className={`min-h-10 cursor-pointer rounded-lg px-2.5 py-2 text-xs font-semibold transition-colors sm:text-sm ${
+                activeTab === "context"
+                  ? "bg-surface text-ink shadow-xs"
+                  : "text-ink-soft hover:text-ink"
+              }`}
+            >
+              Facts ({selectedDraft.sources.length})
+            </button>
+            <button
+              id="draft-tab-history"
+              type="button"
+              role="tab"
+              aria-selected={activeTab === "history"}
+              aria-controls="draft-panel-history"
+              onClick={() => setActiveTab("history")}
+              className={`min-h-10 cursor-pointer rounded-lg px-2.5 py-2 text-xs font-semibold transition-colors sm:text-sm ${
+                activeTab === "history"
+                  ? "bg-surface text-ink shadow-xs"
+                  : "text-ink-soft hover:text-ink"
+              }`}
+            >
+              History ({drafts.length})
+            </button>
+          </div>
 
-              {effectiveSendPolicy === "approve_and_send" ? (
-                eligibleConversations.length === 0 ? (
-                  <p className="mt-3 rounded-lg bg-warning-soft px-3 py-2 text-xs leading-5 text-warning-ink">
-                    No active WhatsApp conversation is linked to this lead.
-                    Approve and queue requires an explicit conversation.
+          <Activity mode={activeTab === "compose" ? "visible" : "hidden"}>
+            <div
+              id="draft-panel-compose"
+              role="tabpanel"
+              aria-labelledby="draft-tab-compose"
+              className="space-y-5"
+            >
+              {selectedDraft.missingInformation.length > 0 ? (
+                <div className="rounded-xl border border-[color-mix(in_oklab,var(--rp-warning)_32%,transparent)] bg-warning-soft px-4 py-3 text-xs leading-5 text-warning-ink sm:text-sm">
+                  <p className="font-semibold">
+                    Confirm before sending ({selectedDraft.missingInformation.length} item
+                    {selectedDraft.missingInformation.length === 1 ? "" : "s"}):
                   </p>
-                ) : eligibleConversations.length === 1 ? (
-                  <p className="mt-3 text-xs leading-5 text-ink-soft">
-                    Queues to{" "}
-                    <strong className="text-ink">
-                      {conversationOptionLabel(eligibleConversations[0])}
-                    </strong>
-                    .
+                  <ul className="mt-1 list-disc space-y-0.5 pl-4">
+                    {selectedDraft.missingInformation.map((item) => (
+                      <li key={item}>{item}</li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
+
+              {/* Editable suggested reply */}
+              <section aria-labelledby="draft-reply-editor-title">
+                <div className="flex items-center justify-between gap-3">
+                  <label
+                    id="draft-reply-editor-title"
+                    htmlFor="draft-reply"
+                    className="field-label"
+                  >
+                    Suggested reply
+                  </label>
+                  <span className="numeric-tabular text-xs text-ink-faint">
+                    {editedReply.length}/{REPLY_DRAFT_MAX_LENGTH}
+                  </span>
+                </div>
+                <textarea
+                  id="draft-reply"
+                  value={editedReply}
+                  onChange={(event) => {
+                    setEditedReply(event.target.value);
+                    setValidationError(null);
+                    setActionError(null);
+                    setNotice(null);
+                    setCopyMessage(null);
+                  }}
+                  onBlur={() => {
+                    setValidationError(
+                      validateDraftReplyText(editedReply) ?? null,
+                    );
+                  }}
+                  rows={7}
+                  maxLength={REPLY_DRAFT_MAX_LENGTH}
+                  aria-invalid={validationError ? true : undefined}
+                  aria-describedby={
+                    validationError
+                      ? "draft-reply-validation-error draft-reply-edit-warning"
+                      : "draft-reply-edit-warning"
+                  }
+                  className="textarea mt-1.5"
+                />
+                {validationError ? (
+                  <p
+                    id="draft-reply-validation-error"
+                    role="alert"
+                    className="mt-1.5 text-xs font-medium text-danger-ink"
+                  >
+                    {validationError}
                   </p>
-                ) : (
-                  <label className={`${labelClass} mt-3`}>
-                    Conversation
-                    <select
-                      value={selectedConversationId}
-                      onChange={(event) =>
-                        setSelectedConversationId(event.target.value)
+                ) : null}
+                <p id="draft-reply-edit-warning" className="help-text">
+                  {hasUnsavedChanges
+                    ? "You edited this draft. Save changes first so your updated wording can be reviewed before approval."
+                    : "Editing a draft returns it to unapproved status so changed details are reviewed explicitly."}
+                </p>
+              </section>
+
+              {actionError ? (
+                <p
+                  role="alert"
+                  className="rounded-xl border border-[color-mix(in_oklab,var(--rp-danger)_35%,transparent)] bg-danger-soft px-4 py-3 text-sm text-danger-ink"
+                >
+                  {actionError}
+                </p>
+              ) : null}
+
+              {notice || copyMessage ? (
+                <p
+                  role="status"
+                  aria-live="polite"
+                  className="rounded-xl border border-line bg-hushed px-4 py-2.5 text-sm text-ink"
+                >
+                  {notice ?? copyMessage}
+                </p>
+              ) : null}
+
+              <div className="flex flex-col-reverse gap-2.5 border-t border-line pt-4 sm:flex-row sm:flex-wrap sm:justify-end">
+                <button
+                  type="button"
+                  onClick={() => void createNewDraft()}
+                  disabled={isBusy || isLoading}
+                  className="btn btn-secondary"
+                >
+                  {pendingAction === "new" ? "Creating…" : "New draft"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void regenerateDraft()}
+                  disabled={isBusy || isLoading}
+                  className="btn btn-secondary"
+                >
+                  {pendingAction === "regenerate"
+                    ? "Regenerating…"
+                    : "Regenerate draft"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void copyReply()}
+                  disabled={!editedReply.trim() || isBusy}
+                  className="btn btn-secondary"
+                >
+                  Copy reply
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void saveReply()}
+                  disabled={
+                    isBusy || !hasUnsavedChanges || !editedReply.trim()
+                  }
+                  className="btn btn-secondary"
+                >
+                  {pendingAction === "save" ? "Saving…" : "Save changes"}
+                </button>
+                {selectedDraft.status === "approved" ? (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => void queueApprovedSend()}
+                      disabled={
+                        isBusy ||
+                        outboundLoading ||
+                        approvalContextLoading ||
+                        Boolean(outboundLoadError) ||
+                        Boolean(approvalContextError) ||
+                        outboundAlreadyHandled ||
+                        hasUnsavedChanges ||
+                        retryBlockedByContentChange ||
+                        retryBlockedByInactiveConversation
                       }
-                      disabled={isBusy || approvalContextLoading}
-                      required
+                      className="btn btn-primary"
+                    >
+                      {pendingAction === "send"
+                        ? "Queueing…"
+                        : outboundMessage?.status === "failed"
+                          ? retryBlockedByContentChange ||
+                            retryBlockedByInactiveConversation
+                            ? "Retry unavailable"
+                            : "Retry queued send"
+                          : outboundMessage?.status === "queued"
+                            ? "Already queued"
+                            : outboundMessage?.status === "sending"
+                              ? "Sending"
+                              : outboundMessage?.status === "sent"
+                                ? "Already sent"
+                                : outboundMessage?.status === "delivered"
+                                  ? "Delivered"
+                                  : outboundMessage?.status === "manual_review"
+                                    ? "Needs manual review"
+                                    : outboundMessage?.status === "cancelled"
+                                      ? "Cannot queue cancelled message"
+                                      : "Queue approved reply"}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void updateStatus("draft")}
+                      disabled={isBusy}
+                      className="btn btn-secondary"
+                    >
+                      {pendingAction === "unapprove"
+                        ? "Returning…"
+                        : "Return to draft"}
+                    </button>
+                  </>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => void updateStatus("approved")}
+                    disabled={isBusy || hasUnsavedChanges}
+                    className="btn btn-primary"
+                  >
+                    {pendingAction === "approve"
+                      ? effectiveSendPolicy === "approve_and_send"
+                        ? "Approving and queueing…"
+                        : "Approving…"
+                      : effectiveSendPolicy === "approve_and_send"
+                        ? "Approve and queue"
+                        : "Approve draft"}
+                  </button>
+                )}
+              </div>
+
+              {hasUnsavedChanges ? (
+                <p className="text-right text-xs text-ink-soft">
+                  Save your edits before approving this draft.
+                </p>
+              ) : null}
+
+              {/* Approval settings & WhatsApp target */}
+              {selectedDraft.status === "draft" ? (
+                <section
+                  aria-labelledby="approval-behaviour-title"
+                  className="rounded-xl border border-line bg-hushed/70 p-4"
+                >
+                  <h3
+                    id="approval-behaviour-title"
+                    className="text-sm font-semibold text-ink"
+                  >
+                    Approval settings
+                  </h3>
+                  <p className="mt-1 text-xs leading-5 text-ink-soft">
+                    Workspace default:{" "}
+                    <strong className="text-ink">
+                      {APPROVAL_SEND_POLICY_LABELS[defaultApprovalSendPolicy]}
+                    </strong>
+                    . Approving records your review; approve and queue also adds
+                    this reply to your outbound WhatsApp queue.
+                  </p>
+                  <label className={`${labelClass} mt-3`}>
+                    When approved
+                    <select
+                      value={sendPolicyChoice}
+                      onChange={(event) =>
+                        setSendPolicyChoice(
+                          event.target.value as SendPolicyChoice,
+                        )
+                      }
+                      disabled={isBusy}
                       className={inputClass}
                     >
-                      <option value="">Choose a conversation</option>
-                      {eligibleConversations.map((conversation) => (
-                        <option key={conversation.id} value={conversation.id}>
-                          {conversationOptionLabel(conversation)} ·{" "}
-                          {conversation.status}
+                      <option value="default">
+                        Use workspace default (
+                        {APPROVAL_SEND_POLICY_LABELS[defaultApprovalSendPolicy]}
+                        )
+                      </option>
+                      {APPROVAL_SEND_POLICIES.map((policy) => (
+                        <option key={policy} value={policy}>
+                          {APPROVAL_SEND_POLICY_LABELS[policy]}
                         </option>
                       ))}
                     </select>
-                    <span className="help-text mt-1">
-                      This lead has multiple active conversations. Choose one
-                      explicitly; ReplyPilot will not guess.
-                    </span>
                   </label>
-                )
-              ) : null}
 
-              {approvalContextError ? (
-                <p role="alert" className="mt-3 text-xs text-danger-ink">
-                  {approvalContextError}
-                </p>
-              ) : null}
-            </section>
-          ) : (
-            <section className="rounded-xl border border-line bg-hushed p-4">
-              <h3 className="text-sm font-semibold text-ink">
-                Approval snapshot
-              </h3>
-              <p className="mt-1 text-xs leading-5 text-ink-soft">
-                Effective policy:{" "}
-                <strong className="text-ink">
-                  {selectedDraft.approvalSendPolicy
-                    ? APPROVAL_SEND_POLICY_LABELS[
-                        selectedDraft.approvalSendPolicy
-                      ]
-                    : "Not recorded for this approval"}
-                </strong>
-                {selectedDraft.sendPolicyOverride
-                  ? ` · per-draft override: ${
-                      APPROVAL_SEND_POLICY_LABELS[
-                        selectedDraft.sendPolicyOverride
-                      ]
-                    }`
-                  : " · workspace default"}
-                . The approved reply text is the content snapshot used for any
-                outbound attempt.
-              </p>
-            </section>
-          )}
+                  {effectiveSendPolicy === "approve_and_send" ? (
+                    eligibleConversations.length === 0 ? (
+                      <p className="mt-3 rounded-lg bg-warning-soft px-3 py-2 text-xs leading-5 text-warning-ink">
+                        No active WhatsApp chat is linked to this customer yet.
+                        Link a chat below or wait until the customer messages
+                        your business number.
+                      </p>
+                    ) : eligibleConversations.length === 1 ? (
+                      <p className="mt-3 text-xs leading-5 text-ink-soft">
+                        Target chat:{" "}
+                        <strong className="text-ink">
+                          {conversationOptionLabel(eligibleConversations[0])}
+                        </strong>
+                      </p>
+                    ) : (
+                      <label className={`${labelClass} mt-3`}>
+                        WhatsApp conversation
+                        <select
+                          value={selectedConversationId}
+                          onChange={(event) =>
+                            setSelectedConversationId(event.target.value)
+                          }
+                          disabled={isBusy || approvalContextLoading}
+                          required
+                          className={inputClass}
+                        >
+                          <option value="">Choose a conversation</option>
+                          {eligibleConversations.map((conversation) => (
+                            <option
+                              key={conversation.id}
+                              value={conversation.id}
+                            >
+                              {conversationOptionLabel(conversation)} (
+                              {conversation.status})
+                            </option>
+                          ))}
+                        </select>
+                        <span className="help-text">
+                          Multiple WhatsApp chats match this customer. Choose
+                          which chat should receive the reply.
+                        </span>
+                      </label>
+                    )
+                  ) : null}
 
-          {selectedDraft.status === "approved" ? (
-            <section
-              aria-labelledby="outbound-conversation-title"
-              className="rounded-xl border border-line bg-hushed p-4"
-            >
-              <h3
-                id="outbound-conversation-title"
-                className="text-sm font-semibold text-ink"
-              >
-                WhatsApp conversation
-              </h3>
-              {approvalContextLoading ? (
-                <p role="status" className="mt-2 text-xs text-ink-soft">
-                  Loading conversations…
-                </p>
-              ) : approvalContextError ? (
-                <p role="alert" className="mt-2 text-xs text-danger-ink">
-                  {approvalContextError}
-                </p>
-              ) : eligibleConversations.length === 0 ? (
-                <p className="mt-2 text-xs leading-5 text-warning-ink">
-                  {retryBlockedByInactiveConversation
-                    ? "This conversation is archived. Reopen it before retrying. The failed message cannot be retargeted."
-                    : "No active WhatsApp conversation is linked to this lead."}
-                </p>
-              ) : eligibleConversations.length === 1 &&
-                (!outboundMessage || outboundConversationIsEligible) ? (
-                <p className="mt-2 text-xs leading-5 text-ink-soft">
-                  Queues to{" "}
-                  <strong className="text-ink">
-                    {conversationOptionLabel(eligibleConversations[0])}
-                  </strong>
-                  .
-                </p>
-              ) : eligibleConversations.length > 1 ? (
-                <label className={`${labelClass} mt-2`}>
-                  Conversation
-                  <select
-                    value={selectedConversationId}
-                    onChange={(event) =>
-                      setSelectedConversationId(event.target.value)
-                    }
-                    disabled={isBusy || outboundMessage !== null}
-                    required
-                    className={inputClass}
-                  >
-                    <option value="">Choose a conversation</option>
-                    {eligibleConversations.map((conversation) => (
-                      <option key={conversation.id} value={conversation.id}>
-                        {conversationOptionLabel(conversation)} ·{" "}
-                        {conversation.status}
-                      </option>
-                    ))}
-                    {outboundMessage &&
-                    !outboundConversationIsEligible &&
-                    outboundConversation ? (
-                      <option
-                        value={outboundMessage.conversationId}
-                        disabled
-                      >
-                        {conversationOptionLabel(outboundConversation)}{" "}
-                        · inactive original target
-                      </option>
-                    ) : null}
-                  </select>
-                  <span className="help-text mt-1">
-                    {outboundMessage
-                      ? "An existing outbound message cannot be retargeted."
-                      : "Choose the intended customer thread. ReplyPilot will not guess."}
-                  </span>
-                </label>
-              ) : outboundMessage ? (
-                <p className="mt-2 text-xs leading-5 text-warning-ink">
-                  The existing outbound message is tied to its original
-                  conversation and cannot be retargeted.
-                </p>
-              ) : null}
-              {outboundLoading ? (
-                <p role="status" className="mt-2 text-xs text-ink-soft">
-                  Loading existing outbound status…
-                </p>
-              ) : null}
-              {outboundLoadError ? (
-                <p role="alert" className="mt-2 text-xs text-danger-ink">
-                  {outboundLoadError}
-                </p>
-              ) : null}
-            </section>
-          ) : null}
-
-          {eligibleConversations.length === 0 &&
-          !retryBlockedByInactiveConversation &&
-          canLinkConversation ? (
-            <section
-              aria-labelledby="link-conversation-title"
-              className="rounded-xl border border-line bg-hushed p-4"
-            >
-              <h3
-                id="link-conversation-title"
-                className="text-sm font-semibold text-ink"
-              >
-                Link a WhatsApp conversation
-              </h3>
-              <p className="mt-1 text-xs leading-5 text-ink-soft">
-                A conversation is linked automatically when the customer
-                messages the business number. You can also link an existing
-                conversation to this lead now.
-              </p>
-
-              {linkableLoading ? (
-                <p role="status" className="mt-2 text-xs text-ink-soft">
-                  Loading conversations…
-                </p>
-              ) : null}
-
-              {linkableConversations.filter((conversation) =>
-                isConversationLinkable(conversation, lead?.id ?? ""),
-              ).length > 0 ? (
-                <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-end">
-                  <label className={`${labelClass} min-w-0 flex-1`}>
-                    Conversation
-                    <select
-                      value={selectedLinkableConversationId}
-                      onChange={(event) =>
-                        setSelectedLinkableConversationId(event.target.value)
-                      }
-                      disabled={isBusy}
-                      className={inputClass}
+                  {approvalContextError ? (
+                    <p
+                      role="alert"
+                      className="mt-3 text-xs font-medium text-danger-ink"
                     >
-                      <option value="">Choose a conversation</option>
-                      {linkableConversations
-                        .filter((conversation) =>
-                          isConversationLinkable(conversation, lead?.id ?? ""),
-                        )
-                        .map((conversation) => (
+                      {approvalContextError}
+                    </p>
+                  ) : null}
+                </section>
+              ) : (
+                <section className="rounded-xl border border-line bg-hushed/70 p-4">
+                  <h3 className="text-sm font-semibold text-ink">
+                    Approval snapshot
+                  </h3>
+                  <p className="mt-1 text-xs leading-5 text-ink-soft">
+                    Approval rule:{" "}
+                    <strong className="text-ink">
+                      {selectedDraft.approvalSendPolicy
+                        ? APPROVAL_SEND_POLICY_LABELS[
+                            selectedDraft.approvalSendPolicy
+                          ]
+                        : "Not recorded"}
+                    </strong>
+                    {selectedDraft.sendPolicyOverride
+                      ? ` (custom choice: ${
+                          APPROVAL_SEND_POLICY_LABELS[
+                            selectedDraft.sendPolicyOverride
+                          ]
+                        })`
+                      : " (workspace default)"}
+                    . Sending uses the exact text snapshot captured on
+                    approval.
+                  </p>
+                </section>
+              )}
+
+              {selectedDraft.status === "approved" ? (
+                <section
+                  aria-labelledby="outbound-conversation-title"
+                  className="rounded-xl border border-line bg-hushed/70 p-4"
+                >
+                  <h3
+                    id="outbound-conversation-title"
+                    className="text-sm font-semibold text-ink"
+                  >
+                    WhatsApp conversation
+                  </h3>
+                  {approvalContextLoading ? (
+                    <p role="status" className="mt-2 text-xs text-ink-soft">
+                      Loading conversations…
+                    </p>
+                  ) : approvalContextError ? (
+                    <p
+                      role="alert"
+                      className="mt-2 text-xs font-medium text-danger-ink"
+                    >
+                      {approvalContextError}
+                    </p>
+                  ) : eligibleConversations.length === 0 ? (
+                    <p className="mt-2 text-xs leading-5 text-warning-ink">
+                      {retryBlockedByInactiveConversation
+                        ? "This conversation is archived. Reopen it before retrying; failed messages cannot be moved to a different chat."
+                        : "No active WhatsApp conversation is linked to this lead."}
+                    </p>
+                  ) : eligibleConversations.length === 1 &&
+                    (!outboundMessage || outboundConversationIsEligible) ? (
+                    <p className="mt-2 text-xs leading-5 text-ink-soft">
+                      Queues to{" "}
+                      <strong className="text-ink">
+                        {conversationOptionLabel(eligibleConversations[0])}
+                      </strong>
+                    </p>
+                  ) : eligibleConversations.length > 1 ? (
+                    <label className={`${labelClass} mt-2`}>
+                      Conversation
+                      <select
+                        value={selectedConversationId}
+                        onChange={(event) =>
+                          setSelectedConversationId(event.target.value)
+                        }
+                        disabled={isBusy || outboundMessage !== null}
+                        required
+                        className={inputClass}
+                      >
+                        <option value="">Choose a conversation</option>
+                        {eligibleConversations.map((conversation) => (
                           <option key={conversation.id} value={conversation.id}>
-                            {linkableConversationLabel(conversation)} ·{" "}
-                            {conversation.status}
+                            {conversationOptionLabel(conversation)} (
+                            {conversation.status})
                           </option>
                         ))}
-                    </select>
-                  </label>
-                  <button
-                    type="button"
-                    className="btn btn-secondary"
-                    disabled={
-                      isBusy ||
-                      !selectedLinkableConversationId ||
-                      linkingConversationId !== null
-                    }
-                    onClick={() =>
-                      void linkConversation(selectedLinkableConversationId)
-                    }
-                  >
-                    {linkingConversationId ? "Linking…" : "Link conversation"}
-                  </button>
-                </div>
-              ) : linkableLoading ? null : (
-                <p className="mt-3 text-xs leading-5 text-ink-soft">
-                  There is no conversation in this workspace that can be linked
-                  to this lead yet. A conversation appears when a customer
-                  messages the business number.
-                </p>
-              )}
-
-              {linkingError ? (
-                <p role="alert" className="mt-3 text-xs text-danger-ink">
-                  {linkingError}
-                </p>
+                        {outboundMessage &&
+                        !outboundConversationIsEligible &&
+                        outboundConversation ? (
+                          <option
+                            value={outboundMessage.conversationId}
+                            disabled
+                          >
+                            {conversationOptionLabel(outboundConversation)}{" "}
+                            (inactive original chat)
+                          </option>
+                        ) : null}
+                      </select>
+                      <span className="help-text">
+                        {outboundMessage
+                          ? "An existing outbound message stays tied to its original chat."
+                          : "Choose the customer thread that should receive this reply."}
+                      </span>
+                    </label>
+                  ) : outboundMessage ? (
+                    <p className="mt-2 text-xs leading-5 text-warning-ink">
+                      This outbound attempt stays tied to its original
+                      conversation.
+                    </p>
+                  ) : null}
+                  {outboundLoading ? (
+                    <p role="status" className="mt-2 text-xs text-ink-soft">
+                      Loading outbound status…
+                    </p>
+                  ) : null}
+                  {outboundLoadError ? (
+                    <p
+                      role="alert"
+                      className="mt-2 text-xs font-medium text-danger-ink"
+                    >
+                      {outboundLoadError}
+                    </p>
+                  ) : null}
+                </section>
               ) : null}
-            </section>
-          ) : null}
 
-          {outboundMessage ? (
-            <section
-              aria-labelledby="outbound-message-title"
-              className="rounded-xl border border-line bg-raised p-4"
+              {eligibleConversations.length === 0 &&
+              !retryBlockedByInactiveConversation &&
+              canLinkConversation ? (
+                <section
+                  aria-labelledby="link-conversation-title"
+                  className="rounded-xl border border-line bg-hushed/70 p-4"
+                >
+                  <h3
+                    id="link-conversation-title"
+                    className="text-sm font-semibold text-ink"
+                  >
+                    Link a WhatsApp chat
+                  </h3>
+                  <p className="mt-1 text-xs leading-5 text-ink-soft">
+                    Chats link automatically when a customer messages from the
+                    same phone number, or you can link an existing chat below.
+                  </p>
+
+                  {linkableLoading ? (
+                    <p role="status" className="mt-2 text-xs text-ink-soft">
+                      Loading WhatsApp chats…
+                    </p>
+                  ) : null}
+
+                  {linkableChoices.length > 0 ? (
+                    <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-end">
+                      <label className={`${labelClass} min-w-0 flex-1`}>
+                        Unlinked WhatsApp chat
+                        <select
+                          value={selectedLinkableConversationId}
+                          onChange={(event) =>
+                            setSelectedLinkableConversationId(
+                              event.target.value,
+                            )
+                          }
+                          disabled={isBusy}
+                          className={inputClass}
+                        >
+                          <option value="">Choose a chat</option>
+                          {linkableChoices.map((conversation) => (
+                            <option
+                              key={conversation.id}
+                              value={conversation.id}
+                            >
+                              {linkableConversationLabel(conversation)} (
+                              {conversation.status})
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <button
+                        type="button"
+                        className="btn btn-secondary"
+                        disabled={
+                          isBusy ||
+                          !selectedLinkableConversationId ||
+                          linkingConversationId !== null
+                        }
+                        onClick={() =>
+                          void linkConversation(selectedLinkableConversationId)
+                        }
+                      >
+                        {linkingConversationId
+                          ? "Linking…"
+                          : "Link conversation"}
+                      </button>
+                    </div>
+                  ) : linkableLoading ? null : (
+                    <p className="mt-3 text-xs leading-5 text-ink-soft">
+                      No unlinked chats are available yet. A chat appears here
+                      after a customer messages your WhatsApp business number.
+                    </p>
+                  )}
+
+                  {linkingError ? (
+                    <p
+                      role="alert"
+                      className="mt-3 text-xs font-medium text-danger-ink"
+                    >
+                      {linkingError}
+                    </p>
+                  ) : null}
+                </section>
+              ) : null}
+
+              {outboundMessage ? (
+                <section
+                  aria-labelledby="outbound-message-title"
+                  className="rounded-xl border border-line bg-surface p-4"
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <h3
+                      id="outbound-message-title"
+                      className="text-sm font-semibold text-ink"
+                    >
+                      Delivery status
+                    </h3>
+                    <span className="badge badge-neutral">
+                      {OUTBOUND_STATUS_LABELS[outboundMessage.status]}
+                    </span>
+                  </div>
+                  <p className="mt-2 text-xs leading-5 text-ink-soft">
+                    {OUTBOUND_STATUS_DESCRIPTIONS[outboundMessage.status]}{" "}
+                    <span className="numeric-tabular">
+                      Attempts: {outboundMessage.attempts} of{" "}
+                      {outboundMessage.maxAttempts}.
+                    </span>
+                  </p>
+                  {outboundMessage.providerMessageId ? (
+                    <p className="mt-1 break-all text-xs text-ink-faint">
+                      Message reference: {outboundMessage.providerMessageId}
+                    </p>
+                  ) : null}
+                  {outboundMessage.failureReason ? (
+                    <p className="mt-1 text-xs font-medium text-danger-ink">
+                      {outboundMessage.failureReason}
+                    </p>
+                  ) : null}
+                  {outboundMessage.status === "manual_review" ? (
+                    <p className="mt-2 text-xs leading-5 text-warning-ink">
+                      Check your WhatsApp Business delivery status before
+                      retrying so the customer never receives a duplicate message.
+                    </p>
+                  ) : null}
+                  {outboundMessage.status === "failed" &&
+                  retryBlockedByContentChange ? (
+                    <p className="mt-2 text-xs leading-5 text-warning-ink">
+                      This failed attempt used earlier wording. Create a new
+                      draft to send the updated text.
+                    </p>
+                  ) : null}
+                  {outboundMessage.status === "failed" &&
+                  retryBlockedByInactiveConversation ? (
+                    <p className="mt-2 text-xs leading-5 text-warning-ink">
+                      This conversation is archived. Reopen it before retrying.
+                    </p>
+                  ) : null}
+                </section>
+              ) : null}
+            </div>
+          </Activity>
+
+          <Activity mode={activeTab === "context" ? "visible" : "hidden"}>
+            <div
+              id="draft-panel-context"
+              role="tabpanel"
+              aria-labelledby="draft-tab-context"
+              className="space-y-5"
             >
-              <div className="flex flex-wrap items-center justify-between gap-2">
+              <section
+                aria-labelledby="draft-enquiry-title"
+                className="rounded-xl border border-line bg-hushed/70 p-4"
+              >
                 <h3
-                  id="outbound-message-title"
+                  id="draft-enquiry-title"
                   className="text-sm font-semibold text-ink"
                 >
-                  Outbound message
+                  Enquiry summary
                 </h3>
-                <span className="badge badge-neutral">
-                  {OUTBOUND_STATUS_LABELS[outboundMessage.status]}
-                </span>
-              </div>
-              <p className="mt-2 text-xs leading-5 text-ink-soft">
-                {OUTBOUND_STATUS_DESCRIPTIONS[outboundMessage.status]} Attempts:{" "}
-                {outboundMessage.attempts} of {outboundMessage.maxAttempts}.
-              </p>
-              {outboundMessage.providerMessageId ? (
-                <p className="mt-1 break-all text-xs text-ink-faint">
-                  Provider message ID: {outboundMessage.providerMessageId}
+                <p className="mt-2 text-sm leading-6 text-ink">
+                  {selectedDraft.summary}
                 </p>
-              ) : null}
-              {outboundMessage.failureReason ? (
-                <p className="mt-1 text-xs text-danger-ink">
-                  {outboundMessage.failureReason}
-                </p>
-              ) : null}
-                {outboundMessage.status === "manual_review" ? (
-                  <p className="mt-2 text-xs leading-5 text-warning-ink">
-                    Do not retry until you check the provider&apos;s own records.
-                    ReplyPilot cannot reconcile this outcome automatically.
-                  </p>
-                ) : null}
-                {outboundMessage.status === "failed" &&
-                retryBlockedByContentChange ? (
-                  <p className="mt-2 text-xs leading-5 text-warning-ink">
-                    This failed message uses an earlier content snapshot. Create
-                    a new draft to send revised content.
-                  </p>
-                ) : null}
-                {outboundMessage.status === "failed" &&
-                retryBlockedByInactiveConversation ? (
-                  <p className="mt-2 text-xs leading-5 text-warning-ink">
-                    This conversation is archived. Reopen it before retrying.
-                    This message cannot be retargeted.
-                  </p>
-                ) : null}
+                <dl className="mt-3 grid gap-3 text-sm sm:grid-cols-2">
+                  <div>
+                    <dt className="text-xs font-medium text-ink-soft">
+                      Customer need
+                    </dt>
+                    <dd className="font-semibold text-ink">
+                      {intentLabels[selectedDraft.intent]}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt className="text-xs font-medium text-ink-soft">
+                      Draft source
+                    </dt>
+                    <dd className="font-semibold text-ink">
+                      {selectedDraft.provider === "gemini" &&
+                      !selectedDraft.isDemo
+                        ? "Gemini AI (live)"
+                        : "Mock demonstration"}
+                    </dd>
+                  </div>
+                </dl>
+                <div className="mt-4">
+                  <h4 className="text-xs font-semibold text-ink-soft">
+                    Information to confirm
+                  </h4>
+                  {selectedDraft.missingInformation.length > 0 ? (
+                    <ul className="mt-1.5 list-disc space-y-1 pl-5 text-sm leading-6 text-ink">
+                      {selectedDraft.missingInformation.map((item) => (
+                        <li key={item}>{item}</li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <p className="mt-1.5 text-sm text-ink-soft">
+                      No additional information flagged for confirmation.
+                    </p>
+                  )}
+                </div>
               </section>
-          ) : null}
 
-          {/* Lead and enquiry context */}
-          <section
-            aria-labelledby="draft-enquiry-title"
-            className="rounded-xl border border-line bg-hushed p-4"
-          >
-            <h3
-              id="draft-enquiry-title"
-              className="text-xs font-semibold uppercase tracking-wide text-ink-faint"
-            >
-              Lead and enquiry context
-            </h3>
-            <p className="mt-2 text-sm leading-6 text-ink">
-              {selectedDraft.summary}
-            </p>
-            <dl className="mt-3 grid gap-3 text-sm sm:grid-cols-2">
-              <div>
-                <dt className="text-xs font-medium text-ink-soft">Intent</dt>
-                <dd className="font-medium text-ink">
-                  {intentLabels[selectedDraft.intent]}
-                </dd>
-              </div>
-              <div>
-                <dt className="text-xs font-medium text-ink-soft">Provider</dt>
-                <dd className="font-medium text-ink">
-                  {selectedDraft.provider === "gemini" && !selectedDraft.isDemo
-                    ? "Gemini AI"
-                    : "Mock demonstration"}
-                </dd>
-              </div>
-            </dl>
-            <div className="mt-3">
-              <h4 className="text-xs font-semibold uppercase tracking-wide text-ink-faint">
-                Information to confirm
-              </h4>
-              {selectedDraft.missingInformation.length > 0 ? (
-                <ul className="mt-1.5 list-disc space-y-1 pl-5 text-sm leading-6 text-ink">
-                  {selectedDraft.missingInformation.map((item) => (
-                    <li key={item}>{item}</li>
-                  ))}
-                </ul>
-              ) : (
-                <p className="mt-1.5 text-sm text-ink-soft">
-                  No additional information identified.
-                </p>
-              )}
-            </div>
-            <div className="mt-3">
               <BusinessInformationUsed draft={selectedDraft} />
             </div>
-          </section>
+          </Activity>
 
-          {/* Generated, editable reply */}
-          <section aria-labelledby="draft-reply-editor-title">
-            <div className="flex items-center justify-between gap-3">
-              <h3
-                id="draft-reply-editor-title"
-                className="text-sm font-semibold text-ink"
-              >
-                Suggested reply
-              </h3>
-              <span className="text-xs text-ink-faint">
-                {editedReply.length}/2000
-              </span>
+          <Activity mode={activeTab === "history" ? "visible" : "hidden"}>
+            <div
+              id="draft-panel-history"
+              role="tabpanel"
+              aria-labelledby="draft-tab-history"
+            >
+              <section aria-labelledby="draft-history-title">
+                <h3
+                  id="draft-history-title"
+                  className="text-sm font-semibold text-ink"
+                >
+                  Saved draft history
+                </h3>
+                <p className="help-text">
+                  Select a saved draft to load its text, sources, and approval
+                  status into the editor.
+                </p>
+                <ul className="mt-3 divide-y divide-line rounded-xl border border-line bg-surface">
+                  {drafts.map((draft) => {
+                    const selected = draft.id === selectedDraftId;
+
+                    return (
+                      <li key={draft.id}>
+                        <button
+                          type="button"
+                          onClick={() => selectDraft(draft)}
+                          disabled={isBusy}
+                          aria-current={selected ? "true" : undefined}
+                          className={`flex min-h-12 w-full cursor-pointer flex-col gap-1.5 px-4 py-3 text-left transition-colors disabled:cursor-not-allowed disabled:opacity-60 sm:flex-row sm:items-center sm:justify-between ${
+                            selected ? "bg-accent-soft" : "hover:bg-hushed"
+                          }`}
+                        >
+                          <span className="flex flex-wrap items-center gap-2">
+                            <StatusBadge status={draft.status} />
+                            <span className="numeric-tabular text-xs text-ink-soft">
+                              {intentLabels[draft.intent]} ·{" "}
+                              {formatDraftTime(draft.updatedAt)}
+                            </span>
+                          </span>
+                          <span className="max-w-full truncate text-xs text-ink-soft sm:max-w-xs">
+                            {draft.draftReply}
+                          </span>
+                        </button>
+                      </li>
+                    );
+                  })}
+                </ul>
+              </section>
             </div>
-            <textarea
-              id="draft-reply"
-              value={editedReply}
-              onChange={(event) => {
-                setEditedReply(event.target.value);
-                setValidationError(null);
-                setActionError(null);
-                setNotice(null);
-                setCopyMessage(null);
-              }}
-              rows={8}
-              maxLength={2000}
-              aria-invalid={validationError ? true : undefined}
-              aria-describedby="draft-reply-edit-warning"
-              className="textarea mt-2"
-            />
-            <p
-              id="draft-reply-edit-warning"
-              className="help-text mt-2"
-            >
-              {hasUnsavedChanges
-                ? "You have edited this reply. Your changes may no longer be supported by the original business facts and require your own review."
-                : "Editing this reply may make parts of it unsupported by the original business facts. Saving changes returns the draft to draft status."}
-            </p>
-            {validationError ? (
-              <p role="alert" className="mt-1 text-xs font-medium text-danger-ink">
-                {validationError}
-              </p>
-            ) : null}
-          </section>
-
-          {actionError ? (
-            <p
-              role="alert"
-              className="rounded-xl border border-[color-mix(in_oklab,var(--rp-danger)_25%,transparent)] bg-danger-soft px-4 py-3 text-sm text-danger-ink"
-            >
-              {actionError}
-            </p>
-          ) : null}
-
-          <p
-            aria-live="polite"
-            className={`text-sm ${notice || copyMessage ? "text-ink" : ""}`}
-          >
-            {notice ?? copyMessage ?? ""}
-          </p>
-
-          <div className="flex flex-col-reverse gap-3 border-t border-line pt-5 sm:flex-row sm:flex-wrap sm:justify-end">
-            <button
-              type="button"
-              onClick={() => void createNewDraft()}
-              disabled={isBusy || isLoading}
-              className="btn btn-secondary"
-            >
-              {pendingAction === "new" ? "Creating…" : "New draft"}
-            </button>
-            <button
-              type="button"
-              onClick={() => void regenerateDraft()}
-              disabled={isBusy || isLoading}
-              className="btn btn-secondary"
-            >
-              {pendingAction === "regenerate"
-                ? "Regenerating…"
-                : "Regenerate draft"}
-            </button>
-            <button
-              type="button"
-              onClick={() => void copyReply()}
-              disabled={!editedReply.trim() || isBusy}
-              className="btn btn-secondary"
-            >
-              Copy reply
-            </button>
-            <button
-              type="button"
-              onClick={() => void saveReply()}
-              disabled={
-                isBusy || !hasUnsavedChanges || !editedReply.trim()
-              }
-              className="btn btn-secondary"
-            >
-              {pendingAction === "save" ? "Saving…" : "Save changes"}
-            </button>
-            {selectedDraft.status === "approved" ? (
-              <>
-                <button
-                  type="button"
-                  onClick={() => void queueApprovedSend()}
-                  disabled={
-                      isBusy ||
-                      outboundLoading ||
-                      approvalContextLoading ||
-                      Boolean(outboundLoadError) ||
-                      Boolean(approvalContextError) ||
-                      outboundAlreadyHandled ||
-                      hasUnsavedChanges ||
-                      retryBlockedByContentChange ||
-                      retryBlockedByInactiveConversation
-                  }
-                  className="btn btn-primary"
-                >
-                  {pendingAction === "send"
-                      ? "Queueing…"
-                      : outboundMessage?.status === "failed"
-                        ? retryBlockedByContentChange ||
-                          retryBlockedByInactiveConversation
-                          ? "Retry unavailable"
-                          : "Retry queued send"
-                        : outboundMessage?.status === "queued"
-                          ? "Already queued"
-                          : outboundMessage?.status === "sending"
-                            ? "Sending"
-                            : outboundMessage?.status === "sent"
-                              ? "Already sent"
-                              : outboundMessage?.status === "delivered"
-                                ? "Delivered"
-                                : outboundMessage?.status === "manual_review"
-                                  ? "Needs manual review"
-                                  : outboundMessage?.status === "cancelled"
-                                    ? "Cannot queue cancelled message"
-                                    : "Queue approved reply"}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => void updateStatus("draft")}
-                  disabled={isBusy}
-                  className="btn btn-secondary"
-                >
-                  {pendingAction === "unapprove"
-                    ? "Returning…"
-                    : "Return to draft"}
-                </button>
-              </>
-            ) : (
-              <button
-                type="button"
-                onClick={() => void updateStatus("approved")}
-                disabled={isBusy || hasUnsavedChanges}
-                className="btn btn-primary"
-              >
-                {pendingAction === "approve"
-                  ? effectiveSendPolicy === "approve_and_send"
-                    ? "Approving and queueing…"
-                    : "Approving…"
-                  : effectiveSendPolicy === "approve_and_send"
-                    ? "Approve and queue"
-                    : "Approve draft"}
-              </button>
-            )}
-          </div>
-
-          {hasUnsavedChanges ? (
-            <p className="-mt-3 text-right text-xs text-ink-soft">
-              Save your edits before approving them. Saving returns the draft
-              to draft status for a separate review.
-            </p>
-          ) : null}
-
-          {/* Draft history */}
-          <section aria-labelledby="draft-history-title">
-            <h3
-              id="draft-history-title"
-              className="text-sm font-semibold text-ink"
-            >
-              Previously saved drafts
-            </h3>
-            <p className="help-text mt-1">
-              Select a saved draft to restore its text, business facts, and
-              review status. Switching drafts discards unsaved edits.
-            </p>
-            <ul className="mt-3 divide-y divide-line rounded-xl border border-line">
-              {drafts.map((draft) => {
-                const selected = draft.id === selectedDraftId;
-
-                return (
-                  <li key={draft.id}>
-                    <button
-                      type="button"
-                      onClick={() => selectDraft(draft)}
-                      disabled={isBusy}
-                      aria-current={selected ? "true" : undefined}
-                      className={`flex w-full flex-col gap-2 px-4 py-3 text-left transition-colors disabled:cursor-not-allowed disabled:opacity-60 sm:flex-row sm:items-center sm:justify-between ${
-                        selected ? "bg-accent-soft" : "hover:bg-hushed"
-                      }`}
-                    >
-                      <span className="flex flex-wrap items-center gap-2">
-                        <StatusBadge status={draft.status} />
-                        <span className="text-xs text-ink-soft">
-                          {intentLabels[draft.intent]} ·{" "}
-                          {formatDraftTime(draft.updatedAt)}
-                        </span>
-                      </span>
-                      <span className="max-w-full truncate text-xs text-ink-soft sm:max-w-xs">
-                        {draft.draftReply}
-                      </span>
-                    </button>
-                  </li>
-                );
-              })}
-            </ul>
-          </section>
+          </Activity>
         </div>
       ) : (
         <div className="py-10 text-center">
@@ -1899,7 +2048,7 @@ export function DraftReplyDialog({
             <button
               type="button"
               onClick={() => void loadDrafts(lead)}
-              className="btn btn-quiet mt-4"
+              className="btn btn-secondary mt-4"
             >
               Try again
             </button>

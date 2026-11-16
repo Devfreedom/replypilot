@@ -14,6 +14,7 @@ import {
 import { ProtectedApp } from "@/components/protected-app";
 import { StatCard } from "@/components/stat-card";
 import { Alert, PageHeading, SectionState } from "@/components/ui";
+import { BRAND } from "@/lib/brand";
 import {
   LEAD_FILTERS,
   dashboardViewHref,
@@ -114,10 +115,10 @@ function AttentionItem({
 
       <div className="flex flex-wrap items-center gap-2 text-xs text-ink-soft">
         <span className={STATUS_BADGES[lead.status]}>{lead.status}</span>
-        <span className="whitespace-nowrap font-medium">
+        <span className="numeric-tabular whitespace-nowrap font-medium">
           {overdueDays > 0
             ? dueDate
-              ? `Overdue — was due ${dueDate}`
+              ? `Overdue (due ${dueDate})`
               : "Overdue"
             : dueDate
               ? `Due ${dueDate}`
@@ -129,7 +130,7 @@ function AttentionItem({
         <button
           type="button"
           onClick={() => onDraftReply(lead)}
-          className="btn btn-quiet shrink-0"
+          className="btn btn-secondary min-h-10 shrink-0 px-3.5 py-2 text-xs"
         >
           Draft reply
         </button>
@@ -139,11 +140,16 @@ function AttentionItem({
 }
 
 /**
- * Contextual next-steps panel. Copy stays truthful: reply drafting uses the
- * mock provider, WhatsApp is inbound-only, and business facts come from
- * Business settings.
+ * Contextual next-steps panel showing truthful provider behavior and
+ * owner-approval guarantees.
  */
-function NextSteps({ leadCount }: { leadCount: number }) {
+function NextSteps({
+  leadCount,
+  isGemini,
+}: {
+  leadCount: number;
+  isGemini: boolean;
+}) {
   return (
     <section
       aria-labelledby="next-steps-title"
@@ -170,7 +176,7 @@ function NextSteps({ leadCount }: { leadCount: number }) {
               1.
             </span>
             <span>
-              Keep every enquiry moving by setting a follow-up date on leads
+              Keep every enquiry moving by setting a follow-up reminder on leads
               waiting on a response. Follow-ups due appear at the top of this
               dashboard.
             </span>
@@ -178,7 +184,7 @@ function NextSteps({ leadCount }: { leadCount: number }) {
         )}
         <li className="flex gap-2.5">
           <span aria-hidden="true" className="font-semibold text-ink">
-            {leadCount === 0 ? "2." : "2."}
+            2.
           </span>
           <span>
             In{" "}
@@ -188,7 +194,7 @@ function NextSteps({ leadCount }: { leadCount: number }) {
             >
               Business settings
             </Link>
-            , add the services, prices, opening hours and policies you want
+            , add the services, prices, opening hours, and policies you want
             reply drafts to use.
           </span>
         </li>
@@ -197,9 +203,9 @@ function NextSteps({ leadCount }: { leadCount: number }) {
             3.
           </span>
           <span>
-            Open a lead and draft a reply. Drafts are demonstration output from
-            a mock provider and never send a customer message — review them
-            before sending anything yourself.
+            {isGemini
+              ? "Open a lead to generate a grounded AI reply from your approved business facts. Every reply waits for your review before it can be queued."
+              : "Open a lead to prepare a demonstration reply from your approved details. No live AI model is enabled, and nothing is sent without your approval."}
           </span>
         </li>
       </ol>
@@ -402,7 +408,7 @@ function LeadsPanel({
               Showing {displayedLeads.length} of {leads.length}{" "}
               {followUpsOnly ? "follow-ups due" : "leads"}
             </span>
-            <span>Status changes are saved to the local development API.</span>
+            <span>Changes save directly to your business workspace.</span>
           </div>
         </div>
       )}
@@ -411,7 +417,7 @@ function LeadsPanel({
 }
 
 function Dashboard() {
-  const { role } = useAuth();
+  const { role, replyDraftProvider } = useAuth();
   const canManage = role === "owner";
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -562,6 +568,7 @@ function Dashboard() {
         {
           code: failure?.code,
           conflictingLeadId: failure?.conflictingLeadId,
+          details: failure?.details,
         },
       );
     }
@@ -742,12 +749,21 @@ function Dashboard() {
               />
             </section>
 
-            <NextSteps leadCount={leads.length} />
+            <NextSteps
+              leadCount={leads.length}
+              isGemini={replyDraftProvider === "gemini"}
+            />
           </div>
         </Activity>
 
         <Activity mode={view === "leads" ? "visible" : "hidden"}>
-          <div className="mt-8">
+          <section className="card mt-8 overflow-hidden">
+            <div className="border-b border-line px-5 py-4 sm:px-6">
+              <h2 className="font-bold text-ink">All customer enquiries</h2>
+              <p className="mt-0.5 text-xs text-ink-soft">
+                Filter by booking stage or search by customer name and service.
+              </p>
+            </div>
             <LeadsPanel
               leads={leads}
               allLeadCount={leads.length}
@@ -761,11 +777,17 @@ function Dashboard() {
               onRetryLoad={() => setLoadAttempt((current) => current + 1)}
               onOpenNewLead={() => setModalOpen(true)}
             />
-          </div>
+          </section>
         </Activity>
 
         <Activity mode={view === "follow-ups" ? "visible" : "hidden"}>
-          <div className="mt-8">
+          <section className="card mt-8 overflow-hidden">
+            <div className="border-b border-line px-5 py-4 sm:px-6">
+              <h2 className="font-bold text-ink">Enquiries needing attention</h2>
+              <p className="mt-0.5 text-xs text-ink-soft">
+                Follow-ups overdue or due today, oldest reminder first.
+              </p>
+            </div>
             <LeadsPanel
               leads={followUpLeads}
               allLeadCount={leads.length}
@@ -780,11 +802,11 @@ function Dashboard() {
               onOpenNewLead={() => setModalOpen(true)}
               followUpsOnly
             />
-          </div>
+          </section>
         </Activity>
 
         <footer className="py-10 text-center text-xs text-ink-faint">
-          ReplyPilot · Built to help small businesses follow up
+          {BRAND.name} - {BRAND.footerTagline}
         </footer>
       </div>
 

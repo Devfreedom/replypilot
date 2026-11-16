@@ -49,11 +49,19 @@ export const WHATSAPP_LEAD_DUPLICATE_NUMBER_CODE =
 export const WHATSAPP_LEAD_NUMBER_UNRESOLVED_CODE =
   "WHATSAPP_LEAD_NUMBER_UNRESOLVED";
 
+export const leadValidationDetailSchema = z.object({
+  field: z.string(),
+  message: z.string(),
+});
+
+export type LeadValidationDetail = z.infer<typeof leadValidationDetailSchema>;
+
 /** The error payload the API returns when a lead cannot be created. */
 export const leadCreationErrorSchema = z.object({
   error: z.string(),
   code: z.string().optional(),
   conflictingLeadId: z.uuid().optional(),
+  details: z.array(leadValidationDetailSchema).optional(),
 });
 
 export type LeadCreationErrorPayload = z.infer<typeof leadCreationErrorSchema>;
@@ -69,17 +77,21 @@ export class LeadApiError extends Error {
 
   readonly conflictingLeadId: string | undefined;
 
+  readonly details: readonly LeadValidationDetail[] | undefined;
+
   constructor(
     message: string,
     options: Readonly<{
       code?: string;
       conflictingLeadId?: string;
+      details?: readonly LeadValidationDetail[];
     }> = {},
   ) {
     super(message);
     this.name = "LeadApiError";
     this.code = options.code;
     this.conflictingLeadId = options.conflictingLeadId;
+    this.details = options.details;
   }
 }
 

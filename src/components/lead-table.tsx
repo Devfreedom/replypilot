@@ -9,11 +9,15 @@ import {
 } from "@/lib/leads";
 
 function initials(name: string): string {
-  return name
-    .split(" ")
-    .map((part) => part[0])
-    .join("")
-    .slice(0, 2);
+  return (
+    name
+      .split(" ")
+      .map((part) => part[0])
+      .filter(Boolean)
+      .join("")
+      .slice(0, 2)
+      .toUpperCase() || "?"
+  );
 }
 
 const STATUS_BADGES: Record<LeadStatus, string> = {
@@ -24,9 +28,7 @@ const STATUS_BADGES: Record<LeadStatus, string> = {
 };
 
 function StatusBadge({ lead }: { lead: Lead }) {
-  return (
-    <span className={STATUS_BADGES[lead.status]}>{lead.status}</span>
-  );
+  return <span className={STATUS_BADGES[lead.status]}>{lead.status}</span>;
 }
 
 function FollowUpIndicator({ lead }: { lead: Lead }) {
@@ -35,7 +37,7 @@ function FollowUpIndicator({ lead }: { lead: Lead }) {
 
     return (
       <span
-        className={`inline-flex items-center gap-2 whitespace-nowrap text-xs font-medium ${
+        className={`inline-flex items-center gap-2 whitespace-nowrap text-xs font-semibold ${
           overdueDays > 0 ? "text-danger-ink" : "text-warning-ink"
         }`}
       >
@@ -45,17 +47,22 @@ function FollowUpIndicator({ lead }: { lead: Lead }) {
             overdueDays > 0 ? "bg-danger" : "bg-warning"
           }`}
         />
-        Follow-up due
+        {overdueDays > 0 ? "Overdue follow-up" : "Follow-up due"}
       </span>
     );
   }
 
-  const scheduled = lead.nextFollowUpAt && !Number.isNaN(Date.parse(lead.nextFollowUpAt))
-    ? formatFollowUpDate(lead.nextFollowUpAt)
-    : null;
+  const scheduled =
+    lead.nextFollowUpAt && !Number.isNaN(Date.parse(lead.nextFollowUpAt))
+      ? formatFollowUpDate(lead.nextFollowUpAt)
+      : null;
 
   if (scheduled && lead.status !== "Booked") {
-    return <span className="text-xs text-ink-soft">Follow-up {scheduled}</span>;
+    return (
+      <span className="numeric-tabular text-xs text-ink-soft">
+        Follow-up {scheduled}
+      </span>
+    );
   }
 
   return <span className="text-xs text-ink-faint">Up to date</span>;
@@ -71,7 +78,10 @@ function Channel({ lead }: { lead: Lead }) {
         </>
       ) : (
         <>
-          <span aria-hidden="true" className="h-2 w-2 rounded-full bg-line-strong" />
+          <span
+            aria-hidden="true"
+            className="h-2 w-2 rounded-full bg-line-strong"
+          />
           Manual
         </>
       )}
@@ -83,7 +93,7 @@ function Avatar({ name }: { name: string }) {
   return (
     <span
       aria-hidden="true"
-      className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-hushed text-sm font-bold text-ink-soft"
+      className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-accent-soft text-sm font-bold text-accent-ink"
     >
       {initials(name)}
     </span>
@@ -103,7 +113,9 @@ function DraftReplyButton({
     <button
       type="button"
       onClick={() => onDraftReply(lead)}
-      className={`btn btn-quiet ${block ? "w-fit" : "whitespace-nowrap"}`}
+      className={`btn btn-secondary min-h-10 px-3.5 py-2 text-xs ${
+        block ? "w-full sm:w-auto" : "whitespace-nowrap"
+      }`}
     >
       Draft reply
     </button>
@@ -129,10 +141,10 @@ export function LeadTable({
 }) {
   return (
     <>
-      {/* Accessible card layout for small screens; the table is used from md up. */}
+      {/* Card list optimised for single-thumb mobile scanning below md. */}
       <ul className="divide-y divide-line md:hidden">
         {leads.map((lead) => (
-          <li key={lead.id} className="p-4">
+          <li key={lead.id} className="space-y-3 p-4">
             <div className="flex items-start justify-between gap-3">
               <div className="flex min-w-0 items-center gap-3">
                 <Avatar name={lead.name} />
@@ -156,17 +168,11 @@ export function LeadTable({
               )}
             </div>
 
-            <p className="mt-3 text-sm leading-6 text-ink-soft">
+            <p className="line-clamp-3 text-sm leading-6 text-ink-soft">
               {lead.lastMessage}
             </p>
 
-            {canManage ? (
-              <div className="mt-2">
-                <DraftReplyButton lead={lead} onDraftReply={onDraftReply} block />
-              </div>
-            ) : null}
-
-            <dl className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-ink-soft">
+            <dl className="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-xs text-ink-soft">
               <div className="flex items-center gap-1.5">
                 <dt className="sr-only">Channel</dt>
                 <dd>
@@ -175,7 +181,9 @@ export function LeadTable({
               </div>
               <div className="flex items-center gap-1.5">
                 <dt className="sr-only">Received</dt>
-                <dd>{formatCreatedAt(lead.createdAt)}</dd>
+                <dd className="numeric-tabular">
+                  {formatCreatedAt(lead.createdAt)}
+                </dd>
               </div>
               <div className="flex items-center">
                 <dt className="sr-only">Follow-up</dt>
@@ -184,23 +192,34 @@ export function LeadTable({
                 </dd>
               </div>
             </dl>
+
+            {canManage ? (
+              <div className="pt-1">
+                <DraftReplyButton
+                  lead={lead}
+                  onDraftReply={onDraftReply}
+                  block
+                />
+              </div>
+            ) : null}
           </li>
         ))}
       </ul>
 
       <div className="hidden overflow-x-auto md:block">
         <table className="w-full text-left">
-          <thead className="bg-hushed">
-            <tr className="text-xs font-semibold uppercase tracking-wider text-ink-faint">
+          <thead className="border-b border-line bg-hushed/70">
+            <tr className="text-xs font-semibold text-ink-soft">
               <th scope="col" className="px-4 py-3.5 font-semibold xl:px-6">
                 Customer
               </th>
               <th scope="col" className="px-4 py-3.5 font-semibold xl:px-6">
-                Service / enquiry
+                Service &amp; enquiry
               </th>
-              {/* Channel and Received are secondary context: they stay available
-                  via horizontal scroll at md and on the mobile card layout. */}
-              <th scope="col" className="hidden px-4 py-3.5 font-semibold lg:table-cell xl:px-6">
+              <th
+                scope="col"
+                className="hidden px-4 py-3.5 font-semibold lg:table-cell xl:px-6"
+              >
                 Channel
               </th>
               <th scope="col" className="px-4 py-3.5 font-semibold xl:px-6">
@@ -209,7 +228,10 @@ export function LeadTable({
               <th scope="col" className="px-4 py-3.5 font-semibold xl:px-6">
                 Follow-up
               </th>
-              <th scope="col" className="hidden whitespace-nowrap px-4 py-3.5 font-semibold xl:table-cell xl:px-6">
+              <th
+                scope="col"
+                className="hidden whitespace-nowrap px-4 py-3.5 font-semibold xl:table-cell xl:px-6"
+              >
                 Received
               </th>
               <th scope="col" className="px-4 py-3.5 font-semibold xl:px-6">
@@ -220,7 +242,7 @@ export function LeadTable({
 
           <tbody className="divide-y divide-line">
             {leads.map((lead) => (
-              <tr key={lead.id} className="transition-colors hover:bg-hushed/60">
+              <tr key={lead.id} className="transition-colors hover:bg-hushed/50">
                 <td className="px-4 py-4 xl:px-6">
                   <div className="flex items-center gap-3">
                     <Avatar name={lead.name} />
@@ -232,7 +254,7 @@ export function LeadTable({
 
                 <td className="max-w-xs px-4 py-4 xl:px-6">
                   <p className="text-sm font-medium text-ink">{lead.service}</p>
-                  <p className="mt-1 line-clamp-2 text-xs text-ink-faint">
+                  <p className="mt-1 line-clamp-2 text-xs leading-5 text-ink-soft">
                     {lead.lastMessage}
                   </p>
                 </td>
@@ -257,7 +279,7 @@ export function LeadTable({
                   <FollowUpIndicator lead={lead} />
                 </td>
 
-                <td className="hidden whitespace-nowrap px-4 py-4 text-xs text-ink-soft xl:table-cell xl:px-6">
+                <td className="numeric-tabular hidden whitespace-nowrap px-4 py-4 text-xs text-ink-soft xl:table-cell xl:px-6">
                   {formatCreatedAt(lead.createdAt)}
                 </td>
 
@@ -265,7 +287,7 @@ export function LeadTable({
                   {canManage ? (
                     <DraftReplyButton lead={lead} onDraftReply={onDraftReply} />
                   ) : (
-                    <span className="text-xs text-ink-faint">Read-only</span>
+                    <span className="text-xs text-ink-soft">Read-only</span>
                   )}
                 </td>
               </tr>
