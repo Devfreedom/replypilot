@@ -14,7 +14,7 @@ import {
 } from "@/lib/messaging";
 import { formatWhatsAppTimestamp } from "@/lib/whatsapp";
 import { useAuth } from "./auth-provider";
-import { Alert, Spinner } from "./ui";
+import { Alert, PageHeading, SectionState, Spinner } from "./ui";
 
 const PAGE_SIZE = 20;
 
@@ -203,45 +203,36 @@ export function OutboundHistory() {
     }
   }
 
+  const pageStart = items.length > 0 ? offset + 1 : 0;
+  const pageEnd = offset + items.length;
+
   return (
     <div className="mx-auto max-w-5xl px-4 py-8 sm:px-6 lg:px-8">
-      <div className="mb-6 flex flex-wrap items-start justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight text-ink sm:text-3xl">
-            Outbound messages
-          </h1>
-          <p className="mt-2 max-w-2xl text-sm leading-6 text-ink-soft">
-            Queued and attempted replies for this workspace. Provider acceptance
-            is shown separately from delivery. The server selects the provider;
-            Meta sends are limited to configured test workspaces and recipients
-            and are unavailable in production.
-          </p>
-        </div>
-        <label className="field-label min-w-44">
-          Status
-          <select
-            value={statusFilter}
-            onChange={(event) => {
-              setLoading(true);
-              setError(null);
-              setStatusFilter(event.target.value as StatusFilter);
-              setOffset(0);
-            }}
-            className="input mt-1"
-          >
-            <option value="all">All statuses</option>
-            {OUTBOUND_MESSAGE_STATUSES.map((status) => (
-              <option key={status} value={status}>
-                {OUTBOUND_STATUS_LABELS[status]}
-              </option>
-            ))}
-          </select>
-        </label>
-      </div>
-
-      {error ? (
-        <Alert tone="danger">
-          {error}{" "}
+      <PageHeading
+        title="Outbound messages"
+        description="Track queued replies, sending progress, and WhatsApp delivery confirmations. Messages only enter this queue after your approval."
+      >
+        <div className="flex flex-wrap items-end gap-3">
+          <label className="field-label min-w-44">
+            Status
+            <select
+              value={statusFilter}
+              onChange={(event) => {
+                setLoading(true);
+                setError(null);
+                setStatusFilter(event.target.value as StatusFilter);
+                setOffset(0);
+              }}
+              className="select mt-1"
+            >
+              <option value="all">All statuses</option>
+              {OUTBOUND_MESSAGE_STATUSES.map((status) => (
+                <option key={status} value={status}>
+                  {OUTBOUND_STATUS_LABELS[status]}
+                </option>
+              ))}
+            </select>
+          </label>
           <button
             type="button"
             onClick={() => {
@@ -249,43 +240,93 @@ export function OutboundHistory() {
               setError(null);
               setReloadToken((value) => value + 1);
             }}
-            className="ml-2 font-semibold underline"
+            disabled={loading}
+            className="btn btn-secondary"
           >
-            Try again
+            Refresh
           </button>
-        </Alert>
-      ) : null}
+        </div>
+      </PageHeading>
 
-      {notice ? (
-        <Alert tone="success" role="status">
-          {notice}
-        </Alert>
-      ) : null}
+      <div className="mt-5 space-y-4">
+        {error ? (
+          <Alert tone="danger">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <span>{error}</span>
+              <button
+                type="button"
+                onClick={() => {
+                  setLoading(true);
+                  setError(null);
+                  setReloadToken((value) => value + 1);
+                }}
+                className="btn btn-secondary text-xs"
+              >
+                Try again
+              </button>
+            </div>
+          </Alert>
+        ) : null}
+
+        {notice ? (
+          <Alert tone="success" role="status">
+            {notice}
+          </Alert>
+        ) : null}
+      </div>
 
       {loading ? (
-        <div className="flex items-center justify-center gap-3 py-16 text-sm text-ink-soft">
+        <div
+          role="status"
+          aria-live="polite"
+          className="mt-6 flex items-center justify-center gap-3 py-16 text-sm text-ink-soft"
+        >
           <Spinner />
           Loading outbound messages…
         </div>
       ) : items.length === 0 ? (
-        <div className="card p-8 text-center">
-          <h2 className="font-semibold text-ink">No outbound messages yet</h2>
-          <p className="mx-auto mt-2 max-w-xl text-sm leading-6 text-ink-soft">
-            Approve a reply with the approve-and-send policy, or send an approved
-            draft explicitly. Queued messages appear here.
-          </p>
+        <div className="card mt-6">
+          {statusFilter === "all" ? (
+            <SectionState icon="◌" title="No outbound messages yet">
+              <p>
+                Approve a drafted reply from a lead to add it to the send queue.
+                Queued and delivered messages appear here.
+              </p>
+            </SectionState>
+          ) : (
+            <SectionState
+              icon="◌"
+              title={`No ${OUTBOUND_STATUS_LABELS[statusFilter].toLowerCase()} messages`}
+              action={
+                <button
+                  type="button"
+                  onClick={() => {
+                    setLoading(true);
+                    setError(null);
+                    setStatusFilter("all");
+                    setOffset(0);
+                  }}
+                  className="btn btn-secondary"
+                >
+                  Show all statuses
+                </button>
+              }
+            >
+              <p>No messages in this workspace currently match this filter.</p>
+            </SectionState>
+          )}
         </div>
       ) : (
-        <ul className="space-y-3">
+        <ul className="mt-6 space-y-3">
           {items.map((item) => (
             <li key={item.id} className="card p-5">
               <div className="flex flex-wrap items-start justify-between gap-3">
-                <div className="min-w-0">
+                <div className="min-w-0 flex-1">
                   <div className="flex flex-wrap items-center gap-2">
                     <span className={statusBadgeClass(item.status)}>
                       {OUTBOUND_STATUS_LABELS[item.status]}
                     </span>
-                    <span className="text-sm font-semibold text-ink">
+                    <span className="break-words text-sm font-semibold text-ink">
                       {customerName(item)}
                     </span>
                   </div>
@@ -308,13 +349,13 @@ export function OutboundHistory() {
               <dl className="mt-4 grid gap-3 text-xs sm:grid-cols-3">
                 <div>
                   <dt className="font-medium text-ink-soft">Queued</dt>
-                  <dd className="mt-0.5 text-ink">
+                  <dd className="numeric-tabular mt-0.5 text-ink">
                     {formatWhatsAppTimestamp(item.queuedAt)}
                   </dd>
                 </div>
                 <div>
                   <dt className="font-medium text-ink-soft">Attempt started</dt>
-                  <dd className="mt-0.5 text-ink">
+                  <dd className="numeric-tabular mt-0.5 text-ink">
                     {item.startedAt
                       ? formatWhatsAppTimestamp(item.startedAt)
                       : "Not claimed"}
@@ -324,7 +365,7 @@ export function OutboundHistory() {
                   <dt className="font-medium text-ink-soft">
                     Provider accepted
                   </dt>
-                  <dd className="mt-0.5 text-ink">
+                  <dd className="numeric-tabular mt-0.5 text-ink">
                     {item.sentAt
                       ? formatWhatsAppTimestamp(item.sentAt)
                       : "Not accepted"}
@@ -332,7 +373,7 @@ export function OutboundHistory() {
                 </div>
                 <div>
                   <dt className="font-medium text-ink-soft">Delivered</dt>
-                  <dd className="mt-0.5 text-ink">
+                  <dd className="numeric-tabular mt-0.5 text-ink">
                     {item.deliveredAt
                       ? formatWhatsAppTimestamp(item.deliveredAt)
                       : "Not reported"}
@@ -340,14 +381,18 @@ export function OutboundHistory() {
                 </div>
                 <div>
                   <dt className="font-medium text-ink-soft">Attempts</dt>
-                  <dd className="mt-0.5 text-ink">
+                  <dd className="numeric-tabular mt-0.5 text-ink">
                     {item.attempts} of {item.maxAttempts}
                   </dd>
                 </div>
                 <div>
                   <dt className="font-medium text-ink-soft">Provider</dt>
-                  <dd className="mt-0.5 text-ink">
-                    {item.provider === "mock" ? "Mock provider" : item.provider}
+                  <dd className="mt-0.5 break-all text-ink sm:break-words">
+                    {item.provider === "mock"
+                      ? "Mock provider (test preview only)"
+                      : item.provider === "meta"
+                        ? "WhatsApp Cloud"
+                        : item.provider}
                     {item.providerMessageId
                       ? ` · ${item.providerMessageId}`
                       : ""}
@@ -371,31 +416,37 @@ export function OutboundHistory() {
       )}
 
       {!loading && (offset > 0 || hasMore) ? (
-        <div className="mt-6 flex items-center justify-between gap-3">
-          <button
-            type="button"
-            onClick={() => {
-              setLoading(true);
-              setError(null);
-              setOffset(Math.max(0, offset - PAGE_SIZE));
-            }}
-            disabled={offset === 0}
-            className="btn btn-secondary"
-          >
-            Previous
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              setLoading(true);
-              setError(null);
-              setOffset(offset + PAGE_SIZE);
-            }}
-            disabled={!hasMore}
-            className="btn btn-secondary"
-          >
-            Next
-          </button>
+        <div className="mt-6 flex flex-wrap items-center justify-between gap-3">
+          <p className="numeric-tabular text-xs text-ink-soft">
+            Showing {pageStart}–{pageEnd}
+            {hasMore ? " (more available)" : ""}
+          </p>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => {
+                setLoading(true);
+                setError(null);
+                setOffset(Math.max(0, offset - PAGE_SIZE));
+              }}
+              disabled={offset === 0}
+              className="btn btn-secondary"
+            >
+              Previous
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setLoading(true);
+                setError(null);
+                setOffset(offset + PAGE_SIZE);
+              }}
+              disabled={!hasMore}
+              className="btn btn-secondary"
+            >
+              Next
+            </button>
+          </div>
         </div>
       ) : null}
     </div>

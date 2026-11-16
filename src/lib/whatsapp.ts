@@ -196,6 +196,47 @@ export function conversationOptionLabel(
   return `${conversationDisplayName(conversation)} · ${identity.label}: ${identity.value} · WhatsApp number ${conversation.phoneNumberId}`;
 }
 
+export function filterConversations(
+  conversations: readonly WhatsAppConversation[],
+  rawQuery: string,
+): WhatsAppConversation[] {
+  const query = rawQuery.trim().toLowerCase();
+
+  if (!query) {
+    return [...conversations];
+  }
+
+  const normalizedPhoneQuery = query.replace(/[\s()-]/g, "");
+
+  return conversations.filter((conversation) => {
+    const candidates = [
+      conversationDisplayName(conversation),
+      conversation.customer.phoneE164,
+      conversation.customer.providerContactId,
+      conversation.lastMessagePreview,
+      conversation.phoneNumberId,
+    ];
+
+    for (const candidate of candidates) {
+      if (candidate?.toLowerCase().includes(query)) {
+        return true;
+      }
+    }
+
+    if (normalizedPhoneQuery.length >= 2 && conversation.customer.phoneE164) {
+      const normalizedPhone = conversation.customer.phoneE164
+        .replace(/[\s()-]/g, "")
+        .toLowerCase();
+
+      if (normalizedPhone.includes(normalizedPhoneQuery)) {
+        return true;
+      }
+    }
+
+    return false;
+  });
+}
+
 export function conversationInitials(
   conversation: WhatsAppConversation,
 ): string {

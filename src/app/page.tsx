@@ -422,6 +422,7 @@ function Dashboard() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const view = parseDashboardView(searchParams.get("view"));
+  const requestedLeadId = searchParams.get("leadId");
   const [leads, setLeads] = useState<Lead[]>([]);
   const [modalOpen, setModalOpen] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
@@ -432,6 +433,25 @@ function Dashboard() {
   );
   const [operationError, setOperationError] = useState<string | null>(null);
   const [draftLead, setDraftLead] = useState<Lead | null>(null);
+  const [dismissedLeadParam, setDismissedLeadParam] = useState<string | null>(
+    null,
+  );
+
+  const activeDraftLead = useMemo(() => {
+    if (draftLead) {
+      return draftLead;
+    }
+
+    if (
+      !requestedLeadId ||
+      requestedLeadId === dismissedLeadParam ||
+      isLoading
+    ) {
+      return null;
+    }
+
+    return leads.find((lead) => lead.id === requestedLeadId) ?? null;
+  }, [dismissedLeadParam, draftLead, isLoading, leads, requestedLeadId]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -815,7 +835,17 @@ function Dashboard() {
         onClose={() => setModalOpen(false)}
         onCreate={createLead}
       />
-      <DraftReplyDialog lead={draftLead} onClose={() => setDraftLead(null)} />
+      <DraftReplyDialog
+        lead={activeDraftLead}
+        onClose={() => {
+          setDraftLead(null);
+
+          if (requestedLeadId) {
+            setDismissedLeadParam(requestedLeadId);
+            router.replace(dashboardViewHref(view), { scroll: false });
+          }
+        }}
+      />
     </AppShell>
   );
 }

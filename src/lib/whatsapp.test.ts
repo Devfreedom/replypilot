@@ -7,6 +7,7 @@ import {
   conversationInitials,
   conversationOptionLabel,
   conversationPreview,
+  filterConversations,
   mergeConversations,
   mergeMessages,
   messageDayKey,
@@ -368,4 +369,48 @@ test("status filter options cover every supported view", () => {
     CONVERSATION_FILTERS.map((filter) => filter.label),
     ["Open", "Closed", "Archived", "All"],
   );
+});
+
+test("filterConversations matches customer name, formatted phone, provider ID, or message preview", () => {
+  const ada = conversation({
+    id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    customer: {
+      id: "12121212-1212-4212-8212-121212121212",
+      displayName: "Adaeze Okafor",
+      phoneE164: "+2348031234567",
+      providerContactId: "wamid-ada",
+    },
+    lastMessagePreview: "Looking for traditional wedding photography in Lekki",
+  });
+  const chidi = conversation({
+    id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    customer: {
+      id: "34343434-3434-4434-8434-343434343434",
+      displayName: null,
+      phoneE164: "+2348099988776",
+      providerContactId: "wa_chidi_01",
+    },
+    lastMessagePreview: "How much for Saturday catering?",
+  });
+
+  const all = [ada, chidi];
+
+  assert.equal(filterConversations(all, "   ").length, 2);
+  assert.deepEqual(
+    filterConversations(all, "adaeze").map((c) => c.id),
+    [ada.id],
+  );
+  assert.deepEqual(
+    filterConversations(all, "+234 803 123").map((c) => c.id),
+    [ada.id],
+  );
+  assert.deepEqual(
+    filterConversations(all, "wa_chidi").map((c) => c.id),
+    [chidi.id],
+  );
+  assert.deepEqual(
+    filterConversations(all, "catering").map((c) => c.id),
+    [chidi.id],
+  );
+  assert.deepEqual(filterConversations(all, "nonexistent"), []);
 });
