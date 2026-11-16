@@ -13,9 +13,9 @@ import {
 } from "@/lib/search-option";
 
 const triggerClass =
-  "mt-1 flex w-full min-w-0 items-center justify-between gap-2 rounded-xl border border-line bg-surface px-3 py-2.5 text-left text-sm text-ink outline-none disabled:cursor-not-allowed disabled:bg-hushed disabled:text-ink-soft";
+  "mt-1.5 flex min-h-11 w-full min-w-0 items-center justify-between gap-2 rounded-xl border border-line-strong bg-surface px-3.5 py-2.5 text-left text-sm text-ink outline-none transition-colors focus:border-accent disabled:cursor-not-allowed disabled:border-line disabled:bg-hushed disabled:text-ink-soft";
 const searchInputClass =
-  "w-full min-w-0 rounded-lg border border-line bg-surface px-3 py-2 text-sm text-ink outline-none";
+  "w-full min-w-0 rounded-lg border border-line-strong bg-surface px-3 py-2 text-sm text-ink outline-none focus:border-accent";
 
 type SearchableComboboxProps = {
   id: string;
@@ -258,7 +258,7 @@ export function SearchableCombobox({
           }
         }}
         className={`${triggerClass} ${
-          error ? "border-[color-mix(in_oklab,var(--rp-danger)_25%,transparent)]" : ""
+          error ? "border-danger bg-danger-soft/25" : ""
         }`}
       >
         <span className="truncate">
@@ -276,7 +276,11 @@ export function SearchableCombobox({
       ) : null}
 
       {error ? (
-        <p id={errorId} role="alert" className="mt-1 text-xs text-danger-ink">
+        <p
+          id={errorId}
+          role="alert"
+          className="mt-1.5 text-xs font-medium text-danger-ink"
+        >
           {error}
         </p>
       ) : null}
@@ -325,7 +329,7 @@ export function SearchableCombobox({
                     {showGroup ? (
                       <li
                         role="presentation"
-                        className="px-3 pb-1 pt-2 text-xs font-semibold uppercase tracking-wide text-ink-faint"
+                        className="px-3 pb-1 pt-2.5 text-xs font-semibold text-ink-soft"
                       >
                         {option.group}
                       </li>
@@ -337,7 +341,7 @@ export function SearchableCombobox({
                       onMouseDown={(event) => event.preventDefault()}
                       onMouseEnter={() => setActiveIndex(index)}
                       onClick={() => selectOption(option)}
-                      className={`cursor-pointer px-3 py-2 text-sm ${
+                      className={`min-h-11 cursor-pointer px-3 py-2.5 text-sm ${
                         index === activeIndex
                           ? "bg-accent-soft text-ink"
                           : "text-ink"

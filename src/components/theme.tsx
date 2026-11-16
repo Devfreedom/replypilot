@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useLayoutEffect, useState } from "react";
+import { BRAND } from "@/lib/brand";
 
 export type ThemeChoice = "light" | "dark" | "system";
 
@@ -8,13 +9,63 @@ export type ThemeChoice = "light" | "dark" | "system";
  * Shared with the inline theme initialisation script in src/app/layout.tsx so
  * both read and write the same persisted preference.
  */
-export const THEME_STORAGE_KEY = "replypilot-theme";
+export const THEME_STORAGE_KEY = BRAND.storageThemeKey;
 
 const THEME_CHOICES: { value: ThemeChoice; label: string }[] = [
   { value: "light", label: "Light" },
   { value: "dark", label: "Dark" },
   { value: "system", label: "System" },
 ];
+
+function ThemeIcon({ choice }: { choice: ThemeChoice }) {
+  if (choice === "light") {
+    return (
+      <svg
+        aria-hidden="true"
+        viewBox="0 0 20 20"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.7"
+        strokeLinecap="round"
+        className="h-3.5 w-3.5"
+      >
+        <circle cx="10" cy="10" r="3.5" />
+        <path d="M10 2.5v1.8M10 15.7v1.8M2.5 10h1.8M15.7 10h1.8M4.7 4.7l1.3 1.3M14 14l1.3 1.3M15.3 4.7 14 6M6 14l-1.3 1.3" />
+      </svg>
+    );
+  }
+
+  if (choice === "dark") {
+    return (
+      <svg
+        aria-hidden="true"
+        viewBox="0 0 20 20"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.7"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        className="h-3.5 w-3.5"
+      >
+        <path d="M16 11.7A6.5 6.5 0 0 1 8.3 4 6.5 6.5 0 1 0 16 11.7Z" />
+      </svg>
+    );
+  }
+
+  return (
+    <svg
+      aria-hidden="true"
+      viewBox="0 0 20 20"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.7"
+      className="h-3.5 w-3.5"
+    >
+      <circle cx="10" cy="10" r="6.5" />
+      <path d="M10 3.5v13a6.5 6.5 0 0 0 0-13Z" fill="currentColor" />
+    </svg>
+  );
+}
 
 function systemPrefersDark(): boolean {
   return window.matchMedia("(prefers-color-scheme: dark)").matches;
@@ -126,15 +177,13 @@ export function ThemeSelect() {
           aria-pressed={choice === option.value}
           onClick={() => selectTheme(option.value)}
           title={`Theme: ${option.label}`}
-          className={`cursor-pointer rounded-lg px-2.5 py-2 text-xs font-semibold transition-colors ${
+          className={`inline-flex min-h-9 min-w-9 cursor-pointer items-center justify-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-semibold transition-colors ${
             choice === option.value
-              ? "bg-surface text-ink shadow-sm"
+              ? "bg-surface text-ink shadow-xs ring-1 ring-line"
               : "text-ink-soft hover:text-ink"
           }`}
         >
-          <span aria-hidden="true">
-            {option.value === "light" ? "☀" : option.value === "dark" ? "☾" : "◐"}
-          </span>
+          <ThemeIcon choice={option.value} />
           {/* Below sm the control shows icons only so the mobile top bar keeps
               room for the breadcrumb; the label stays available to screen
               readers. */}

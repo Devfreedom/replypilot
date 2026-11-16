@@ -72,7 +72,7 @@ export function PhoneNumberField({
           <div className="mt-1 flex min-w-0">
             <span
               aria-hidden="true"
-              className="flex shrink-0 items-center gap-1 rounded-l-xl border border-r-0 border-line bg-hushed px-3 py-2.5 text-sm text-ink-soft"
+              className="flex shrink-0 items-center gap-1 rounded-l-xl border border-r-0 border-line-strong bg-hushed px-3 py-2.5 text-sm text-ink-soft"
             >
               {selectedCountry ? (
                 <>
@@ -95,8 +95,10 @@ export function PhoneNumberField({
               aria-describedby={numberDescribedBy}
               aria-invalid={numberError ? true : undefined}
               placeholder="0803 123 4567"
-              className={`min-w-0 flex-1 rounded-r-xl border border-line bg-surface px-3 py-2.5 text-sm text-ink outline-none ${
-                numberError ? "border-[color-mix(in_oklab,var(--rp-danger)_25%,transparent)]" : ""
+              className={`min-w-0 flex-1 rounded-r-xl border bg-surface px-3 py-2.5 text-sm text-ink outline-none focus:border-accent ${
+                numberError
+                  ? "border-danger bg-danger-soft/25"
+                  : "border-line-strong"
               }`}
             />
           </div>
@@ -109,7 +111,7 @@ export function PhoneNumberField({
             <p
               id={numberErrorId}
               role="alert"
-              className="mt-1 text-xs text-danger-ink"
+              className="mt-1 text-xs font-medium text-danger-ink"
             >
               {numberError}
             </p>

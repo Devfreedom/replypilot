@@ -1,30 +1,30 @@
 import type { Metadata } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
+import { Plus_Jakarta_Sans } from "next/font/google";
 import { AuthProvider } from "@/components/auth-provider";
+import { BRAND, brandPageTitle } from "@/lib/brand";
 import "./globals.css";
 
-const geistSans = Geist({
-  variable: "--font-geist-sans",
+const plusJakartaSans = Plus_Jakarta_Sans({
+  variable: "--font-plus-jakarta",
   subsets: ["latin"],
-});
-
-const geistMono = Geist_Mono({
-  variable: "--font-geist-mono",
-  subsets: ["latin"],
+  weight: ["400", "500", "600", "700"],
+  display: "swap",
 });
 
 export const metadata: Metadata = {
-  title: "ReplyPilot · Dashboard",
-  description:
-    "Record enquiries, track follow-ups and prepare replies from your own approved business details.",
+  title: brandPageTitle("Overview"),
+  description: BRAND.metaDescription,
 };
 
 /*
  * Theme initialisation. Runs synchronously before the first paint so the
  * resolved Light/Dark theme is applied without a flash. Preference storage and
- * the System option are shared with src/components/theme.tsx via THEME_STORAGE_KEY.
+ * the System option are shared with src/components/theme.tsx via
+ * BRAND.storageThemeKey.
  */
-const themeInitScript = `(function(){try{var k="replypilot-theme";var s=localStorage.getItem(k);var m=(s==="light"||s==="dark")?s:(window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light");document.documentElement.setAttribute("data-theme",m);document.documentElement.style.colorScheme=m;}catch(e){}})()`;
+const themeInitScript = `(function(){try{var k=${JSON.stringify(
+  BRAND.storageThemeKey,
+)};var s=localStorage.getItem(k);var m=(s==="light"||s==="dark")?s:(window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light");document.documentElement.setAttribute("data-theme",m);document.documentElement.style.colorScheme=m;}catch(e){}})()`;
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
   return (
@@ -32,12 +32,12 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
       lang="en"
       data-theme="light"
       suppressHydrationWarning
-      className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
+      className={`${plusJakartaSans.variable} h-full antialiased`}
     >
       <head>
         <script dangerouslySetInnerHTML={{ __html: themeInitScript }} />
       </head>
-      <body suppressHydrationWarning className="min-h-full">
+      <body suppressHydrationWarning className="min-h-full bg-canvas text-ink">
         <AuthProvider>{children}</AuthProvider>
       </body>
     </html>
