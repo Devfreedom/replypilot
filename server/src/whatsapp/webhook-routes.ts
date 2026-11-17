@@ -10,10 +10,7 @@ import {
   WhatsAppPhoneNumberOwnedByAnotherWorkspaceError,
   WhatsAppWorkspaceNotFoundError,
 } from "./repository.js";
-import {
-  hasAnyConnectionForPhoneNumberId,
-  resolveActiveConnectionByPhoneNumberId,
-} from "./connections.js";
+import { resolveConnectionStateByPhoneNumberId } from "./connections.js";
 import { processDeliveryStatusEvents } from "./delivery-webhook.js";
 import { isValidMetaSignature, safeEqualString } from "./signature.js";
 import type {
@@ -140,31 +137,25 @@ export function createWhatsAppWebhookRouter({
           return cached;
         }
 
-        const connection = await resolveActiveConnectionByPhoneNumberId(
+        const connection = await resolveConnectionStateByPhoneNumberId(
           pool,
           phoneNumberId,
         );
 
-        if (connection) {
-          workspaceByPhoneNumberId.set(phoneNumberId, connection.workspaceId);
-          return connection.workspaceId;
-        }
-
         let resolved: string | null = null;
 
-        if (
+        if (connection) {
+          // Only active connections may receive events. Existing pending,
+          // error, or disconnected rows must fail closed rather than falling
+          // back to legacy auto-provisioning.
+          resolved =
+            connection.status === "active" ? connection.workspaceId : null;
+        } else if (
           legacyPhoneNumberId &&
           legacyWorkspaceId &&
           phoneNumberId === legacyPhoneNumberId
         ) {
-          const exists = await hasAnyConnectionForPhoneNumberId(
-            pool,
-            phoneNumberId,
-          );
-
-          if (!exists) {
-            resolved = legacyWorkspaceId;
-          }
+          resolved = legacyWorkspaceId;
         }
 
         workspaceByPhoneNumberId.set(phoneNumberId, resolved);

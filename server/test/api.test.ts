@@ -6889,6 +6889,245 @@ test("concurrent webhook deliveries create one active conversation", async () =>
   }
 });
 
+test("forced concurrent webhook interleaving deterministically shares one active connection without resolving unknown numbers", async () => {
+  function createDeferred() {
+    let resolve!: () => void;
+    const promise = new Promise<void>((res) => {
+      resolve = res;
+    });
+    return { promise, resolve };
+  }
+
+  let routeLookupCount = 0;
+  let precheckDoneCount = 0;
+  let committedBootstrapCount = 0;
+  let conflictFallbackSelectCount = 0;
+  let postRouteLookupPausedBeforeCommit = false;
+
+  const twoPrechecksSeenZero = createDeferred();
+  const firstBootstrapCommitted = createDeferred();
+
+  const instrumentedPool = new Proxy(pool, {
+    get(target, prop) {
+      if (prop === "query") {
+        return async (...args: unknown[]) => {
+          const firstArg = args[0];
+          const sql =
+            typeof firstArg === "string"
+              ? firstArg
+              : firstArg &&
+                  typeof firstArg === "object" &&
+                  "text" in firstArg &&
+                  typeof (firstArg as { text?: unknown }).text === "string"
+                ? (firstArg as { text: string }).text
+                : "";
+          const params = Array.isArray(args[1]) ? args[1] : undefined;
+          const isTargetRouteLookup =
+            sql.includes("FROM whatsapp_connections") &&
+            sql.includes("ORDER BY") &&
+            params?.[0] === TEST_WHATSAPP_PHONE_NUMBER_ID;
+
+          const lookupOrdinal = isTargetRouteLookup ? ++routeLookupCount : 0;
+          const result = await (
+            target.query as (...qArgs: unknown[]) => Promise<unknown>
+          )(...args);
+
+          if (lookupOrdinal === 3 && committedBootstrapCount === 0) {
+            postRouteLookupPausedBeforeCommit = true;
+            await firstBootstrapCommitted.promise;
+          }
+
+          return result;
+        };
+      }
+
+      if (prop === "connect") {
+        return async (...connectArgs: unknown[]) => {
+          const client = await target.connect(...(connectArgs as []));
+          let transactionInsertedConnection = false;
+
+          return new Proxy(client, {
+            get(clientTarget, clientProp) {
+              if (clientProp === "query") {
+                return async (...args: unknown[]) => {
+                  const firstArg = args[0];
+                  const sql =
+                    typeof firstArg === "string"
+                      ? firstArg
+                      : firstArg &&
+                          typeof firstArg === "object" &&
+                          "text" in firstArg &&
+                          typeof (firstArg as { text?: unknown }).text === "string"
+                        ? (firstArg as { text: string }).text
+                        : "";
+
+                  const isPrecheck =
+                    sql.includes("SELECT id, workspace_id, status") &&
+                    sql.includes("FROM whatsapp_connections");
+                  const isInsertConnection = sql.includes(
+                    "INSERT INTO whatsapp_connections",
+                  );
+                  const isConflictFallbackSelect =
+                    sql.includes("SELECT id, status") &&
+                    sql.includes("FROM whatsapp_connections") &&
+                    sql.includes("WHERE workspace_id = $1");
+
+                  if (isConflictFallbackSelect) {
+                    conflictFallbackSelectCount += 1;
+                  }
+
+                  const result = await (
+                    clientTarget.query as (
+                      ...qArgs: unknown[]
+                    ) => Promise<{ rows: unknown[] }>
+                  )(...args);
+
+                  if (isPrecheck && precheckDoneCount < 2) {
+                    assert.equal(result.rows.length, 0);
+                    precheckDoneCount += 1;
+                    if (precheckDoneCount === 2) {
+                      twoPrechecksSeenZero.resolve();
+                    } else {
+                      await twoPrechecksSeenZero.promise;
+                    }
+                  }
+
+                  if (isInsertConnection && result.rows.length > 0) {
+                    transactionInsertedConnection = true;
+                  }
+
+                  if (
+                    sql.trim().toUpperCase() === "COMMIT" &&
+                    transactionInsertedConnection
+                  ) {
+                    committedBootstrapCount += 1;
+                    firstBootstrapCommitted.resolve();
+                  }
+
+                  return result;
+                };
+              }
+
+              const value = Reflect.get(clientTarget, clientProp, clientTarget);
+              return typeof value === "function"
+                ? value.bind(clientTarget)
+                : value;
+            },
+          });
+        };
+      }
+
+      const value = Reflect.get(target, prop, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  }) as Pool;
+
+  const app = await startServer(
+    instrumentedPool,
+    undefined,
+    {},
+    testWhatsAppConfig(),
+  );
+
+  const validBodies = Array.from({ length: 3 }, (_, index) =>
+    whatsappEnvelope([
+      whatsappChange({
+        messages: [
+          textWhatsAppMessage({
+            id: `wamid.forced-race-${randomUUID()}`,
+            text: `Forced race ${index}`,
+            timestamp: String(1_760_004_500 + index),
+          }),
+        ],
+      }),
+    ]),
+  );
+  const unknownBody = whatsappEnvelope([
+    whatsappChange({
+      phoneNumberId: "999999999999999",
+      messages: [
+        textWhatsAppMessage({
+          id: `wamid.unknown-race-${randomUUID()}`,
+          text: "Unknown number must stay ignored",
+          timestamp: "1760004550",
+        }),
+      ],
+    }),
+  ]);
+
+  try {
+    const [r1, r2, r3, unknownResponse] = await Promise.all([
+      postWhatsApp(app, validBodies[0]),
+      postWhatsApp(app, validBodies[1]),
+      postWhatsApp(app, validBodies[2]),
+      postWhatsApp(app, unknownBody),
+    ]);
+
+    for (const response of [r1, r2, r3]) {
+      assert.equal(response.status, 200);
+      const payload = await readJson<WhatsAppWebhookPayload>(response);
+      assert.equal(payload.stored, 1);
+      assert.equal(payload.duplicates, 0);
+    }
+
+    assert.equal(unknownResponse.status, 200);
+    assert.deepEqual(
+      await readJson<{ status: string }>(unknownResponse),
+      { status: "ignored" },
+    );
+
+    // Also verify a subsequent delivery after bootstrap commit resolves cleanly.
+    const postCommitBody = whatsappEnvelope([
+      whatsappChange({
+        messages: [
+          textWhatsAppMessage({
+            id: `wamid.post-commit-${randomUUID()}`,
+            text: "After bootstrap commit",
+            timestamp: "1760004600",
+          }),
+        ],
+      }),
+    ]);
+    const postCommitResponse = await postWhatsApp(app, postCommitBody);
+    assert.equal(postCommitResponse.status, 200);
+    const postCommitPayload =
+      await readJson<WhatsAppWebhookPayload>(postCommitResponse);
+    assert.equal(postCommitPayload.stored, 1);
+    assert.equal(postCommitPayload.duplicates, 0);
+
+    assert.equal(precheckDoneCount, 2);
+    assert.equal(committedBootstrapCount, 1);
+    assert.equal(conflictFallbackSelectCount >= 1, true);
+    assert.equal(postRouteLookupPausedBeforeCommit, true);
+
+    const dbState = await pool.query<{
+      connections: number;
+      unknownConnections: number;
+      conversations: number;
+      messages: number;
+    }>(
+      `
+        SELECT
+          (SELECT count(*) FROM whatsapp_connections WHERE workspace_id = $1 AND status = 'active')::int AS connections,
+          (SELECT count(*) FROM whatsapp_connections WHERE phone_number_id = '999999999999999')::int AS "unknownConnections",
+          (SELECT count(*) FROM whatsapp_conversations WHERE workspace_id = $1 AND status IN ('open', 'closed'))::int AS conversations,
+          (SELECT count(*) FROM whatsapp_messages)::int AS messages
+      `,
+      [requireSession().workspace.id],
+    );
+    assert.deepEqual(dbState.rows[0], {
+      connections: 1,
+      unknownConnections: 0,
+      conversations: 1,
+      messages: 4,
+    });
+  } finally {
+    twoPrechecksSeenZero.resolve();
+    firstBootstrapCommitted.resolve();
+    await stopServer(app.server);
+  }
+});
+
 test("a duplicate provider message does not create customers or conversations", async () => {
   const app = await startWhatsAppServer();
   const body = whatsappEnvelope([

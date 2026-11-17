@@ -177,6 +177,55 @@ export type ActiveConnectionOwner = Readonly<{
   workspaceId: string;
 }>;
 
+export type ConnectionPhoneOwner = Readonly<{
+  connectionId: string;
+  workspaceId: string;
+  status: WhatsAppConnectionStatus;
+}>;
+
+/**
+ * Atomically inspects `whatsapp_connections` for a `phoneNumberId` in a single
+ * statement so inbound routing can distinguish an active owner, an existing
+ * non-active record (which blocks legacy reactivation), and an unclaimed number.
+ */
+export async function resolveConnectionStateByPhoneNumberId(
+  queryable: Pool | PoolClient,
+  phoneNumberId: string,
+): Promise<ConnectionPhoneOwner | null> {
+  const result = await queryable.query<{
+    id: string;
+    workspace_id: string;
+    status: WhatsAppConnectionStatus;
+  }>(
+    `
+      SELECT id, workspace_id, status
+      FROM whatsapp_connections
+      WHERE phone_number_id = $1
+      ORDER BY
+        CASE status
+          WHEN 'active' THEN 0
+          WHEN 'pending' THEN 1
+          WHEN 'error' THEN 2
+          ELSE 3
+        END ASC,
+        created_at DESC,
+        id DESC
+      LIMIT 1
+    `,
+    [phoneNumberId],
+  );
+
+  const row = result.rows[0];
+
+  return row
+    ? {
+        connectionId: row.id,
+        workspaceId: row.workspace_id,
+        status: row.status,
+      }
+    : null;
+}
+
 /**
  * Resolves a Meta phone-number ID for inbound routing. Only active
  * connections may receive events. Unknown or disconnected IDs return null and

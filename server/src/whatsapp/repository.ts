@@ -244,41 +244,42 @@ async function ensureWhatsAppConnection(
   workspaceId: string,
   phoneNumberId: string,
 ): Promise<string> {
-  const existingForWorkspace = await client.query<{
+  // Check ownership and lifecycle status atomically in one statement so a
+  // concurrent bootstrap commit between two reads never looks like foreign
+  // ownership or allows legacy provisioning of a non-active connection.
+  const existingConnection = await client.query<{
     id: string;
+    workspace_id: string;
     status: string;
   }>(
     `
-      SELECT id, status
-      FROM whatsapp_connections
-      WHERE workspace_id = $1
-        AND phone_number_id = $2
-      LIMIT 1
-    `,
-    [workspaceId, phoneNumberId],
-  );
-
-  const workspaceRow = existingForWorkspace.rows[0];
-
-  if (workspaceRow) {
-    if (workspaceRow.status === "active") {
-      return workspaceRow.id;
-    }
-
-    throw new WhatsAppPhoneNumberOwnedByAnotherWorkspaceError();
-  }
-
-  const anyConnection = await client.query<{ id: string }>(
-    `
-      SELECT id
+      SELECT id, workspace_id, status
       FROM whatsapp_connections
       WHERE phone_number_id = $1
+      ORDER BY
+        CASE status
+          WHEN 'active' THEN 0
+          WHEN 'pending' THEN 1
+          WHEN 'error' THEN 2
+          ELSE 3
+        END ASC,
+        created_at DESC,
+        id DESC
       LIMIT 1
     `,
     [phoneNumberId],
   );
 
-  if (anyConnection.rows.length > 0) {
+  const existingOwner = existingConnection.rows[0];
+
+  if (existingOwner) {
+    if (
+      existingOwner.workspace_id === workspaceId &&
+      existingOwner.status === "active"
+    ) {
+      return existingOwner.id;
+    }
+
     throw new WhatsAppPhoneNumberOwnedByAnotherWorkspaceError();
   }
 
@@ -307,6 +308,7 @@ async function ensureWhatsAppConnection(
       FROM whatsapp_connections
       WHERE workspace_id = $1
         AND phone_number_id = $2
+      ORDER BY (status = 'active') DESC, created_at DESC, id DESC
       LIMIT 1
     `,
     [workspaceId, phoneNumberId],
