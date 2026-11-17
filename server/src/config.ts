@@ -1,5 +1,9 @@
 import { z } from "zod";
-import { DEFAULT_GEMINI_TIMEOUT_MS } from "./ai/reply-draft.js";
+import {
+  DEFAULT_GEMINI_FALLBACK_MODEL,
+  DEFAULT_GEMINI_MODEL,
+  DEFAULT_GEMINI_TIMEOUT_MS,
+} from "./ai/reply-draft.js";
 import { isValidProxyIpOrCidr } from "./auth/config.js";
 import { loadMetaOutboundConfig } from "./outbound/meta-config.js";
 import { loadWhatsAppConfig } from "./whatsapp/config.js";
@@ -92,6 +96,7 @@ const environmentSchema = z
     BETTER_AUTH_TRUSTED_PROXY_CIDRS: z.string().optional(),
     GEMINI_API_KEY: z.string().trim().min(1).optional(),
     GEMINI_MODEL: z.string().trim().min(1).optional(),
+    GEMINI_FALLBACK_MODEL: z.string().trim().optional(),
     GEMINI_TIMEOUT_MS: z.preprocess(
       (value) =>
         typeof value === "string" && value.trim() === "" ? undefined : value,
@@ -134,6 +139,7 @@ export type ServerConfig = Readonly<{
   gemini: Readonly<{
     apiKey: string;
     model?: string;
+    fallbackModel?: string;
     timeoutMs: number;
   }> | null;
 }>;
@@ -254,6 +260,17 @@ export function loadConfig(
     );
   }
 
+  const primaryGeminiModel = result.data.GEMINI_MODEL ?? DEFAULT_GEMINI_MODEL;
+  const rawGeminiFallback = result.data.GEMINI_FALLBACK_MODEL;
+  const geminiFallbackModel =
+    rawGeminiFallback === undefined
+      ? primaryGeminiModel !== DEFAULT_GEMINI_FALLBACK_MODEL
+        ? DEFAULT_GEMINI_FALLBACK_MODEL
+        : undefined
+      : rawGeminiFallback.length > 0 && rawGeminiFallback !== primaryGeminiModel
+        ? rawGeminiFallback
+        : undefined;
+
   return {
     nodeEnv: result.data.NODE_ENV,
     port: result.data.PORT,
@@ -273,6 +290,7 @@ export function loadConfig(
         ...(result.data.GEMINI_MODEL
           ? { model: result.data.GEMINI_MODEL }
           : {}),
+        ...(geminiFallbackModel ? { fallbackModel: geminiFallbackModel } : {}),
         timeoutMs: result.data.GEMINI_TIMEOUT_MS ?? DEFAULT_GEMINI_TIMEOUT_MS,
       }
       : null,
