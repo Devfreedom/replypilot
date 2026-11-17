@@ -839,6 +839,7 @@ function Dashboard() {
       />
       <DraftReplyDialog
         lead={activeDraftLead}
+        replyDraftProvider={replyDraftProvider}
         onClose={() => {
           setDraftLead(null);
 

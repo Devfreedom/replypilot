@@ -6,6 +6,7 @@ import {
   parseLeadCreationError,
   parseReplyDraftResponse,
   parseSavedReplyDraftResponse,
+  resolveDraftReplyBanner,
   LeadApiError,
   WHATSAPP_LEAD_DUPLICATE_NUMBER_CODE,
   WHATSAPP_LEAD_NUMBER_UNRESOLVED_CODE,
@@ -148,4 +149,110 @@ test("reply draft parsers accept valid mock and gemini metadata and reject misma
     }),
     null,
   );
+});
+
+test("resolveDraftReplyBanner separates workspace provider from persisted draft provenance", () => {
+  const geminiDraft = { provider: "gemini", isDemo: false } as const;
+  const mockDraft = { provider: "mock", isDemo: true } as const;
+
+  // Loading, error, and unloaded states render no banner regardless of provider.
+  assert.equal(
+    resolveDraftReplyBanner({
+      isLoading: true,
+      error: null,
+      selectedDraft: null,
+      replyDraftProvider: "mock",
+    }),
+    null,
+  );
+  assert.equal(
+    resolveDraftReplyBanner({
+      isLoading: true,
+      error: null,
+      selectedDraft: mockDraft,
+      replyDraftProvider: "gemini",
+    }),
+    null,
+  );
+  assert.equal(
+    resolveDraftReplyBanner({
+      isLoading: false,
+      error: "AI provider timed out. Please try again.",
+      selectedDraft: null,
+      replyDraftProvider: "mock",
+    }),
+    null,
+  );
+  assert.equal(
+    resolveDraftReplyBanner({
+      isLoading: false,
+      error: null,
+      selectedDraft: null,
+      replyDraftProvider: "gemini",
+    }),
+    null,
+  );
+
+  // Live Gemini drafts always show the grounded neutral banner.
+  for (const provider of ["gemini", "mock", null, undefined] as const) {
+    assert.deepEqual(
+      resolveDraftReplyBanner({
+        isLoading: false,
+        error: null,
+        selectedDraft: geminiDraft,
+        replyDraftProvider: provider,
+        brandName: "ReplyPilot",
+      }),
+      {
+        tone: "neutral",
+        text: "AI-suggested reply grounded in your saved business profile and catalogue. Review and edit before approving; nothing is sent without your approval.",
+      },
+    );
+  }
+
+  // Historical mock draft while workspace runs Gemini references "Regenerate draft".
+  const geminiWorkspaceHistoricalMock = resolveDraftReplyBanner({
+    isLoading: false,
+    error: null,
+    selectedDraft: mockDraft,
+    replyDraftProvider: "gemini",
+    brandName: "ReplyPilot",
+  });
+  assert.equal(geminiWorkspaceHistoricalMock?.tone, "warning");
+  assert.match(geminiWorkspaceHistoricalMock?.text ?? "", /Regenerate draft/);
+  assert.doesNotMatch(
+    geminiWorkspaceHistoricalMock?.text ?? "",
+    /no live AI model is enabled/i,
+  );
+
+  // Mock draft when workspace is confirmed to use the mock provider.
+  const mockWorkspaceBanner = resolveDraftReplyBanner({
+    isLoading: false,
+    error: null,
+    selectedDraft: mockDraft,
+    replyDraftProvider: "mock",
+    brandName: "ReplyPilot",
+  });
+  assert.deepEqual(mockWorkspaceBanner, {
+    tone: "warning",
+    text: "Demonstration output from ReplyPilot's mock provider (no live AI model is enabled). Approval records your review; nothing sends automatically without your explicit action.",
+  });
+
+  // Mock draft before /api/workspace resolves replyDraftProvider makes no claim
+  // about whether a live AI model is enabled or disabled.
+  for (const unresolvedProvider of [null, undefined] as const) {
+    const unresolvedBanner = resolveDraftReplyBanner({
+      isLoading: false,
+      error: null,
+      selectedDraft: mockDraft,
+      replyDraftProvider: unresolvedProvider,
+      brandName: "ReplyPilot",
+    });
+    assert.equal(unresolvedBanner?.tone, "warning");
+    assert.match(unresolvedBanner?.text ?? "", /mock provider/i);
+    assert.doesNotMatch(
+      unresolvedBanner?.text ?? "",
+      /no live AI model is enabled/i,
+    );
+  }
 });

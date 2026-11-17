@@ -20,6 +20,7 @@ import {
   parseReplyDraftsResponse,
   parseSavedReplyDraftResponse,
   parseSendReplyDraftResponse,
+  resolveDraftReplyBanner,
   type Lead,
   type ReplyDraftSource,
   type ReplyDraft,
@@ -44,7 +45,7 @@ import {
   parseConversationsResponse,
   type WhatsAppConversation,
 } from "@/lib/whatsapp";
-import { useAuth } from "./auth-provider";
+import { useAuth, type ReplyDraftProviderKind } from "./auth-provider";
 import {
   apiErrorMessage,
   isConversationLinkable,
@@ -175,12 +176,18 @@ function BusinessInformationUsed({
 export function DraftReplyDialog({
   lead,
   onClose,
+  replyDraftProvider,
 }: {
   lead: Lead | null;
   onClose: () => void;
+  replyDraftProvider?: ReplyDraftProviderKind | null;
 }) {
   const dialogRef = useRef<HTMLDialogElement>(null);
-  const { role } = useAuth();
+  const { role, replyDraftProvider: authReplyDraftProvider } = useAuth();
+  const effectiveReplyDraftProvider =
+    replyDraftProvider !== undefined
+      ? replyDraftProvider
+      : authReplyDraftProvider;
   // Linking a conversation changes workspace data, so it is an owner action,
   // the same as approving and sending.
   const canLinkConversation = role === "owner";
@@ -1245,13 +1252,21 @@ export function DraftReplyDialog({
       )
     : [];
 
+  const draftBanner = resolveDraftReplyBanner({
+    isLoading,
+    error,
+    selectedDraft,
+    replyDraftProvider: effectiveReplyDraftProvider,
+    brandName: BRAND.name,
+  });
+
   return (
     <dialog
       ref={dialogRef}
       onClose={handleDialogClose}
       onClick={handleBackdropClick}
       aria-labelledby="draft-reply-title"
-      aria-describedby="draft-reply-demo"
+      aria-describedby={draftBanner ? "draft-reply-demo" : undefined}
       className="m-auto max-h-[90dvh] w-[calc(100%-1.5rem)] max-w-3xl overflow-y-auto rounded-2xl border border-line bg-surface p-4 text-ink shadow-2xl sm:p-7"
     >
       <div className="flex items-start justify-between gap-4 border-b border-line pb-4">
@@ -1278,25 +1293,18 @@ export function DraftReplyDialog({
         </button>
       </div>
 
-      {selectedDraft && !selectedDraft.isDemo ? (
+      {draftBanner ? (
         <p
           id="draft-reply-demo"
-          className="mt-4 rounded-xl border border-line bg-hushed/80 px-4 py-3 text-xs leading-5 text-ink-soft sm:text-sm sm:leading-6"
+          className={
+            draftBanner.tone === "neutral"
+              ? "mt-4 rounded-xl border border-line bg-hushed/80 px-4 py-3 text-xs leading-5 text-ink-soft sm:text-sm sm:leading-6"
+              : "mt-4 rounded-xl border border-[color-mix(in_oklab,var(--rp-warning)_32%,transparent)] bg-warning-soft px-4 py-3 text-xs leading-5 text-warning-ink sm:text-sm sm:leading-6"
+          }
         >
-          AI-suggested reply grounded in your saved business profile and
-          catalogue. Review and edit before approving; nothing is sent without
-          your approval.
+          {draftBanner.text}
         </p>
-      ) : (
-        <p
-          id="draft-reply-demo"
-          className="mt-4 rounded-xl border border-[color-mix(in_oklab,var(--rp-warning)_32%,transparent)] bg-warning-soft px-4 py-3 text-xs leading-5 text-warning-ink sm:text-sm sm:leading-6"
-        >
-          Demonstration output from {BRAND.name}&apos;s mock provider (no live
-          AI model is enabled). Approval records your review; nothing sends
-          automatically without your explicit action.
-        </p>
-      )}
+      ) : null}
 
       {isLoading ? (
         <div role="status" className="py-12 text-center text-sm text-ink-soft">

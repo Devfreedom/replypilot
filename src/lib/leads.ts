@@ -1,9 +1,11 @@
 import { z } from "zod";
+import { BRAND } from "./brand";
 import {
   APPROVAL_SEND_POLICIES,
   outboundMessageSchema,
   type OutboundMessage,
 } from "./messaging";
+import type { ReplyDraftProviderKind } from "./workspace";
 
 export const LEAD_STATUSES = [
   "New",
@@ -315,5 +317,63 @@ export function followUpOverdueDays(lead: Lead, now = Date.now()): number {
   }
 
   return Math.max(0, Math.floor((now - followUpAt) / 86_400_000));
+}
+
+export type DraftReplyBanner = Readonly<{
+  tone: "neutral" | "warning";
+  text: string;
+}>;
+
+/**
+ * Resolves the provenance/status banner shown at the top of `DraftReplyDialog`.
+ * Keeps workspace-level provider configuration (`replyDraftProvider`) separate
+ * from persisted draft provenance (`selectedDraft`), returns `null` during
+ * loading/error/empty states, and avoids claiming live AI is disabled unless
+ * the workspace is confirmed to use `"mock"`.
+ */
+export function resolveDraftReplyBanner({
+  isLoading,
+  error,
+  selectedDraft,
+  replyDraftProvider,
+  brandName = BRAND.name,
+}: Readonly<{
+  isLoading: boolean;
+  error: string | null;
+  selectedDraft: Pick<SavedReplyDraft, "provider" | "isDemo"> | null;
+  replyDraftProvider?: ReplyDraftProviderKind | null;
+  brandName?: string;
+}>): DraftReplyBanner | null {
+  if (isLoading || error !== null || selectedDraft === null) {
+    return null;
+  }
+
+  if (selectedDraft.provider === "gemini" && !selectedDraft.isDemo) {
+    return {
+      tone: "neutral",
+      text: "AI-suggested reply grounded in your saved business profile and catalogue. Review and edit before approving; nothing is sent without your approval.",
+    };
+  }
+
+  const workspaceProvider: ReplyDraftProviderKind | null =
+    replyDraftProvider ?? null;
+
+  switch (workspaceProvider) {
+    case "gemini":
+      return {
+        tone: "warning",
+        text: `This saved draft was generated earlier by ${brandName}'s demonstration mock provider. Click Regenerate draft to generate a live Gemini AI draft; nothing sends automatically without your explicit action.`,
+      };
+    case "mock":
+      return {
+        tone: "warning",
+        text: `Demonstration output from ${brandName}'s mock provider (no live AI model is enabled). Approval records your review; nothing sends automatically without your explicit action.`,
+      };
+    case null:
+      return {
+        tone: "warning",
+        text: `This saved draft is demonstration output from ${brandName}'s mock provider. Approval records your review; nothing sends automatically without your explicit action.`,
+      };
+  }
 }
 
