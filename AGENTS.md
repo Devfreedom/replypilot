@@ -18,7 +18,7 @@ Build a small, reliable product that can be validated with real users. Do not ad
 
 - The project uses Next.js (App Router), React, TypeScript, Tailwind CSS, an Express API, and PostgreSQL. Better Auth handles sessions, and every request is scoped to one workspace.
 - The home-page dashboard is in `src/app/page.tsx`. The frontend talks to the Express API through `/api` rewrites.
-- Leads, drafts, business knowledge, and inbound WhatsApp messages persist in PostgreSQL via `server/src`. Reply generation is still a mock provider; no live AI, and the WhatsApp integration is inbound-only.
+- Leads, drafts, business knowledge, and inbound WhatsApp messages persist in PostgreSQL via `server/src`. Reply draft generation uses `GeminiReplyDraftProvider` when `GEMINI_API_KEY` is configured and falls back to the deterministic `MockReplyDraftProvider` otherwise, and the WhatsApp integration is inbound-only.
 - Inspect the repository before assuming any statement here is still accurate.
 
 ## Required workflow

@@ -20,7 +20,7 @@ This project uses [`next/font`](https://nextjs.org/docs/app/building-your-applic
 
 ## API, authentication, and local PostgreSQL
 
-> **Not production-ready warning:** email/password authentication and workspace isolation are implemented, but this application still needs HTTPS, production origin and cookie review, email verification, password recovery, deployment hardening, operational monitoring, and a complete security review before production use. Reply generation remains a mock. Meta outbound sending is a restricted test integration, disabled by default and unavailable in production; do not use real customer or business data.
+> **Not production-ready warning:** email/password authentication and workspace isolation are implemented, but this application still needs HTTPS, production origin and cookie review, email verification, password recovery, deployment hardening, operational monitoring, and a complete security review before production use. Reply draft generation uses `GeminiReplyDraftProvider` when `GEMINI_API_KEY` is configured and falls back to the deterministic `MockReplyDraftProvider` otherwise. Meta outbound sending is a restricted test integration, disabled by default and unavailable in production; do not use real customer or business data.
 
 The Express API is a separate development service. It binds to `127.0.0.1` and must not be exposed publicly. The browser dashboard is a separate Next.js app; it proxies `/api/*` requests to `API_ORIGIN`, which defaults to `http://127.0.0.1:4000`. This keeps Better Auth and business API requests same-origin from the browser, so session cookies flow through the rewrite.
 
@@ -159,8 +159,8 @@ All business endpoints below require a valid Better Auth session and workspace m
 | `GET` | `/api/leads` | `200 {"leads":[...]}` for the session workspace, ordered newest first. |
 | `POST` | `/api/leads` | Accepts `name`, `service`, and `lastMessage`; optional `channel`, `status`, `whatsappNumber`, and `nextFollowUpAt`. Returns `201 {"lead":{...}}`, or `409` if the optional WhatsApp number is already used in the workspace. Defaults: `Manual`, `New`. |
 | `PATCH` | `/api/leads/:id` | Accepts `{ "status": "New" \| "Contacted" \| "Quoted" \| "Booked" }`. Returns the updated lead, `400` for malformed input, or `404` for an unknown valid UUID. |
-| `POST` | `/api/leads/:id/draft-reply` | Returns a non-persistent mock demonstration analysis and suggested reply for an existing lead. Kept for compatibility; the response omits the saved-draft fields and sources. Returns `400` for a malformed ID or `404` for an unknown valid UUID. |
-| `POST` | `/api/leads/:id/reply-drafts` | Generates and saves a mock draft with a server-generated business-fact snapshot. Returns `201 {"draft":{...}}`. Optional body `{"draftId":"..."}` regenerates that saved draft in place and returns `200`; it must belong to the lead. |
+| `POST` | `/api/leads/:id/draft-reply` | Returns a non-persistent analysis and suggested reply (generated via `GeminiReplyDraftProvider` when `GEMINI_API_KEY` is configured, falling back to the deterministic `MockReplyDraftProvider` otherwise) for an existing lead. Kept for compatibility; the response omits the saved-draft fields and sources. Returns `400` for a malformed ID or `404` for an unknown valid UUID. |
+| `POST` | `/api/leads/:id/reply-drafts` | Generates and saves a draft (using `GeminiReplyDraftProvider` when `GEMINI_API_KEY` is configured and falling back to the deterministic `MockReplyDraftProvider` otherwise) with a server-generated business-fact snapshot. Returns `201 {"draft":{...}}`. Optional body `{"draftId":"..."}` regenerates that saved draft in place and returns `200`; it must belong to the lead. |
 | `GET` | `/api/leads/:id/reply-drafts` | `200 {"drafts":[...]}` for that lead, newest first. Returns `404` for an unknown lead. |
 | `PATCH` | `/api/leads/:leadId/reply-drafts/:draftId` | Accepts `{"draftReply":"..."}` to save edited text, or `{"status":"approved"\|"draft"}` to change review status. Text edits return the draft to `draft`; approving records `approvedAt`. Returns `200 {"draft":{...}}`, `400`, or `404`. |
 | `GET` | `/api/business/profile` | `200 {"profile":{...}}`, or `200 {"profile":null}` when no profile has been created. |
@@ -304,7 +304,7 @@ Content-Type: application/json
 
 ### Reply drafts, provenance, and owner approval
 
-Draft generation uses a local deterministic mock provider only. It does not call a live AI service, require credentials, or send a customer message. The legacy `POST /api/leads/:id/draft-reply` endpoint keeps its original non-persistent response contract and shares the same generation logic.
+Reply draft generation uses `GeminiReplyDraftProvider` when `GEMINI_API_KEY` is configured and falls back to the deterministic `MockReplyDraftProvider` otherwise; neither provider sends a customer message automatically. The legacy `POST /api/leads/:id/draft-reply` endpoint keeps its original non-persistent response contract and shares the same generation logic.
 
 The saved-draft endpoints persist reviewable drafts:
 
@@ -881,7 +881,7 @@ These checks verify the browser flow and the server boundary. Use fictional data
 - The legacy workspace is assigned only by the guarded local CLI. There is no public bootstrap endpoint, first-user claim, or production admin console.
 - Production requires HTTPS, `BETTER_AUTH_URL` with an HTTPS origin, a secret from a deployment secret store, explicit trusted origins, secure reverse-proxy/header handling, backups, and a security review. The API currently binds to `127.0.0.1` for local development.
 - Better Auth's default rate-limit storage and the Express process model need review before horizontal scaling. Use a shared, reviewed rate-limit store if multiple API instances are deployed. Rate limiting also needs a trustworthy client IP: deploy behind a trusted reverse proxy that supplies one validated `X-Forwarded-For` value, and configure Better Auth trusted proxies (or equivalent) for multi-hop deployments. Without a resolvable IP, Better Auth falls back to a shared per-path bucket.
-- Reply generation remains a deterministic mock. Meta outbound is restricted to the configured test workspace, sender, and recipient allowlist, and is unavailable in production. There is no live AI provider, approved-template sending, webhook media download, scheduling, or production-wide customer messaging. Approval can enqueue a mock record or (for the configured test workspace when enabled) a Meta test record; the worker performs delivery separately.
+- Reply draft generation uses `GeminiReplyDraftProvider` when `GEMINI_API_KEY` is configured and falls back to the deterministic `MockReplyDraftProvider` otherwise. Meta outbound is restricted to the configured test workspace, sender, and recipient allowlist, and is unavailable in production. There is no approved-template sending, webhook media download, scheduling, or production-wide customer messaging. Approval can enqueue a mock record or (for the configured test workspace when enabled) a Meta test record; the worker performs delivery separately.
 - There is no audit log for business-record changes, no account recovery support workflow, and no automated backup/restore verification. Do not treat passing tests as evidence that the application is production-ready.
 
 ## Learn More
