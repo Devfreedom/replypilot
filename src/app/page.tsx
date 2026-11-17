@@ -276,7 +276,7 @@ function LeadsPanel({
           <span className="sr-only">Search leads</span>
           <span
             aria-hidden="true"
-            className="pointer-events-none absolute inset-y-0 left-3 flex items-center text-ink-faint"
+            className="pointer-events-none absolute inset-y-0 left-3 flex items-center text-ink-soft"
           >
             ⌕
           </span>
@@ -403,7 +403,7 @@ function LeadsPanel({
             canManage={canManage}
           />
 
-          <div className="flex flex-col justify-between gap-2 px-5 py-3 text-xs text-ink-faint sm:flex-row sm:items-center sm:px-6">
+          <div className="flex flex-col justify-between gap-2 px-5 py-3 text-xs text-ink-soft sm:flex-row sm:items-center sm:px-6">
             <span>
               Showing {displayedLeads.length} of {leads.length}{" "}
               {followUpsOnly ? "follow-ups due" : "leads"}
@@ -648,11 +648,12 @@ function Dashboard() {
         </PageHeading>
 
         <Activity mode={view === "overview" ? "visible" : "hidden"}>
-          {/* 1. What needs my attention? */}
-          <section
-            aria-labelledby="attention-title"
-            className="card mt-8"
-          >
+          <div className="rp-overview-enter">
+            {/* 1. What needs my attention? */}
+            <section
+              aria-labelledby="attention-title"
+              className="card mt-8"
+            >
             <div className="flex flex-col justify-between gap-2 border-b border-line px-5 py-4 sm:flex-row sm:items-center sm:px-6">
               <div>
                 <h2 id="attention-title" className="font-bold text-ink">
@@ -774,6 +775,7 @@ function Dashboard() {
               isGemini={replyDraftProvider === "gemini"}
             />
           </div>
+          </div>
         </Activity>
 
         <Activity mode={view === "leads" ? "visible" : "hidden"}>
@@ -825,7 +827,7 @@ function Dashboard() {
           </section>
         </Activity>
 
-        <footer className="py-10 text-center text-xs text-ink-faint">
+        <footer className="py-10 text-center text-xs text-ink-soft">
           {BRAND.name} - {BRAND.footerTagline}
         </footer>
       </div>

@@ -46,7 +46,7 @@ export function AuthShell({
           ) : null}
         </section>
 
-        <p className="mt-5 px-2 text-center text-xs leading-5 text-ink-faint">
+        <p className="mt-5 px-2 text-center text-xs leading-5 text-ink-soft">
           {BRAND.name} keeps customer sessions in HTTP-only cookies and holds
           every AI reply draft for owner approval before queueing to WhatsApp.
         </p>

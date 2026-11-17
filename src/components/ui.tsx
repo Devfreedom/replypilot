@@ -24,12 +24,12 @@ export function Alert({
   children: ReactNode;
 }) {
   return (
-    <p
+    <div
       role={role ?? (tone === "danger" ? "alert" : undefined)}
-      className={`rounded-xl border px-4 py-3 text-sm leading-6 ${ALERT_TONES[tone]}`}
+      className={`rp-feedback rounded-xl border px-4 py-3 text-sm leading-6 ${ALERT_TONES[tone]}`}
     >
       {children}
-    </p>
+    </div>
   );
 }
 

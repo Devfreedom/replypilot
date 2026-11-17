@@ -65,7 +65,7 @@ function FollowUpIndicator({ lead }: { lead: Lead }) {
     );
   }
 
-  return <span className="text-xs text-ink-faint">Up to date</span>;
+  return <span className="text-xs text-ink-soft">Up to date</span>;
 }
 
 function Channel({ lead }: { lead: Lead }) {

@@ -258,7 +258,7 @@ export function NewLeadDialog({
       onClose={onClose}
       onClick={handleBackdropClick}
       aria-labelledby="new-lead-title"
-      className="m-auto max-h-[90dvh] w-[calc(100%-1.5rem)] max-w-lg overflow-y-auto rounded-2xl border border-line bg-surface p-5 text-ink shadow-2xl sm:p-7"
+      className="m-auto max-h-[90dvh] w-[calc(100%-1.5rem)] max-w-lg overflow-y-auto rounded-2xl border border-line bg-surface p-4 text-ink shadow-2xl sm:p-7"
     >
       <div className="flex items-start justify-between gap-4 border-b border-line pb-4">
         <div>
@@ -325,7 +325,7 @@ export function NewLeadDialog({
           label="Customer enquiry"
           error={errors.message}
           labelAside={
-            <span className="numeric-tabular text-xs text-ink-faint">
+            <span className="numeric-tabular text-xs text-ink-soft">
               {values.message.length}/{LEAD_MESSAGE_MAX_LENGTH}
             </span>
           }

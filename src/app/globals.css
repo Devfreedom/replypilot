@@ -123,14 +123,73 @@
     background: color-mix(in oklch, var(--rp-accent) 20%, transparent);
   }
 
-  /* Crisp keyboard focus ring for every interactive element. */
-  :focus-visible {
-    outline: 2px solid var(--rp-focus);
-    outline-offset: 2px;
-  }
-
   dialog::backdrop {
     background: var(--rp-overlay);
+  }
+
+  dialog[open]:not([data-drawer="true"]) {
+    animation: rp-dialog-in 170ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  dialog[data-drawer="true"][open] {
+    animation: rp-drawer-in 190ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  dialog[open]::backdrop {
+    animation: rp-backdrop-in 150ms ease-out;
+  }
+}
+
+@keyframes rp-dialog-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes rp-drawer-in {
+  from {
+    opacity: 0;
+    transform: translateX(-16px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes rp-backdrop-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes rp-feedback-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes rp-overview-enter {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
   }
 }
 
@@ -184,7 +243,19 @@
   /* Action buttons --------------------------------------------------------- */
 
   .btn {
-    @apply inline-flex min-h-11 cursor-pointer items-center justify-center gap-2 whitespace-nowrap rounded-xl text-sm font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-60;
+    @apply inline-flex min-h-11 cursor-pointer items-center justify-center gap-2 whitespace-nowrap rounded-xl text-sm font-semibold transition-colors transition-transform duration-100 disabled:cursor-not-allowed disabled:opacity-60;
+  }
+
+  .btn:active:not(:disabled) {
+    transform: scale(0.985);
+  }
+
+  .rp-feedback {
+    animation: rp-feedback-in 160ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  .rp-overview-enter {
+    animation: rp-overview-enter 220ms cubic-bezier(0.22, 1, 0.36, 1);
   }
 
   .btn-primary {
@@ -256,6 +327,24 @@
   }
 }
 
+/* Unlayered keyboard focus ring guarantees Tailwind `.outline-none` on
+ * inputs, selects, and custom comboboxes never suppresses visible focus. */
+:where(
+  a,
+  button,
+  input,
+  select,
+  textarea,
+  summary,
+  [role="tab"],
+  [role="combobox"],
+  [role="option"],
+  [tabindex]:not([tabindex="-1"])
+):focus-visible {
+  outline: 2px solid var(--rp-focus);
+  outline-offset: 2px;
+}
+
 /* Respect the OS motion preference for nonessential transitions. The loading
  * spinner is an essential state, so it keeps animating. */
 @media (prefers-reduced-motion: reduce) {
@@ -266,6 +355,10 @@
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
     scroll-behavior: auto !important;
+  }
+
+  .btn:active:not(:disabled) {
+    transform: none !important;
   }
 
   .animate-spin {

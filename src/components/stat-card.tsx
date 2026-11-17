@@ -19,7 +19,7 @@ export function StatCard({
       <p className="numeric-tabular mt-3 text-3xl font-bold tracking-tight text-ink">
         {value}
       </p>
-      <p className="mt-1 text-xs leading-5 text-ink-faint">{detail}</p>
+      <p className="mt-1 text-xs leading-5 text-ink-soft">{detail}</p>
     </div>
   );
 }

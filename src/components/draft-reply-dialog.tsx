@@ -2,6 +2,7 @@
 
 import {
   Activity,
+  type KeyboardEvent,
   useCallback,
   useEffect,
   useEffectEvent,
@@ -1201,6 +1202,37 @@ export function DraftReplyDialog({
     }
   }
 
+  function handleDraftTabKeyDown(
+    event: KeyboardEvent<HTMLButtonElement>,
+    index: number,
+  ) {
+    const tabOrder: readonly ("compose" | "context" | "history")[] = [
+      "compose",
+      "context",
+      "history",
+    ];
+    let targetIndex: number | null = null;
+
+    if (event.key === "ArrowRight") {
+      targetIndex = (index + 1) % tabOrder.length;
+    } else if (event.key === "ArrowLeft") {
+      targetIndex = (index - 1 + tabOrder.length) % tabOrder.length;
+    } else if (event.key === "Home") {
+      targetIndex = 0;
+    } else if (event.key === "End") {
+      targetIndex = tabOrder.length - 1;
+    }
+
+    if (targetIndex === null) {
+      return;
+    }
+
+    event.preventDefault();
+    const targetTab = tabOrder[targetIndex];
+    setActiveTab(targetTab);
+    document.getElementById(`draft-tab-${targetTab}`)?.focus();
+  }
+
   function handleBackdropClick(event: React.MouseEvent<HTMLDialogElement>) {
     if (event.target === dialogRef.current) {
       dialogRef.current?.close();
@@ -1220,7 +1252,7 @@ export function DraftReplyDialog({
       onClick={handleBackdropClick}
       aria-labelledby="draft-reply-title"
       aria-describedby="draft-reply-demo"
-      className="m-auto max-h-[90dvh] w-[calc(100%-1.5rem)] max-w-3xl overflow-y-auto rounded-2xl border border-line bg-surface p-5 text-ink shadow-2xl sm:p-7"
+      className="m-auto max-h-[90dvh] w-[calc(100%-1.5rem)] max-w-3xl overflow-y-auto rounded-2xl border border-line bg-surface p-4 text-ink shadow-2xl sm:p-7"
     >
       <div className="flex items-start justify-between gap-4 border-b border-line pb-4">
         <div className="min-w-0">
@@ -1314,7 +1346,9 @@ export function DraftReplyDialog({
               role="tab"
               aria-selected={activeTab === "compose"}
               aria-controls="draft-panel-compose"
+              tabIndex={activeTab === "compose" ? 0 : -1}
               onClick={() => setActiveTab("compose")}
+              onKeyDown={(event) => handleDraftTabKeyDown(event, 0)}
               className={`min-h-10 cursor-pointer rounded-lg px-2.5 py-2 text-xs font-semibold transition-colors sm:text-sm ${
                 activeTab === "compose"
                   ? "bg-surface text-ink shadow-xs"
@@ -1329,7 +1363,9 @@ export function DraftReplyDialog({
               role="tab"
               aria-selected={activeTab === "context"}
               aria-controls="draft-panel-context"
+              tabIndex={activeTab === "context" ? 0 : -1}
               onClick={() => setActiveTab("context")}
+              onKeyDown={(event) => handleDraftTabKeyDown(event, 1)}
               className={`min-h-10 cursor-pointer rounded-lg px-2.5 py-2 text-xs font-semibold transition-colors sm:text-sm ${
                 activeTab === "context"
                   ? "bg-surface text-ink shadow-xs"
@@ -1344,7 +1380,9 @@ export function DraftReplyDialog({
               role="tab"
               aria-selected={activeTab === "history"}
               aria-controls="draft-panel-history"
+              tabIndex={activeTab === "history" ? 0 : -1}
               onClick={() => setActiveTab("history")}
+              onKeyDown={(event) => handleDraftTabKeyDown(event, 2)}
               className={`min-h-10 cursor-pointer rounded-lg px-2.5 py-2 text-xs font-semibold transition-colors sm:text-sm ${
                 activeTab === "history"
                   ? "bg-surface text-ink shadow-xs"
@@ -1386,7 +1424,7 @@ export function DraftReplyDialog({
                   >
                     Suggested reply
                   </label>
-                  <span className="numeric-tabular text-xs text-ink-faint">
+                  <span className="numeric-tabular text-xs text-ink-soft">
                     {editedReply.length}/{REPLY_DRAFT_MAX_LENGTH}
                   </span>
                 </div>
@@ -1891,7 +1929,7 @@ export function DraftReplyDialog({
                     </span>
                   </p>
                   {outboundMessage.providerMessageId ? (
-                    <p className="mt-1 break-all text-xs text-ink-faint">
+                    <p className="mt-1 break-all text-xs text-ink-soft">
                       Message reference: {outboundMessage.providerMessageId}
                     </p>
                   ) : null}

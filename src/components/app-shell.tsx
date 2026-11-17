@@ -239,7 +239,7 @@ function UserFooter({ onSignOut }: { onSignOut: () => Promise<void> }) {
       >
         Sign out
       </button>
-      <p className="mt-2.5 px-2 text-xs leading-5 text-ink-faint">
+      <p className="mt-2.5 px-2 text-xs leading-5 text-ink-soft">
         {role === "owner"
           ? "Workspace owner account"
           : "Read-only member: owner approval is required to make changes."}
@@ -419,6 +419,12 @@ export function AppShell({
 
   return (
     <div className="flex min-h-screen bg-canvas text-ink">
+      <a
+        href="#main-content"
+        className="sr-only focus:not-sr-only focus:fixed focus:left-4 focus:top-4 focus:z-50 focus:rounded-xl focus:bg-accent focus:px-4 focus:py-2.5 focus:text-sm focus:font-semibold focus:text-on-accent focus:shadow-lg"
+      >
+        Skip to main content
+      </a>
       {/* Desktop sidebar */}
       <aside className="sticky top-0 hidden h-screen w-68 shrink-0 flex-col overflow-y-auto border-r border-line bg-surface px-4 py-6 lg:flex">
         <BrandBlock />
@@ -459,12 +465,13 @@ export function AppShell({
       {/* Mobile drawer navigation */}
       <dialog
         ref={drawerRef}
+        data-drawer="true"
         onClose={closeDrawer}
         onClick={handleDrawerBackdropClick}
         aria-label="Full navigation menu"
-        className="fixed left-0 top-0 m-0 h-dvh w-76 bg-surface p-0 text-ink shadow-2xl"
+        className="fixed left-0 top-0 m-0 h-dvh w-76 max-w-[calc(100vw-2rem)] bg-surface p-0 text-ink shadow-2xl"
       >
-        <div className="flex h-full w-76 flex-col overflow-y-auto px-4 py-6">
+        <div className="flex h-full w-full flex-col overflow-y-auto px-4 py-6">
           <div className="flex items-center justify-between gap-2">
             <BrandBlock onNavigate={closeDrawer} />
             <button
@@ -576,7 +583,9 @@ export function AppShell({
           </div>
         </header>
 
-        <main className="flex-1 pb-24 lg:pb-16">{children}</main>
+        <main id="main-content" tabIndex={-1} className="flex-1 pb-24 outline-none lg:pb-16">
+          {children}
+        </main>
       </div>
 
       <MobileBottomBar

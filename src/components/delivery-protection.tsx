@@ -883,7 +883,7 @@ export function DeliveryProtection() {
                             {item.suppression.notes}
                           </p>
                         ) : null}
-                        <p className="mt-1 text-[11px] text-ink-faint">
+                        <p className="numeric-tabular mt-1 text-[11px] text-ink-soft">
                           Suppressed {formatDate(item.suppression.suppressedAt)}
                         </p>
                       </div>
