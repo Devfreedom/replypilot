@@ -56,6 +56,7 @@ export interface ReplyDraftProvider {
 
 const MAX_REPLY_LENGTH = 1_900;
 export const DEFAULT_GEMINI_MODEL = "gemini-3.8-flash";
+export const DEFAULT_GEMINI_FALLBACK_MODEL = "gemini-3.1-flash-lite";
 export const DEFAULT_GEMINI_TIMEOUT_MS = 45_000;
 
 function safeTrim(value: string | null | undefined): string {
@@ -468,6 +469,7 @@ function mergeMandatoryMissingInfo(
 export type GeminiReplyDraftProviderOptions = Readonly<{
   apiKey: string;
   model?: string;
+  fallbackModel?: string;
   timeoutMs?: number;
   fetchImplementation?: typeof fetch;
 }>;
@@ -476,6 +478,7 @@ export class GeminiReplyDraftProvider implements ReplyDraftProvider {
   readonly provider = "gemini" as const;
   readonly #apiKey: string;
   readonly #model: string;
+  readonly #fallbackModel: string | undefined;
   readonly #timeoutMs: number;
   readonly #fetch: typeof fetch;
 
@@ -490,6 +493,11 @@ export class GeminiReplyDraftProvider implements ReplyDraftProvider {
 
     this.#apiKey = trimmedKey;
     this.#model = options.model?.trim() || DEFAULT_GEMINI_MODEL;
+    const trimmedFallback = options.fallbackModel?.trim();
+    this.#fallbackModel =
+      trimmedFallback && trimmedFallback !== this.#model
+        ? trimmedFallback
+        : undefined;
     this.#timeoutMs = options.timeoutMs ?? DEFAULT_GEMINI_TIMEOUT_MS;
     this.#fetch = options.fetchImplementation ?? globalThis.fetch;
   }
@@ -598,6 +606,15 @@ export class GeminiReplyDraftProvider implements ReplyDraftProvider {
           userPrompt,
         ));
       }
+    } else if (response.status === 503 && this.#fallbackModel) {
+      // Single-hop cross-model fallback on transient upstream 503 overload.
+      console.warn(
+        `Configured Gemini model "${this.#model}" returned HTTP 503; falling back once to "${this.#fallbackModel}".`,
+      );
+      ({ response, signal } = await this.#requestModel(
+        this.#fallbackModel,
+        userPrompt,
+      ));
     }
 
     if (!response.ok) {
@@ -617,6 +634,18 @@ export class GeminiReplyDraftProvider implements ReplyDraftProvider {
           {
             code: "timeout",
             statusCode: 504,
+          },
+        );
+      }
+
+      if (response.status === 503) {
+        throw new ReplyDraftProviderError(
+          `Gemini API returned HTTP ${response.status}.`,
+          {
+            code: "upstream_error",
+            statusCode: 503,
+            userMessage:
+              "AI provider is temporarily experiencing high demand. Please try again shortly.",
           },
         );
       }

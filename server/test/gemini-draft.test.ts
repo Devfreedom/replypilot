@@ -5,6 +5,7 @@ import path from "node:path";
 import { after, before, beforeEach, test } from "node:test";
 import type { Pool } from "pg";
 import {
+  DEFAULT_GEMINI_FALLBACK_MODEL,
   DEFAULT_GEMINI_MODEL,
   DEFAULT_GEMINI_TIMEOUT_MS,
   GeminiReplyDraftProvider,
@@ -1028,7 +1029,22 @@ test("GeminiReplyDraftProvider classifies 429 rate limits, AbortSignal timeouts,
       error.userMessage === "AI provider timed out. Please try again.",
   );
 
-  const upstreamFailed = new GeminiReplyDraftProvider({
+  const upstream500Failed = new GeminiReplyDraftProvider({
+    apiKey: SAMPLE_API_KEY,
+    fetchImplementation: async () =>
+      new Response(JSON.stringify({ error: { message: "Internal error" } }), {
+        status: 500,
+      }),
+  });
+  await assert.rejects(
+    () => upstream500Failed.draftReply(makeLead(), makeContext()),
+    (error: unknown) =>
+      error instanceof ReplyDraftProviderError &&
+      error.code === "upstream_error" &&
+      error.statusCode === 502,
+  );
+
+  const upstream503Failed = new GeminiReplyDraftProvider({
     apiKey: SAMPLE_API_KEY,
     fetchImplementation: async () =>
       new Response(JSON.stringify({ error: { message: "Unavailable" } }), {
@@ -1036,10 +1052,160 @@ test("GeminiReplyDraftProvider classifies 429 rate limits, AbortSignal timeouts,
       }),
   });
   await assert.rejects(
-    () => upstreamFailed.draftReply(makeLead(), makeContext()),
+    () => upstream503Failed.draftReply(makeLead(), makeContext()),
     (error: unknown) =>
       error instanceof ReplyDraftProviderError &&
       error.code === "upstream_error" &&
-      error.statusCode === 502,
+      error.statusCode === 503,
   );
+});
+
+test("GeminiReplyDraftProvider performs single-hop 503 fallback to configured fallbackModel", async () => {
+  assert.equal(DEFAULT_GEMINI_FALLBACK_MODEL, "gemini-3.1-flash-lite");
+
+  const baseEnv = {
+    NODE_ENV: "development",
+    DATABASE_URL: "postgres://replypilot:replypilot@localhost:5432/replypilot",
+    BETTER_AUTH_SECRET: "replypilot-development-test-secret-0123456789",
+    GEMINI_API_KEY: SAMPLE_API_KEY,
+  };
+
+  const defaultCfg = loadConfig(baseEnv);
+  assert.equal(defaultCfg.gemini?.fallbackModel, "gemini-3.1-flash-lite");
+
+  const calledUrls: string[] = [];
+  const provider = new GeminiReplyDraftProvider({
+    ...defaultCfg.gemini!,
+    fetchImplementation: async (input) => {
+      const url = typeof input === "string" ? input : input.toString();
+      calledUrls.push(url);
+
+      if (calledUrls.length === 1) {
+        return new Response(
+          JSON.stringify({ error: { code: 503, message: "High demand" } }),
+          { status: 503, headers: { "Content-Type": "application/json" } },
+        );
+      }
+
+      return geminiSuccessResponse({
+        intent: "pricing",
+        summary: "Customer asked for wedding photography pricing.",
+        missingInformation: ["Event date"],
+        draftReply:
+          "Hi Adaeze, our package is £1,500.00. Could you share your event date?",
+        citedFactIds: ["cat:0"],
+      });
+    },
+  });
+
+  const draft = await provider.draftReply(makeLead(), makeContext());
+  assert.equal(draft.provider, "gemini");
+  assert.equal(calledUrls.length, 2);
+  assert.ok(
+    calledUrls[0]?.includes(`/models/${DEFAULT_GEMINI_MODEL}:generateContent`),
+  );
+  assert.ok(
+    calledUrls[1]?.includes("/models/gemini-3.1-flash-lite:generateContent"),
+  );
+});
+
+test("GeminiReplyDraftProvider does not trigger 503 fallback on 429, 400, 401, 403, or 404", async () => {
+  for (const status of [429, 400, 401, 403, 404]) {
+    let fetchCount = 0;
+    const provider = new GeminiReplyDraftProvider({
+      apiKey: SAMPLE_API_KEY,
+      model: "gemini-3.8-flash",
+      fallbackModel: "gemini-3.1-flash-lite",
+      fetchImplementation: async () => {
+        fetchCount += 1;
+        return new Response(
+          JSON.stringify({ error: { message: `Status ${status}` } }),
+          { status, headers: { "Content-Type": "application/json" } },
+        );
+      },
+    });
+
+    await assert.rejects(
+      () => provider.draftReply(makeLead(), makeContext()),
+      (error: unknown) => error instanceof ReplyDraftProviderError,
+    );
+    assert.equal(
+      fetchCount,
+      1,
+      `Expected exactly 1 fetch call for HTTP ${status}, got ${fetchCount}`,
+    );
+  }
+});
+
+test("GeminiReplyDraftProvider maps double 503 (primary and fallback) to HTTP 503 after 2 calls", async () => {
+  const calledUrls: string[] = [];
+  const provider = new GeminiReplyDraftProvider({
+    apiKey: SAMPLE_API_KEY,
+    model: "gemini-3.8-flash",
+    fallbackModel: "gemini-3.1-flash-lite",
+    fetchImplementation: async (input) => {
+      const url = typeof input === "string" ? input : input.toString();
+      calledUrls.push(url);
+      return new Response(
+        JSON.stringify({ error: { code: 503, message: "Overloaded" } }),
+        { status: 503, headers: { "Content-Type": "application/json" } },
+      );
+    },
+  });
+
+  await assert.rejects(
+    () => provider.draftReply(makeLead(), makeContext()),
+    (error: unknown) =>
+      error instanceof ReplyDraftProviderError &&
+      error.code === "upstream_error" &&
+      error.statusCode === 503,
+  );
+  assert.equal(calledUrls.length, 2);
+  assert.ok(calledUrls[0]?.includes("/models/gemini-3.8-flash:generateContent"));
+  assert.ok(
+    calledUrls[1]?.includes("/models/gemini-3.1-flash-lite:generateContent"),
+  );
+});
+
+test("GeminiReplyDraftProvider skips duplicate fallback call when GEMINI_FALLBACK_MODEL equals GEMINI_MODEL", async () => {
+  const baseEnv = {
+    NODE_ENV: "development",
+    DATABASE_URL: "postgres://replypilot:replypilot@localhost:5432/replypilot",
+    BETTER_AUTH_SECRET: "replypilot-development-test-secret-0123456789",
+    GEMINI_API_KEY: SAMPLE_API_KEY,
+  };
+
+  const sameExplicitCfg = loadConfig({
+    ...baseEnv,
+    GEMINI_MODEL: "gemini-3.8-flash",
+    GEMINI_FALLBACK_MODEL: "gemini-3.8-flash",
+  });
+  assert.equal(sameExplicitCfg.gemini?.fallbackModel, undefined);
+
+  const sameAsDefaultFallbackCfg = loadConfig({
+    ...baseEnv,
+    GEMINI_MODEL: "gemini-3.1-flash-lite",
+  });
+  assert.equal(sameAsDefaultFallbackCfg.gemini?.fallbackModel, undefined);
+
+  let fetchCount = 0;
+  const provider = new GeminiReplyDraftProvider({
+    apiKey: SAMPLE_API_KEY,
+    model: "gemini-3.1-flash-lite",
+    fallbackModel: "gemini-3.1-flash-lite",
+    fetchImplementation: async () => {
+      fetchCount += 1;
+      return new Response(
+        JSON.stringify({ error: { code: 503, message: "Overloaded" } }),
+        { status: 503, headers: { "Content-Type": "application/json" } },
+      );
+    },
+  });
+
+  await assert.rejects(
+    () => provider.draftReply(makeLead(), makeContext()),
+    (error: unknown) =>
+      error instanceof ReplyDraftProviderError && error.statusCode === 503,
+  );
+  assert.equal(fetchCount, 1);
 });

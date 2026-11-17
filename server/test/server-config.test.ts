@@ -49,6 +49,7 @@ test("gemini config captures trimmed GEMINI_API_KEY, optional GEMINI_MODEL, and 
   });
   assert.deepEqual(withoutModel.gemini, {
     apiKey: "test-gemini-key-value",
+    fallbackModel: "gemini-3.1-flash-lite",
     timeoutMs: 45_000,
   });
 
@@ -61,6 +62,7 @@ test("gemini config captures trimmed GEMINI_API_KEY, optional GEMINI_MODEL, and 
   assert.deepEqual(withModelAndTimeout.gemini, {
     apiKey: "test-gemini-key-value",
     model: "gemini-3.5-flash",
+    fallbackModel: "gemini-3.1-flash-lite",
     timeoutMs: 60_000,
   });
 
@@ -71,6 +73,7 @@ test("gemini config captures trimmed GEMINI_API_KEY, optional GEMINI_MODEL, and 
   });
   assert.deepEqual(blankTimeout.gemini, {
     apiKey: "test-gemini-key-value",
+    fallbackModel: "gemini-3.1-flash-lite",
     timeoutMs: 45_000,
   });
 
