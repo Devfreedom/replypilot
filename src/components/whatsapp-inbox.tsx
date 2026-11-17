@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import {
   useCallback,
   useEffect,
@@ -17,6 +18,7 @@ import {
   conversationIdentity,
   conversationInitials,
   conversationPreview,
+  filterConversations,
   formatConversationTimestamp,
   formatMessageDay,
   formatMessageTime,
@@ -143,7 +145,7 @@ function DayDivider({ value }: { value: string }) {
   return (
     <div className="my-3 flex items-center gap-3">
       <span aria-hidden="true" className="h-px flex-1 bg-line" />
-      <span className="text-[11px] font-medium text-ink-faint">
+      <span className="text-[11px] font-medium text-ink-soft">
         {formatMessageDay(value)}
       </span>
       <span aria-hidden="true" className="h-px flex-1 bg-line" />
@@ -159,6 +161,15 @@ function MessageBubble({ message }: { message: WhatsAppMessage }) {
     : null;
   const outboundFailed = outbound && message.outboundStatus === "failed";
   const outboundCancelled = outbound && message.outboundStatus === "cancelled";
+  const accentBubble =
+    outbound && !unsupported && !outboundFailed && !outboundCancelled;
+  const metaToneClass = accentBubble
+    ? "text-on-accent/90"
+    : outboundFailed
+      ? "text-danger-ink"
+      : outboundCancelled || unsupported
+        ? "text-warning-ink"
+        : "text-ink-soft";
 
   return (
     <div className={`flex ${outbound ? "justify-end" : "justify-start"}`}>
@@ -183,7 +194,7 @@ function MessageBubble({ message }: { message: WhatsAppMessage }) {
             <p className="text-sm font-semibold">
               Unsupported {message.messageType} message
             </p>
-            <p className="mt-1 text-xs leading-5 opacity-90">
+            <p className="mt-1 text-xs leading-5">
               This message type is stored but cannot be displayed yet.
             </p>
           </div>
@@ -195,9 +206,7 @@ function MessageBubble({ message }: { message: WhatsAppMessage }) {
         <time
           dateTime={message.providerTimestamp}
           title={formatMessageTitle(message.providerTimestamp)}
-          className={`mt-1 block text-right text-[11px] ${
-            outbound ? "opacity-80" : "text-ink-faint"
-          }`}
+          className={`numeric-tabular mt-1 block text-right text-[11px] ${metaToneClass}`}
         >
           {formatMessageTime(message.providerTimestamp)}
         </time>
@@ -208,9 +217,7 @@ function MessageBubble({ message }: { message: WhatsAppMessage }) {
                 ? OUTBOUND_STATUS_DESCRIPTIONS[message.outboundStatus]
                 : undefined
             }
-            className={`mt-0.5 text-right text-[11px] font-medium ${
-              outbound ? "opacity-90" : "text-ink-soft"
-            }`}
+            className={`mt-0.5 text-right text-[11px] font-medium ${metaToneClass}`}
           >
             {outboundStatus}
             {message.failureReason ? ` · ${message.failureReason}` : ""}
@@ -308,13 +315,24 @@ function ConversationThread({
     scrollTop: number;
   } | null>(null);
   const scrollToBottomRef = useRef(true);
+  const loadedConversationIdRef = useRef<string | null>(null);
   const olderAbortRef = useRef<AbortController | null>(null);
   const loadingOlderRef = useRef(false);
 
   useEffect(() => {
+    if (loadedConversationIdRef.current === conversation.id) {
+      return () => {
+        olderAbortRef.current?.abort();
+        olderAbortRef.current = null;
+      };
+    }
+
     const controller = new AbortController();
 
     async function load() {
+      setMessagesLoading(true);
+      setMessagesError(null);
+
       try {
         const params = new URLSearchParams({
           limit: String(MESSAGE_PAGE_SIZE),
@@ -340,6 +358,7 @@ function ConversationThread({
           return;
         }
 
+        loadedConversationIdRef.current = conversation.id;
         setMessages(parsed.messages);
         setOlderCursor(parsed.pagination?.prevCursor ?? null);
         setHasOlder(parsed.pagination?.hasMore ?? false);
@@ -589,7 +608,7 @@ function ConversationThread({
           type="button"
           onClick={onBack}
           aria-label="Back to conversations"
-          className="mt-0.5 rounded-lg px-2 py-1 text-lg leading-none text-ink-soft hover:bg-hushed hover:text-ink lg:hidden"
+          className="inline-flex min-h-11 min-w-11 shrink-0 items-center justify-center rounded-xl text-base leading-none text-ink-soft hover:bg-hushed hover:text-ink lg:hidden"
         >
           ←
         </button>
@@ -599,7 +618,7 @@ function ConversationThread({
         />
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
-            <h2 className="truncate text-base font-bold text-ink">
+            <h2 className="break-words text-base font-bold text-ink">
               {conversationDisplayName(conversation)}
             </h2>
             <StatusBadge status={conversation.status} />
@@ -623,10 +642,15 @@ function ConversationThread({
               </span>
             ) : null}
             {conversation.leadId ? (
-              <span className="badge badge-neutral">Linked lead</span>
+              <Link
+                href={`/?view=leads&leadId=${encodeURIComponent(conversation.leadId)}`}
+                className="inline-flex min-h-7 items-center gap-1 rounded-full border border-accent/25 bg-accent-soft px-2.5 py-0.5 text-xs font-semibold text-accent-ink hover:underline"
+              >
+                Open linked lead →
+              </Link>
             ) : null}
           </div>
-          <p className="mt-0.5 truncate text-xs text-ink-soft">
+          <p className="mt-0.5 break-all text-xs text-ink-soft sm:break-words">
             <span className="font-medium">{identity.label}:</span>{" "}
             {identity.value}
           </p>
@@ -757,7 +781,7 @@ function ConversationThread({
                 ) : null}
               </div>
             ) : (
-              <p className="mb-4 text-center text-[11px] text-ink-faint">
+              <p className="mb-4 text-center text-[11px] text-ink-soft">
                 Beginning of this conversation
               </p>
             )}
@@ -788,10 +812,9 @@ function ConversationThread({
         )}
       </div>
 
-      <p className="border-t border-line px-4 py-2.5 text-[11px] text-ink-faint sm:px-5">
-        Inbound messages come from the WhatsApp webhook. Outbound entries show
-        the server-selected provider status; mock records are not real WhatsApp
-        deliveries.
+      <p className="border-t border-line px-4 py-2.5 text-xs text-ink-soft sm:px-5">
+        Customer messages appear here automatically. Drafted replies are only
+        sent after you approve them.
       </p>
     </>
   );
@@ -805,6 +828,7 @@ export function WhatsAppInbox() {
     string | null
   >(null);
   const [filter, setFilter] = useState<ConversationFilter>("open");
+  const [search, setSearch] = useState("");
   const [listOffset, setListOffset] = useState(0);
   const [refreshToken, setRefreshToken] = useState(0);
   const [threadRefreshToken, setThreadRefreshToken] = useState(0);
@@ -979,6 +1003,11 @@ export function WhatsAppInbox() {
     setAppendRetryToken((token) => token + 1);
   }
 
+  const visibleConversations = useMemo(
+    () => filterConversations(conversations, search),
+    [conversations, search],
+  );
+  const hasSearchQuery = search.trim().length > 0;
   const listCopy = emptyListCopy(filter);
   const sessionExpired =
     conversationsError?.unauthorized === true ||
@@ -987,8 +1016,8 @@ export function WhatsAppInbox() {
   return (
     <div className="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
       <PageHeading
-        title="Unified WhatsApp inbox"
-        description="Read and triage inbound WhatsApp conversations. Every conversation is scoped to your workspace."
+        title="WhatsApp inbox"
+        description="Read customer messages, check 24-hour reply windows, and jump straight to linked leads."
       >
         <button
           type="button"
@@ -1002,11 +1031,9 @@ export function WhatsAppInbox() {
 
       <div className="mt-4 space-y-3">
         <Alert tone="info">
-          <span className="font-semibold">Inbound WhatsApp integration.</span>{" "}
-          Inbound messages and delivery-status updates appear here. Outbound
-          messages use the server-selected provider; Meta sends are limited to
-          configured test workspaces and recipients and are unavailable in
-          production. Replies are never sent automatically from this inbox.
+          <span className="font-semibold">Human approval required.</span>{" "}
+          Replies are never sent automatically from this inbox. Open a linked
+          lead to draft, review, and approve a reply before sending.
         </Alert>
 
         {sessionExpired ? (
@@ -1038,10 +1065,12 @@ export function WhatsAppInbox() {
             <div className="flex items-center justify-between gap-3">
               <div className="min-w-0">
                 <h2 className="text-sm font-bold text-ink">Conversations</h2>
-                <p className="text-xs text-ink-soft">
-                  {listHasMore
-                    ? `${conversations.length}+ shown`
-                    : `${conversations.length} shown`}
+                <p className="numeric-tabular text-xs text-ink-soft">
+                  {hasSearchQuery
+                    ? `${visibleConversations.length} of ${conversations.length}${listHasMore ? "+" : ""} matching`
+                    : listHasMore
+                      ? `${conversations.length}+ shown`
+                      : `${conversations.length} shown`}
                 </p>
               </div>
               {conversationsLoading ? (
@@ -1049,6 +1078,34 @@ export function WhatsAppInbox() {
                   <Spinner className="h-4 w-4" />
                   <span className="sr-only">Loading conversations…</span>
                 </span>
+              ) : null}
+            </div>
+
+            <div className="mt-3 flex items-center gap-2">
+              <label className="relative block min-w-0 flex-1">
+                <span className="sr-only">Search conversations</span>
+                <span
+                  aria-hidden="true"
+                  className="pointer-events-none absolute inset-y-0 left-3 flex items-center text-ink-soft"
+                >
+                  ⌕
+                </span>
+                <input
+                  type="search"
+                  value={search}
+                  onChange={(event) => setSearch(event.target.value)}
+                  placeholder="Search name, phone or preview…"
+                  className="input bg-hushed pl-8 text-sm"
+                />
+              </label>
+              {hasSearchQuery ? (
+                <button
+                  type="button"
+                  onClick={() => setSearch("")}
+                  className="btn btn-secondary min-h-11 shrink-0 px-3 text-xs"
+                >
+                  Clear
+                </button>
               ) : null}
             </div>
 
@@ -1066,7 +1123,7 @@ export function WhatsAppInbox() {
                     type="button"
                     aria-pressed={selected}
                     onClick={() => changeFilter(option.value)}
-                    className={`rounded-full px-3 py-1.5 text-xs font-semibold transition-colors ${
+                    className={`min-h-10 rounded-full px-3.5 py-1.5 text-xs font-semibold transition-colors ${
                       selected
                         ? "bg-accent text-on-accent"
                         : "bg-hushed text-ink-soft hover:bg-line hover:text-ink"
@@ -1114,9 +1171,30 @@ export function WhatsAppInbox() {
               >
                 <p>{listCopy.body}</p>
               </SectionState>
+            ) : visibleConversations.length === 0 ? (
+              <SectionState
+                icon="⌕"
+                title="No matching conversations"
+                action={
+                  <button
+                    type="button"
+                    onClick={() => setSearch("")}
+                    className="btn btn-secondary"
+                  >
+                    Clear search
+                  </button>
+                }
+              >
+                <p>
+                  No loaded conversations match &ldquo;{search.trim()}&rdquo;.
+                  {listHasMore
+                    ? " Try clearing your search or loading more conversations."
+                    : ""}
+                </p>
+              </SectionState>
             ) : (
               <ul aria-label="Conversation list" className="divide-y divide-line">
-                {conversations.map((conversation) => {
+                {visibleConversations.map((conversation) => {
                   const selected =
                     conversation.id === selectedConversationId;
                   const displayName = conversationDisplayName(conversation);
@@ -1147,7 +1225,7 @@ export function WhatsAppInbox() {
                             {conversation.lastMessageAt ? (
                               <time
                                 dateTime={conversation.lastMessageAt}
-                                className="shrink-0 text-[11px] text-ink-faint"
+                                className="numeric-tabular shrink-0 text-[11px] text-ink-soft"
                               >
                                 {formatConversationTimestamp(
                                   conversation.lastMessageAt,
@@ -1166,7 +1244,7 @@ export function WhatsAppInbox() {
                               </span>
                             ) : null}
                             {identity.value !== displayName ? (
-                              <span className="max-w-full truncate text-[11px] text-ink-faint">
+                              <span className="max-w-full truncate text-[11px] text-ink-soft">
                                 {identity.value}
                               </span>
                             ) : null}

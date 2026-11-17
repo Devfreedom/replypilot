@@ -1,11 +1,13 @@
 import type { Pool } from "pg";
 import type { ApprovalSendPolicy } from "../messaging/types.js";
-import { getOutboundProviderNameForWorkspace } from "../outbound/meta-config.js";
+import { resolveOutboundProviderName } from "../outbound/meta-config.js";
 import {
   getOutboundMessageForDraft,
   insertQueuedOutboundMessage,
   resolveConversationForLead,
 } from "../outbound/repository.js";
+import { getConversationConnectionStatus } from "../whatsapp/connections.js";
+import { describeConnectionRejection } from "../outbound/errors.js";
 import type { OutboundMessageRecord } from "../outbound/types.js";
 import { getWorkspaceDefaultApprovalPolicy } from "../settings/messaging-repository.js";
 import {
@@ -32,7 +34,16 @@ export type ApproveReplyDraftResult =
   | Readonly<{ kind: "not-found" }>
   | Readonly<{ kind: "conversation-required" }>
   | Readonly<{ kind: "conversation-ambiguous" }>
-  | Readonly<{ kind: "conversation-not-found" }>;
+  | Readonly<{ kind: "conversation-not-found" }>
+  | Readonly<{
+      kind: "connection-unusable";
+      code: string;
+      message: string;
+    }>
+  | Readonly<{
+      kind: "outbound-conflict";
+      message: string;
+    }>;
 
 /**
  * Approval and queue creation are one transaction. The draft row lock makes
@@ -110,14 +121,65 @@ export async function approveReplyDraft(
         return { kind: "conversation-not-found" };
       }
 
+      // A connection that cannot deliver must not be queued. The worker refuses
+      // every state that is not "active", so the API refuses the same states.
+      // The draft is not approved and no outbound row is created.
+      const connectionStatus = await getConversationConnectionStatus(
+        client,
+        input.workspaceId,
+        conversation.conversationId,
+      );
+
+      if (connectionStatus !== "active") {
+        await client.query("ROLLBACK");
+        return {
+          kind: "connection-unusable",
+          ...describeConnectionRejection(connectionStatus),
+        };
+      }
+
       outboundMessage = await insertQueuedOutboundMessage(client, {
         workspaceId: input.workspaceId,
         conversationId: conversation.conversationId,
         replyDraftId: input.draftId,
         content: current.draft_reply,
         idempotencyKey: `reply-draft:${input.draftId}`,
-        provider: getOutboundProviderNameForWorkspace(input.workspaceId),
+        provider: await resolveOutboundProviderName(
+          client,
+          input.workspaceId,
+          conversation.conversationId,
+        ),
       });
+
+      if (!outboundMessage) {
+        const existingOutbound = await getOutboundMessageForDraft(
+          client,
+          input.workspaceId,
+          input.draftId,
+        );
+
+        if (
+          !existingOutbound ||
+          existingOutbound.status !== "queued" ||
+          existingOutbound.content !== current.draft_reply ||
+          existingOutbound.conversationId !== conversation.conversationId
+        ) {
+          await client.query("ROLLBACK");
+          return {
+            kind: "outbound-conflict",
+            message:
+              existingOutbound?.status === "cancelled"
+                ? "This draft's previous outbound send was cancelled. Create a new draft to send revised content."
+                : existingOutbound &&
+                    existingOutbound.conversationId !==
+                      conversation.conversationId
+                  ? "This draft already has an outbound message tied to a different conversation. Create a new draft to send to this conversation."
+                  : "This draft already has an outbound message for an earlier snapshot. Create a new draft to send revised content.",
+          };
+        }
+
+        outboundMessage = existingOutbound;
+      }
     }
 
     const updated = await client.query<ReplyDraftRow>(

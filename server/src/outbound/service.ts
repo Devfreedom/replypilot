@@ -1,13 +1,15 @@
 import type { Pool } from "pg";
 import { REPLY_DRAFT_COLUMNS } from "../reply-drafts/repository.js";
 import type { ReplyDraftRow } from "../reply-drafts/types.js";
-import { getOutboundProviderNameForWorkspace } from "./meta-config.js";
+import { resolveOutboundProviderName } from "./meta-config.js";
 import {
   getOutboundMessageForDraft,
   insertQueuedOutboundMessage,
   resetFailedOutboundForRetry,
   resolveConversationForLead,
 } from "./repository.js";
+import { getConversationConnectionStatus } from "../whatsapp/connections.js";
+import { describeConnectionRejection } from "./errors.js";
 import type { OutboundMessageRecord } from "./types.js";
 
 export type QueueManualSendInput = Readonly<{
@@ -26,6 +28,11 @@ export type QueueManualSendResult =
   | Readonly<{ kind: "conversation-ambiguous" }>
   | Readonly<{ kind: "conversation-not-found" }>
   | Readonly<{ kind: "conversation-mismatch" }>
+  | Readonly<{
+      kind: "connection-unusable";
+      code: string;
+      message: string;
+    }>
   | Readonly<{ kind: "manual-review" }>;
 
 /**
@@ -133,13 +140,36 @@ export async function queueManualSend(
       return { kind: "conversation-not-found" };
     }
 
+    // A connection that cannot deliver must not be queued. The worker refuses
+    // every state that is not "active", so the API refuses the same states:
+    // a queued row must always be a row the worker can act on.
+    const connectionStatus = await getConversationConnectionStatus(
+      client,
+      input.workspaceId,
+      conversation.conversationId,
+    );
+
+    if (connectionStatus !== "active") {
+      await client.query("ROLLBACK");
+      return {
+        kind: "connection-unusable",
+        ...describeConnectionRejection(connectionStatus),
+      };
+    }
+
+    const resolvedProvider = await resolveOutboundProviderName(
+      client,
+      input.workspaceId,
+      conversation.conversationId,
+    );
+
     let outboundMessage = await insertQueuedOutboundMessage(client, {
       workspaceId: input.workspaceId,
       conversationId: conversation.conversationId,
       replyDraftId: input.draftId,
       content: draft.draft_reply,
       idempotencyKey: `reply-draft:${input.draftId}`,
-      provider: getOutboundProviderNameForWorkspace(input.workspaceId),
+      provider: resolvedProvider,
     });
 
     if (!outboundMessage) {
@@ -160,6 +190,7 @@ export async function queueManualSend(
           client,
           input.workspaceId,
           outboundMessage.id,
+          resolvedProvider,
         )) ?? outboundMessage;
     } else if (outboundMessage.status === "manual_review") {
       await client.query("ROLLBACK");

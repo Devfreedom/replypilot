@@ -170,6 +170,13 @@ export function sendPolicyChoiceForDraftSelection(
   return previousDraftId === nextDraftId ? currentChoice : "default";
 }
 
+export function shouldClearOutboundOnDraftUpdate(
+  previousDraftId: string | null,
+  nextDraft: Readonly<{ id: string; status: string }>,
+): boolean {
+  return nextDraft.id !== previousDraftId || nextDraft.status === "draft";
+}
+
 export function preferredConversationIdForDraft(
   existingConversationId: string | null,
   conversations: readonly Readonly<{ id: string }>[],

@@ -10,6 +10,13 @@ import {
   type ReactNode,
 } from "react";
 import { authClient } from "@/lib/auth-client";
+import {
+  parseWorkspaceResponse,
+  type AuthWorkspace,
+  type ReplyDraftProviderKind,
+} from "@/lib/workspace";
+
+export type { AuthWorkspace, ReplyDraftProviderKind } from "@/lib/workspace";
 
 export type AuthUser = Readonly<{
   id: string;
@@ -17,15 +24,11 @@ export type AuthUser = Readonly<{
   email: string;
 }>;
 
-export type AuthWorkspace = Readonly<{
-  id: string;
-  name: string;
-}>;
-
 type AuthContextValue = Readonly<{
   user: AuthUser | null;
   workspace: AuthWorkspace | null;
   role: "owner" | "member" | null;
+  replyDraftProvider: ReplyDraftProviderKind | null;
   isLoading: boolean;
   workspaceError: string | null;
   refreshWorkspace: () => void;
@@ -36,42 +39,12 @@ type WorkspaceState = Readonly<{
   userId: string | null;
   value: AuthWorkspace | null;
   role: "owner" | "member" | null;
+  replyDraftProvider: ReplyDraftProviderKind | null;
   error: string | null;
   loaded: boolean;
 }>;
 
 const AuthContext = createContext<AuthContextValue | null>(null);
-
-function parseWorkspaceResponse(
-  value: unknown,
-): { workspace: AuthWorkspace; role: "owner" | "member" } | null {
-  if (typeof value !== "object" || value === null) {
-    return null;
-  }
-
-  const workspace = "workspace" in value ? value.workspace : null;
-  const role = "role" in value ? value.role : null;
-
-  if (
-    typeof workspace !== "object" ||
-    workspace === null ||
-    !("id" in workspace) ||
-    !("name" in workspace) ||
-    typeof workspace.id !== "string" ||
-    typeof workspace.name !== "string" ||
-    (role !== "owner" && role !== "member")
-  ) {
-    return null;
-  }
-
-  return {
-    workspace: {
-      id: workspace.id,
-      name: workspace.name,
-    },
-    role,
-  };
-}
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const router = useRouter();
@@ -80,6 +53,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     userId: null,
     value: null,
     role: null,
+    replyDraftProvider: null,
     error: null,
     loaded: false,
   });
@@ -121,6 +95,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           userId,
           value: parsed.workspace,
           role: parsed.role,
+          replyDraftProvider: parsed.replyDraftProvider,
           error: null,
           loaded: true,
         });
@@ -131,6 +106,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           userId,
           value: null,
           role: null,
+          replyDraftProvider: null,
           error:
             error instanceof Error
               ? error.message
@@ -168,6 +144,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     user,
     workspace: activeWorkspaceState?.value ?? null,
     role: activeWorkspaceState?.role ?? null,
+    replyDraftProvider: activeWorkspaceState?.replyDraftProvider ?? null,
     isLoading:
       isPending ||
       (Boolean(userId) &&

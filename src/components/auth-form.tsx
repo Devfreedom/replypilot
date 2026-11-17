@@ -3,64 +3,45 @@
 import Link from "next/link";
 import { useEffect, useState, type FormEvent } from "react";
 import { authClient } from "@/lib/auth-client";
+import { sanitizeAuthRedirectPath } from "@/lib/auth-redirect";
+import {
+  AUTH_NAME_MAX_LENGTH,
+  AUTH_PASSWORD_MAX_LENGTH,
+  AUTH_PASSWORD_MIN_LENGTH,
+  mapAuthServerError,
+  validateAuthEmail,
+  validateAuthFormFields,
+  validateAuthName,
+  validateNewPassword,
+  validateSignInPassword,
+  type AuthErrorInput,
+  type AuthFieldErrors,
+  type AuthFieldName,
+} from "@/lib/auth-validation";
+import { BRAND } from "@/lib/brand";
 import { useAuth } from "./auth-provider";
+import { AuthShell } from "./auth-shell";
+import { PasswordInput } from "./password-input";
+import { Alert, FormField } from "./ui";
 
 type AuthMode = "sign-in" | "sign-up";
-
-type AuthError = {
-  code?: string;
-  status?: number;
-  message?: string;
-};
 
 function destination(): string {
   if (typeof window === "undefined") return "/";
 
   const next = new URLSearchParams(window.location.search).get("next");
 
-  return next && next.startsWith("/") && !next.startsWith("//") ? next : "/";
+  return sanitizeAuthRedirectPath(next, window.location.origin);
 }
 
-function friendlyAuthError(
-  error: AuthError | null,
-  mode: AuthMode,
-): string {
-  const code = error?.code ?? "";
-
-  if (
-    code.includes("USER_ALREADY_EXISTS") ||
-    code.includes("EMAIL_ALREADY_EXISTS")
-  ) {
-    return "An account with this email already exists. Sign in instead.";
+function focusFirstAuthError(errors: AuthFieldErrors, order: AuthFieldName[]) {
+  for (const field of order) {
+    if (errors[field]) {
+      const element = document.getElementById(`auth-${field}`);
+      element?.focus();
+      return;
+    }
   }
-
-  if (error?.status === 429 || code.includes("RATE_LIMIT")) {
-    return "Too many attempts. Wait a little, then try again.";
-  }
-
-  if (
-    code.includes("INVALID_EMAIL_OR_PASSWORD") ||
-    code.includes("INVALID_PASSWORD") ||
-    error?.status === 401
-  ) {
-    return "Email or password is incorrect.";
-  }
-
-  if (code.includes("PASSWORD_TOO_SHORT")) {
-    return "Password must be at least 8 characters.";
-  }
-
-  if (code.includes("PASSWORD_TOO_LONG")) {
-    return "Password is too long.";
-  }
-
-  if (code.includes("INVALID_EMAIL")) {
-    return "Enter a valid email address.";
-  }
-
-  return mode === "sign-up"
-    ? "Unable to create your account. Check your details and try again."
-    : "Unable to sign in. Check your details and try again.";
 }
 
 export function AuthForm({ mode }: { mode: AuthMode }) {
@@ -69,7 +50,8 @@ export function AuthForm({ mode }: { mode: AuthMode }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [fieldErrors, setFieldErrors] = useState<AuthFieldErrors>({});
+  const [formError, setFormError] = useState<string | null>(null);
   const isSignUp = mode === "sign-up";
 
   useEffect(() => {
@@ -78,34 +60,55 @@ export function AuthForm({ mode }: { mode: AuthMode }) {
     }
   }, [isLoading, user]);
 
+  function clearFieldError(field: AuthFieldName) {
+    setFormError(null);
+    setFieldErrors((current) =>
+      current[field] ? { ...current, [field]: undefined } : current,
+    );
+  }
+
+  function handleBlur(field: "name" | "email" | "password") {
+    let message: string | undefined;
+
+    if (field === "name" && isSignUp) {
+      message = validateAuthName(name);
+    } else if (field === "email") {
+      message = validateAuthEmail(email);
+    } else if (field === "password") {
+      message = isSignUp
+        ? validateNewPassword(password)
+        : validateSignInPassword(password);
+    }
+
+    setFieldErrors((current) => ({ ...current, [field]: message }));
+  }
+
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    setError(null);
+    if (isSubmitting) return;
+
+    setFormError(null);
+
+    const nextFieldErrors = validateAuthFormFields(mode, {
+      name,
+      email,
+      password,
+    });
+
+    if (Object.values(nextFieldErrors).some(Boolean)) {
+      setFieldErrors(nextFieldErrors);
+      focusFirstAuthError(
+        nextFieldErrors,
+        isSignUp ? ["name", "email", "password"] : ["email", "password"],
+      );
+      return;
+    }
+
+    setFieldErrors({});
+    setIsSubmitting(true);
 
     const trimmedEmail = email.trim();
     const trimmedName = name.trim();
-
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmedEmail)) {
-      setError("Enter a valid email address.");
-      return;
-    }
-
-    if (isSignUp && !trimmedName) {
-      setError("Enter your name.");
-      return;
-    }
-
-    if (isSignUp && password.length < 8) {
-      setError("Password must be at least 8 characters.");
-      return;
-    }
-
-    if (!password) {
-      setError("Enter your password.");
-      return;
-    }
-
-    setIsSubmitting(true);
 
     try {
       const result = isSignUp
@@ -121,16 +124,25 @@ export function AuthForm({ mode }: { mode: AuthMode }) {
           });
 
       if (result.error) {
-        setError(friendlyAuthError(result.error as AuthError, mode));
+        const mapped = mapAuthServerError(
+          result.error as AuthErrorInput,
+          mode,
+        );
+        setFieldErrors(mapped.fieldErrors);
+        setFormError(mapped.formError);
+        focusFirstAuthError(
+          mapped.fieldErrors,
+          isSignUp ? ["name", "email", "password"] : ["email", "password"],
+        );
         return;
       }
 
       window.location.assign(destination());
     } catch {
-      setError(
+      setFormError(
         isSignUp
-          ? "Unable to create your account. Please try again."
-          : "Unable to sign in. Please try again.",
+          ? "Unable to create your account. Check your connection and try again."
+          : "Unable to sign in. Check your connection and try again.",
       );
     } finally {
       setIsSubmitting(false);
@@ -148,128 +160,133 @@ export function AuthForm({ mode }: { mode: AuthMode }) {
   }
 
   return (
-    <main className="flex min-h-screen items-center justify-center bg-canvas px-4 py-12">
-      <div className="w-full max-w-md">
-        <div className="mb-8 flex items-center gap-3">
-          <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-accent text-lg font-bold text-on-accent">
-            R
-          </div>
-          <div>
-            <p className="text-xl font-bold tracking-tight text-ink">
-              ReplyPilot
-            </p>
-            <p className="text-xs text-ink-soft">Customer workflow</p>
-          </div>
-        </div>
-
-        <section className="card p-6 sm:p-8">
-          <h1 className="text-2xl font-bold tracking-tight text-ink">
-            {isSignUp ? "Create your account" : "Sign in to ReplyPilot"}
-          </h1>
-          <p className="mt-2 text-sm leading-6 text-ink-soft">
-            {isSignUp
-              ? "Create a business workspace for your leads, service details, and reply drafts."
-              : "Access the leads and business details in your workspace."}
-          </p>
-
-          <form className="mt-6 space-y-4" onSubmit={(event) => void submit(event)}>
-            {isSignUp ? (
-              <label className="block text-sm font-medium text-ink">
-                Your name
-                <input
-                  type="text"
-                  name="name"
-                  autoComplete="name"
-                  required
-                  maxLength={120}
-                  value={name}
-                  onChange={(event) => setName(event.target.value)}
-                  disabled={isSubmitting}
-                  className="input mt-1"
-                />
-              </label>
-            ) : null}
-
-            <label className="block text-sm font-medium text-ink">
-              Email address
+    <AuthShell
+      title={isSignUp ? "Create your workspace account" : `Sign in to ${BRAND.name}`}
+      description={
+        isSignUp
+          ? "Set up a workspace for your leads, pricing, and WhatsApp reply drafts."
+          : "Access customer enquiries, follow-ups, and approved reply drafts."
+      }
+      footer={
+        <>
+          {isSignUp ? "Already have an account?" : `New to ${BRAND.name}?`}{" "}
+          <Link
+            href={isSignUp ? "/sign-in" : "/sign-up"}
+            className="font-semibold text-accent-ink hover:underline"
+          >
+            {isSignUp ? "Sign in" : "Create an account"}
+          </Link>
+        </>
+      }
+    >
+      <form
+        noValidate
+        className="mt-6 space-y-5"
+        onSubmit={(event) => void submit(event)}
+      >
+        {isSignUp ? (
+          <FormField id="auth-name" label="Your name" error={fieldErrors.name}>
+            {(props) => (
               <input
-                type="email"
-                name="email"
-                autoComplete="email"
+                {...props}
+                type="text"
+                name="name"
+                autoComplete="name"
                 required
-                value={email}
-                onChange={(event) => setEmail(event.target.value)}
+                maxLength={AUTH_NAME_MAX_LENGTH}
+                value={name}
+                onChange={(event) => {
+                  setName(event.target.value);
+                  clearFieldError("name");
+                }}
+                onBlur={() => handleBlur("name")}
                 disabled={isSubmitting}
-                className="input mt-1"
+                placeholder="e.g. Tunde Adebayo"
+                className="input"
               />
-            </label>
+            )}
+          </FormField>
+        ) : null}
 
-            <label className="block text-sm font-medium text-ink">
-              Password
-              <input
-                type="password"
-                name="password"
-                autoComplete={isSignUp ? "new-password" : "current-password"}
-                required
-                minLength={isSignUp ? 8 : undefined}
-                maxLength={128}
-                value={password}
-                onChange={(event) => setPassword(event.target.value)}
-                disabled={isSubmitting}
-                aria-describedby={isSignUp ? "password-help" : undefined}
-                className="input mt-1"
-              />
-            </label>
-
-            {isSignUp ? (
-              <p id="password-help" className="text-xs leading-5 text-ink-soft">
-                Use at least 8 characters. Email verification and password
-                recovery are not configured in this development build.
-              </p>
-            ) : null}
-
-            {error ? (
-              <p
-                role="alert"
-                className="rounded-xl border border-[color-mix(in_oklab,var(--rp-danger)_25%,transparent)] bg-danger-soft px-4 py-3 text-sm text-danger-ink"
-              >
-                {error}
-              </p>
-            ) : null}
-
-            <button
-              type="submit"
+        <FormField
+          id="auth-email"
+          label="Email address"
+          error={fieldErrors.email}
+        >
+          {(props) => (
+            <input
+              {...props}
+              type="email"
+              name="email"
+              autoComplete="email"
+              inputMode="email"
+              required
+              value={email}
+              onChange={(event) => {
+                setEmail(event.target.value);
+                clearFieldError("email");
+              }}
+              onBlur={() => handleBlur("email")}
               disabled={isSubmitting}
-              className="btn btn-primary w-full"
-            >
-              {isSubmitting
-                ? isSignUp
-                  ? "Creating account…"
-                  : "Signing in…"
-                : isSignUp
-                  ? "Create account"
-                  : "Sign in"}
-            </button>
-          </form>
+              placeholder="owner@studio.ng"
+              className="input"
+            />
+          )}
+        </FormField>
 
-          <p className="mt-6 border-t border-line pt-5 text-center text-sm text-ink-soft">
-            {isSignUp ? "Already have an account?" : "New to ReplyPilot?"}{" "}
-            <Link
-              href={isSignUp ? "/sign-in" : "/sign-up"}
-              className="font-semibold text-accent-ink hover:underline"
-            >
-              {isSignUp ? "Sign in" : "Create an account"}
-            </Link>
-          </p>
-        </section>
+        <PasswordInput
+          id="auth-password"
+          name="password"
+          label="Password"
+          autoComplete={isSignUp ? "new-password" : "current-password"}
+          required
+          minLength={isSignUp ? AUTH_PASSWORD_MIN_LENGTH : undefined}
+          maxLength={AUTH_PASSWORD_MAX_LENGTH}
+          value={password}
+          onChange={(event) => {
+            setPassword(event.target.value);
+            clearFieldError("password");
+          }}
+          onBlur={() => handleBlur("password")}
+          disabled={isSubmitting}
+          hint={
+            isSignUp
+              ? `Use ${AUTH_PASSWORD_MIN_LENGTH} to ${AUTH_PASSWORD_MAX_LENGTH} characters unique to your business account.`
+              : undefined
+          }
+          error={fieldErrors.password}
+          labelAside={
+            !isSignUp ? (
+              <Link
+                href="/forgot-password"
+                className="text-xs font-semibold text-accent-ink hover:underline"
+              >
+                Forgot password?
+              </Link>
+            ) : undefined
+          }
+        />
 
-        <p className="mt-5 text-center text-xs leading-5 text-ink-faint">
-          Sessions are stored in HTTP-only cookies. Reply generation remains a
-          mock demonstration. Outbound messages require human approval; Meta
-          sending is disabled by default and restricted to configured test
-          recipients.
-        </p>
-      </div>
-    </main>
+        {formError ? (
+          <Alert tone="danger" role="alert">
+            {formError}
+          </Alert>
+        ) : null}
+
+        <button
+          type="submit"
+          disabled={isSubmitting}
+          className="btn btn-primary w-full"
+        >
+          {isSubmitting
+            ? isSignUp
+              ? "Creating account…"
+              : "Signing in…"
+            : isSignUp
+              ? "Create account"
+              : "Sign in"}
+        </button>
+      </form>
+    </AuthShell>
   );
 }

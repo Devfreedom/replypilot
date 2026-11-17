@@ -20,7 +20,7 @@ This project uses [`next/font`](https://nextjs.org/docs/app/building-your-applic
 
 ## API, authentication, and local PostgreSQL
 
-> **Not production-ready warning:** email/password authentication and workspace isolation are implemented, but this application still needs HTTPS, production origin and cookie review, email verification, password recovery, deployment hardening, operational monitoring, and a complete security review before production use. Reply generation remains a mock. Meta outbound sending is a restricted test integration, disabled by default and unavailable in production; do not use real customer or business data.
+> **Not production-ready warning:** email/password authentication and workspace isolation are implemented, but this application still needs HTTPS, production origin and cookie review, email verification, password recovery, deployment hardening, operational monitoring, and a complete security review before production use. Reply draft generation uses `GeminiReplyDraftProvider` when `GEMINI_API_KEY` is configured and falls back to the deterministic `MockReplyDraftProvider` otherwise. Meta outbound sending is a restricted test integration, disabled by default and unavailable in production; do not use real customer or business data.
 
 The Express API is a separate development service. It binds to `127.0.0.1` and must not be exposed publicly. The browser dashboard is a separate Next.js app; it proxies `/api/*` requests to `API_ORIGIN`, which defaults to `http://127.0.0.1:4000`. This keeps Better Auth and business API requests same-origin from the browser, so session cookies flow through the rewrite.
 
@@ -74,6 +74,8 @@ openssl rand -base64 32
 ```
 
 Put the generated value only in your local `.env` (or your deployment's secret store), then set `BETTER_AUTH_URL` to the public frontend origin. Add any additional production frontend origins to `BETTER_AUTH_TRUSTED_ORIGINS`; do not add wildcard or attacker-controlled origins.
+
+When the API is reached through a reverse proxy that appends to the client IP header, list that proxy in `BETTER_AUTH_TRUSTED_PROXY_CIDRS` (comma-separated addresses or CIDR ranges). Better Auth resolves the client IP from the forwarded header chain to key its rate limits, and without this list every client shares one rate-limit bucket per path. Leave it empty when the API is reached directly.
 
 ### Run the API
 
@@ -157,8 +159,8 @@ All business endpoints below require a valid Better Auth session and workspace m
 | `GET` | `/api/leads` | `200 {"leads":[...]}` for the session workspace, ordered newest first. |
 | `POST` | `/api/leads` | Accepts `name`, `service`, and `lastMessage`; optional `channel`, `status`, `whatsappNumber`, and `nextFollowUpAt`. Returns `201 {"lead":{...}}`, or `409` if the optional WhatsApp number is already used in the workspace. Defaults: `Manual`, `New`. |
 | `PATCH` | `/api/leads/:id` | Accepts `{ "status": "New" \| "Contacted" \| "Quoted" \| "Booked" }`. Returns the updated lead, `400` for malformed input, or `404` for an unknown valid UUID. |
-| `POST` | `/api/leads/:id/draft-reply` | Returns a non-persistent mock demonstration analysis and suggested reply for an existing lead. Kept for compatibility; the response omits the saved-draft fields and sources. Returns `400` for a malformed ID or `404` for an unknown valid UUID. |
-| `POST` | `/api/leads/:id/reply-drafts` | Generates and saves a mock draft with a server-generated business-fact snapshot. Returns `201 {"draft":{...}}`. Optional body `{"draftId":"..."}` regenerates that saved draft in place and returns `200`; it must belong to the lead. |
+| `POST` | `/api/leads/:id/draft-reply` | Returns a non-persistent analysis and suggested reply (generated via `GeminiReplyDraftProvider` when `GEMINI_API_KEY` is configured, falling back to the deterministic `MockReplyDraftProvider` otherwise) for an existing lead. Kept for compatibility; the response omits the saved-draft fields and sources. Returns `400` for a malformed ID or `404` for an unknown valid UUID. |
+| `POST` | `/api/leads/:id/reply-drafts` | Generates and saves a draft (using `GeminiReplyDraftProvider` when `GEMINI_API_KEY` is configured and falling back to the deterministic `MockReplyDraftProvider` otherwise) with a server-generated business-fact snapshot. Returns `201 {"draft":{...}}`. Optional body `{"draftId":"..."}` regenerates that saved draft in place and returns `200`; it must belong to the lead. |
 | `GET` | `/api/leads/:id/reply-drafts` | `200 {"drafts":[...]}` for that lead, newest first. Returns `404` for an unknown lead. |
 | `PATCH` | `/api/leads/:leadId/reply-drafts/:draftId` | Accepts `{"draftReply":"..."}` to save edited text, or `{"status":"approved"\|"draft"}` to change review status. Text edits return the draft to `draft`; approving records `approvedAt`. Returns `200 {"draft":{...}}`, `400`, or `404`. |
 | `GET` | `/api/business/profile` | `200 {"profile":{...}}`, or `200 {"profile":null}` when no profile has been created. |
@@ -302,7 +304,7 @@ Content-Type: application/json
 
 ### Reply drafts, provenance, and owner approval
 
-Draft generation uses a local deterministic mock provider only. It does not call a live AI service, require credentials, or send a customer message. The legacy `POST /api/leads/:id/draft-reply` endpoint keeps its original non-persistent response contract and shares the same generation logic.
+Reply draft generation uses `GeminiReplyDraftProvider` when `GEMINI_API_KEY` is configured and falls back to the deterministic `MockReplyDraftProvider` otherwise; neither provider sends a customer message automatically. The legacy `POST /api/leads/:id/draft-reply` endpoint keeps its original non-persistent response contract and shares the same generation logic.
 
 The saved-draft endpoints persist reviewable drafts:
 
@@ -397,20 +399,240 @@ failure between the final authorization check and provider execution is an
 unavoidable boundary; provider idempotency or manual reconciliation is needed
 to handle an unknown outcome safely.
 
-The inbound webhook route also receives signed delivery-status events. The
-server-side test integration described above is the only supported Meta
-outbound route.
+The inbound webhook route also receives signed delivery-status events. Outbound
+sending selects the WhatsApp connection owned by the conversation's workspace;
+the restricted legacy test configuration below remains available during
+migration.
+
+#### Multi-workspace WhatsApp connections (Milestone 14A)
+
+Migration `017_multi_workspace_whatsapp_connections.sql` extends the existing
+`whatsapp_connections` table with the status, credential, and verification
+columns. Migration `019_enforce_global_whatsapp_phone_number_ownership.sql`
+adds the global ownership index, so each Meta phone-number ID resolves to
+exactly one workspace; inbound events and outbound sends use that database
+ownership rather than a webhook- or browser-supplied workspace.
+
+The ownership index is partial: it covers every connection that can own
+inbound routing (any status other than `disconnected`). Before Milestone 14A
+the webhook created one connection row per (workspace, phone number) pair, so
+an existing database can hold the same Meta number in more than one workspace.
+That data carries real conversation history, so migration `019` refuses to
+apply while the conflict exists and changes nothing. It names the conflicting
+connections, their workspaces, and their statuses. The operator then reviews
+and runs:
+
+```bash
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 \
+  -f server/src/db/remediation/demote_duplicate_whatsapp_connections.sql
+npm run db:migrate
+```
+
+The remediation script never deletes, reassigns, or moves a conversation, lead,
+or customer. For each duplicated phone-number ID it keeps the oldest
+connection and sets the other rows to `disconnected`, which preserves the
+rows, their conversations, and their messages while making inbound routing
+unambiguous again. Read its pre-flight report before running it, and confirm
+that the oldest row is the workspace that legitimately owns the Meta number.
+
+Before Milestone 14A, the inbound webhook created a connection row on first
+use. That path now respects the global ownership index and fails closed: an
+event for a number owned by another workspace is acknowledged and ignored
+instead of being stored twice.
+
+Access tokens are encrypted with AES-256-GCM before storage. Set a server-only
+32-byte key (base64) and optional version label:
+
+| Variable | Purpose |
+| --- | --- |
+| `WHATSAPP_CREDENTIAL_ENCRYPTION_KEY` | Base64-encoded 32-byte AES-256-GCM key. Generate with `openssl rand -base64 32`; store in a secret manager. |
+| `WHATSAPP_CREDENTIAL_KEY_VERSION` | Short key version label, default `v1`. Must match the version stored with each credential. |
+
+Connections start `pending`, become `active` through a trusted server-side
+onboarding path, and can be disconnected by a workspace owner. Disconnected,
+expired, or undecryptable credentials fail closed before any Meta request.
+Credentials are never returned by the connection API. Workspace members can
+list and read connections; only owners can disconnect. There is no endpoint
+that creates a connection or accepts an arbitrary workspace ID. Embedded
+Signup onboarding is added by Milestone 14B below.
+
+The connection API is:
+
+- `GET /api/whatsapp/connections`
+- `GET /api/whatsapp/connections/:connectionId`
+- `POST /api/whatsapp/connections/:connectionId/disconnect` (owner only)
+- `POST /api/whatsapp/connections/:connectionId/verify` (owner only, Milestone 14B)
+
+Unknown or unregistered phone-number IDs are acknowledged but ignored; they
+never create a connection or get assigned to a workspace. The optional legacy
+single-workspace configuration below remains supported during migration.
+
+#### WhatsApp Embedded Signup v4 onboarding (Milestone 14B)
+
+Milestone 14B adds the Meta Embedded Signup v4 flow. A workspace owner clicks
+**Connect WhatsApp** in **Settings → WhatsApp connections**, Meta collects the
+business phone number and authorization, and the API exchanges and verifies the
+result before a connection becomes usable.
+
+Migration `018_whatsapp_embedded_signup_onboarding.sql` is additive. It adds
+the `error` connection status (a connection that failed re-verification),
+`last_verified_at`, `webhook_subscribed_at`, and `last_error` to
+`whatsapp_connections`, and creates `whatsapp_onboarding_sessions`. That table
+stores only a SHA-256 hash of the onboarding nonce: the raw value is returned
+once to the initiating browser and is never persisted.
+
+Add these server-only values to `.env` (or a secret store). Leave every value
+empty to keep onboarding disabled; the settings page then states that WhatsApp
+onboarding is not configured instead of showing a fake connection.
+
+| Variable | Purpose |
+| --- | --- |
+| `META_APP_ID` | Meta App ID from App settings → Basic. Public; sent to the browser SDK. |
+| `META_APP_SECRET` | Meta App Secret from App settings → Basic. Server-only; used to exchange the authorization code. Must match `WHATSAPP_APP_SECRET`. |
+| `META_EMBEDDED_SIGNUP_CONFIG_ID` | Facebook Login for Business configuration ID created with the WhatsApp Embedded Signup variation. |
+| `META_GRAPH_API_VERSION` | Graph API version used for verification, e.g. `v27.0`. Must match the dashboard. |
+| `META_ONBOARDING_ALLOWED_ORIGIN` | The public application origin allowed to start or complete onboarding, e.g. `https://app.example.com`. Must use `https` in production. |
+| `WHATSAPP_ONBOARDING_RATE_LIMIT_WINDOW_SECONDS` | Rate-limit window for the onboarding endpoints, default `60`. |
+| `WHATSAPP_ONBOARDING_RATE_LIMIT_MAX` | Onboarding requests allowed per user and workspace per window, default `20`. |
+
+If only some of `META_APP_ID`, `META_APP_SECRET`, and
+`META_EMBEDDED_SIGNUP_CONFIG_ID` are set, the API refuses to start. If
+`META_APP_SECRET` and `WHATSAPP_APP_SECRET` disagree, the API refuses to
+start, because both refer to the same Meta app.
+
+##### Onboarding request origin
+
+The three state-changing onboarding routes (`POST /onboarding/sessions`,
+`POST /onboarding/complete`, and `POST /connections/:connectionId/verify`)
+only accept requests whose `Origin` header matches the configured application
+origin:
+
+- When `META_ONBOARDING_ALLOWED_ORIGIN` is set, that origin is the only one
+  that is accepted. The comparison is made on the normalised
+  scheme/host/port, so `https://App.Example.com` matches
+  `https://app.example.com` while a different scheme, host, or port does not.
+- A request with no `Origin` header, or with the opaque `null` origin, is
+  always rejected with `403 origin_not_allowed`.
+- In production an origin must be configured. Without
+  `META_ONBOARDING_ALLOWED_ORIGIN`, every onboarding request is rejected and
+  the settings page says that onboarding is disabled.
+- Outside production the loopback origins `http://localhost:3000` and
+  `http://127.0.0.1:3000` are accepted so local development keeps working.
+  The production check is not weakened by this fallback.
+
+The browser sends `Origin` automatically on same-origin `POST` requests, and
+the Next.js `/api` rewrite forwards the header to the API. This was verified
+against the installed Next.js version.
+
+##### Onboarding rate limiting
+
+Session creation, completion, and verification share one fixed-window budget
+per authenticated user and workspace. Exceeding it returns `429` with a
+`Retry-After` header and the code `rate_limited`. The counters live in the API
+process, which matches the current single-process deployment; a shared store
+is required before running several API instances.
+
+The onboarding API is:
+
+- `GET /api/whatsapp/onboarding/config` (owner only) — whether onboarding is
+  configured, plus the public app ID, configuration ID, and Graph version. It
+  never returns the app secret.
+- `POST /api/whatsapp/onboarding/sessions` (owner only) — creates a short-lived,
+  single-use onboarding session bound to the authenticated user and workspace
+  and returns the nonce and its expiry.
+- `POST /api/whatsapp/onboarding/complete` (owner only) — consumes the nonce
+  and exchanges and verifies the authorization code server-side.
+- `POST /api/whatsapp/connections/:connectionId/verify` (owner only) — re-runs
+  token, permission, asset, and webhook-subscription checks for a stored
+  connection.
+
+No endpoint accepts a workspace ID. The workspace always comes from the
+authenticated session, and a browser cannot claim a phone number for another
+workspace.
+
+What the server does with a completed signup:
+
+1. Consumes the onboarding nonce. Expired, reused, or foreign nonces are
+   rejected; a repeated callback for a recently completed session returns the
+   existing connection instead of creating a second one.
+2. Exchanges the authorization code for a customer access token
+   (`GET /{version}/oauth/access_token`). The code, the app secret, and the
+   token never leave the server, appear in a response, or reach a log.
+3. Inspects the token (`GET /{version}/debug_token`) and requires the
+   `whatsapp_business_management` and `whatsapp_business_messaging`
+   permissions, a valid token issued to this app, and a grant that covers the
+   selected Messaging account.
+4. Confirms the Messaging account (`GET /{version}/{wabaId}`) and that the
+   phone number belongs to it (`GET /{version}/{wabaId}/phone_numbers`).
+5. Subscribes the app to the account's webhooks
+   (`POST /{version}/{wabaId}/subscribed_apps`) and confirms it with
+   `GET /{version}/{wabaId}/subscribed_apps`.
+6. Encrypts the token with the existing AES-256-GCM credential layer and
+   stores the connection as `active` only when every check succeeded.
+
+If only the webhook subscription is unconfirmed, the connection is stored as
+`pending` with a safe explanation and the **Verify** button retries the
+checks. A failed token, permission, or asset check never creates an active
+connection. Registering a phone number that already belongs to another
+workspace is refused with `409` and does not disclose the owning workspace.
+
+Phone-number registration (the six-digit PIN step) is not automated in this
+milestone; it stays a Meta dashboard action.
+
+##### Meta-side prerequisites ReplyPilot cannot implement
+
+These are external requirements. They are **not** satisfied or verified by this
+repository, and no automated test covers them:
+
+- A Meta app with the WhatsApp Business Platform use case, and a **Facebook
+  Login for Business** configuration created with the WhatsApp Embedded Signup
+  variation. That configuration ID is `META_EMBEDDED_SIGNUP_CONFIG_ID`.
+- **Tech Provider** or **Solution Partner** status for the app, as required by
+  the current Embedded Signup documentation.
+- **App Review** advanced access for `whatsapp_business_management` and
+  `whatsapp_business_messaging` before production use.
+- Business verification, a billing method, and a payment method where the
+  account model requires them.
+- A public HTTPS callback URL, valid OAuth redirect URIs, and the app's allowed
+  domains, configured in the Meta App Dashboard.
+- The webhook callback URL and verify token configured as described under
+  [Inbound webhook configuration](#inbound-webhook-configuration).
+
+##### Manual acceptance checklist for Embedded Signup
+
+These steps require a real Meta business account and have not been executed
+against Meta by this repository:
+
+1. Configure the variables above, restart the API, and confirm **Settings →
+   WhatsApp connections** shows **Connect WhatsApp** (or a clear
+   "not configured" explanation when the variables are missing).
+2. Sign in as a workspace owner, click **Connect WhatsApp**, and complete
+   Meta's flow in the popup.
+3. Confirm the connection list shows the real business phone number, status
+   **Active**, and a verification timestamp.
+4. Sign in as a member of the same workspace and confirm the connect and
+   disconnect controls are not offered.
+5. Sign in as a second workspace and confirm the connection is not listed.
+6. Send an inbound WhatsApp message to the connected number and confirm it
+   appears in the inbox, which proves the webhook subscription works.
+7. Remove the Meta webhook subscription, click **Verify**, and confirm the
+   connection reports a pending state instead of claiming success.
+
 
 #### Inbound webhook configuration
 
-Add these server-only values to `.env` (or a secret store). Leave all four empty to disable inbound webhooks. If any is set, all four must be valid or API startup fails; errors name variables but never print values.
+Add these server-only values to `.env` (or a secret store). Leave every
+`WHATSAPP_*` value empty to disable inbound webhooks. When any is set, the
+webhook verification token and app secret must be valid or API startup fails;
+errors name variables but never print values. The legacy phone-number/workspace
+pair is optional and must be set together.
 
 | Variable | Purpose |
 | --- | --- |
 | `WHATSAPP_WEBHOOK_VERIFY_TOKEN` | A string you choose and also enter in Meta's webhook configuration. |
 | `WHATSAPP_APP_SECRET` | Meta App Dashboard → App settings → Basic → App secret. Used to verify webhook signatures. |
-| `WHATSAPP_TEST_PHONE_NUMBER_ID` | The numeric business phone-number ID from WhatsApp → API Setup. This is not the displayed phone number. |
-| `WHATSAPP_TEST_WORKSPACE_ID` | UUID of the one existing ReplyPilot workspace that receives these conversations. |
+| `WHATSAPP_TEST_PHONE_NUMBER_ID` | Optional legacy numeric business phone-number ID from WhatsApp → API Setup. This is not the displayed phone number. |
+| `WHATSAPP_TEST_WORKSPACE_ID` | Optional UUID of the legacy workspace that receives those conversations. Set it together with the phone-number ID. |
 
 The workspace must already exist. Sign in and use `GET /api/workspace` to find its UUID, or query it locally:
 
@@ -634,7 +856,7 @@ The Next.js `/api/*` rewrite can forward the public callback to the local Expres
 
 #### WhatsApp test integration limitations
 
-- Exactly one configured inbound test phone-number ID/workspace and one outbound sender/test workspace/recipient allowlist. There is no Embedded Signup, multi-number management, or workspace-selection UI.
+- Embedded Signup v4 onboarding is implemented and covered by mocked tests, but it has never been completed against Meta in this repository, and no real WhatsApp delivery has been verified. There is no multi-number management or workspace-selection UI.
 - No templates, automatic replies, or production-wide sending. Outbound Meta delivery is restricted test functionality and remains disabled in production.
 - No media download or transcription. Unsupported types are stored with their provider type and shown as unsupported.
 - No automatic lead creation or name-based matching. A conversation links only by exact saved WhatsApp number; otherwise it stays unassociated.
@@ -659,7 +881,7 @@ These checks verify the browser flow and the server boundary. Use fictional data
 - The legacy workspace is assigned only by the guarded local CLI. There is no public bootstrap endpoint, first-user claim, or production admin console.
 - Production requires HTTPS, `BETTER_AUTH_URL` with an HTTPS origin, a secret from a deployment secret store, explicit trusted origins, secure reverse-proxy/header handling, backups, and a security review. The API currently binds to `127.0.0.1` for local development.
 - Better Auth's default rate-limit storage and the Express process model need review before horizontal scaling. Use a shared, reviewed rate-limit store if multiple API instances are deployed. Rate limiting also needs a trustworthy client IP: deploy behind a trusted reverse proxy that supplies one validated `X-Forwarded-For` value, and configure Better Auth trusted proxies (or equivalent) for multi-hop deployments. Without a resolvable IP, Better Auth falls back to a shared per-path bucket.
-- Reply generation remains a deterministic mock. Meta outbound is restricted to the configured test workspace, sender, and recipient allowlist, and is unavailable in production. There is no live AI provider, approved-template sending, webhook media download, scheduling, or production-wide customer messaging. Approval can enqueue a mock record or (for the configured test workspace when enabled) a Meta test record; the worker performs delivery separately.
+- Reply draft generation uses `GeminiReplyDraftProvider` when `GEMINI_API_KEY` is configured and falls back to the deterministic `MockReplyDraftProvider` otherwise. Meta outbound is restricted to the configured test workspace, sender, and recipient allowlist, and is unavailable in production. There is no approved-template sending, webhook media download, scheduling, or production-wide customer messaging. Approval can enqueue a mock record or (for the configured test workspace when enabled) a Meta test record; the worker performs delivery separately.
 - There is no audit log for business-record changes, no account recovery support workflow, and no automated backup/restore verification. Do not treat passing tests as evidence that the application is production-ready.
 
 ## Learn More

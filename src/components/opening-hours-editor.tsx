@@ -12,7 +12,7 @@ import {
 } from "@/lib/opening-hours";
 
 const timeInputClass =
-  "mt-1 block w-full min-w-0 rounded-xl border border-line bg-surface px-3 py-2.5 text-sm text-ink outline-none disabled:bg-hushed";
+  "mt-1 block min-h-11 w-full min-w-0 rounded-xl border border-line-strong bg-surface px-3 py-2.5 text-sm text-ink outline-none focus:border-accent disabled:border-line disabled:bg-hushed";
 
 type OpeningHoursEditorProps = {
   schedule: WeeklySchedule;
@@ -162,7 +162,7 @@ export function OpeningHoursEditor({
                             : undefined
                         }
                         className={`${timeInputClass} ${
-                          dayErrors?.opensAt ? "border-[color-mix(in_oklab,var(--rp-danger)_25%,transparent)] bg-danger-soft" : ""
+                          dayErrors?.opensAt ? "border-danger bg-danger-soft/25" : ""
                         }`}
                       />
                       {dayErrors?.opensAt ? (
@@ -203,7 +203,7 @@ export function OpeningHoursEditor({
                             : undefined
                         }
                         className={`${timeInputClass} ${
-                          dayErrors?.closesAt ? "border-[color-mix(in_oklab,var(--rp-danger)_25%,transparent)] bg-danger-soft" : ""
+                          dayErrors?.closesAt ? "border-danger bg-danger-soft/25" : ""
                         }`}
                       />
                       {dayErrors?.closesAt ? (

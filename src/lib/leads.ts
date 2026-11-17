@@ -1,9 +1,11 @@
 import { z } from "zod";
+import { BRAND } from "./brand";
 import {
   APPROVAL_SEND_POLICIES,
   outboundMessageSchema,
   type OutboundMessage,
 } from "./messaging";
+import type { ReplyDraftProviderKind } from "./workspace";
 
 export const LEAD_STATUSES = [
   "New",
@@ -29,6 +31,89 @@ const leadSchema = z.object({
 
 const leadsResponseSchema = z.object({ leads: z.array(leadSchema) });
 const leadResponseSchema = z.object({ lead: leadSchema });
+
+/**
+ * Stable machine-readable code for a confirmed duplicate lead number.
+ *
+ * A duplicate is confirmed when another lead in the workspace holds exactly
+ * the same subscriber number.
+ */
+export const WHATSAPP_LEAD_DUPLICATE_NUMBER_CODE =
+  "WHATSAPP_LEAD_DUPLICATE_NUMBER";
+
+/**
+ * Stable machine-readable code for a possible duplicate that could not be
+ * resolved.
+ *
+ * Another lead stores the number in a national format whose country is not
+ * recorded, so the API cannot confirm whether it is the same customer.
+ */
+export const WHATSAPP_LEAD_NUMBER_UNRESOLVED_CODE =
+  "WHATSAPP_LEAD_NUMBER_UNRESOLVED";
+
+export const leadValidationDetailSchema = z.object({
+  field: z.string(),
+  message: z.string(),
+});
+
+export type LeadValidationDetail = z.infer<typeof leadValidationDetailSchema>;
+
+/** The error payload the API returns when a lead cannot be created. */
+export const leadCreationErrorSchema = z.object({
+  error: z.string(),
+  code: z.string().optional(),
+  conflictingLeadId: z.uuid().optional(),
+  details: z.array(leadValidationDetailSchema).optional(),
+});
+
+export type LeadCreationErrorPayload = z.infer<typeof leadCreationErrorSchema>;
+
+/**
+ * An error returned by the lead API.
+ *
+ * The stable code travels with the error so the UI can react to the specific
+ * situation instead of showing one generic message.
+ */
+export class LeadApiError extends Error {
+  readonly code: string | undefined;
+
+  readonly conflictingLeadId: string | undefined;
+
+  readonly details: readonly LeadValidationDetail[] | undefined;
+
+  constructor(
+    message: string,
+    options: Readonly<{
+      code?: string;
+      conflictingLeadId?: string;
+      details?: readonly LeadValidationDetail[];
+    }> = {},
+  ) {
+    super(message);
+    this.name = "LeadApiError";
+    this.code = options.code;
+    this.conflictingLeadId = options.conflictingLeadId;
+    this.details = options.details;
+  }
+}
+
+/**
+ * Reads a lead creation error body.
+ *
+ * Returns null for a body that is not an error payload, so a caller can fall
+ * back to its own message.
+ */
+export function parseLeadCreationError(
+  data: unknown,
+): LeadCreationErrorPayload | null {
+  const parsed = leadCreationErrorSchema.safeParse(data);
+
+  if (!parsed.success) {
+    return null;
+  }
+
+  return parsed.data;
+}
 export const REPLY_DRAFT_INTENTS = [
   "availability",
   "pricing",
@@ -49,29 +134,46 @@ const replyDraftSourceSchema = z.object({
   currencyCode: z.string().nullable(),
 });
 
-const replyDraftSchema = z.object({
+const replyDraftBaseSchema = z.object({
   intent: z.enum(REPLY_DRAFT_INTENTS),
   summary: z.string(),
   missingInformation: z.array(z.string()),
   draftReply: z.string(),
-  provider: z.literal("mock"),
-  isDemo: z.literal(true),
+  provider: z.enum(["mock", "gemini"]),
+  isDemo: z.boolean(),
+});
+
+function hasValidProviderDemoFlag(draft: {
+  provider: "mock" | "gemini";
+  isDemo: boolean;
+}): boolean {
+  return draft.provider === "mock"
+    ? draft.isDemo === true
+    : draft.isDemo === false;
+}
+
+const replyDraftSchema = replyDraftBaseSchema.refine(hasValidProviderDemoFlag, {
+  message: "Provider and demo flag do not match.",
 });
 
 const approvalSendPolicySchema = z.enum(APPROVAL_SEND_POLICIES);
 
-const savedReplyDraftSchema = replyDraftSchema.extend({
-  id: z.uuid(),
-  leadId: z.uuid(),
-  status: z.enum(REPLY_DRAFT_REVIEW_STATUSES),
-  sources: z.array(replyDraftSourceSchema),
-  approvedAt: z.iso.datetime({ offset: true }).nullable(),
-  approvedBy: z.uuid().nullable(),
-  sendPolicyOverride: approvalSendPolicySchema.nullable(),
-  approvalSendPolicy: approvalSendPolicySchema.nullable(),
-  createdAt: z.iso.datetime({ offset: true }),
-  updatedAt: z.iso.datetime({ offset: true }),
-});
+const savedReplyDraftSchema = replyDraftBaseSchema
+  .extend({
+    id: z.uuid(),
+    leadId: z.uuid(),
+    status: z.enum(REPLY_DRAFT_REVIEW_STATUSES),
+    sources: z.array(replyDraftSourceSchema),
+    approvedAt: z.iso.datetime({ offset: true }).nullable(),
+    approvedBy: z.uuid().nullable(),
+    sendPolicyOverride: approvalSendPolicySchema.nullable(),
+    approvalSendPolicy: approvalSendPolicySchema.nullable(),
+    createdAt: z.iso.datetime({ offset: true }),
+    updatedAt: z.iso.datetime({ offset: true }),
+  })
+  .refine(hasValidProviderDemoFlag, {
+    message: "Provider and demo flag do not match.",
+  });
 
 const replyDraftResponseSchema = z.object({ draft: savedReplyDraftSchema });
 const replyDraftsResponseSchema = z.object({
@@ -215,5 +317,63 @@ export function followUpOverdueDays(lead: Lead, now = Date.now()): number {
   }
 
   return Math.max(0, Math.floor((now - followUpAt) / 86_400_000));
+}
+
+export type DraftReplyBanner = Readonly<{
+  tone: "neutral" | "warning";
+  text: string;
+}>;
+
+/**
+ * Resolves the provenance/status banner shown at the top of `DraftReplyDialog`.
+ * Keeps workspace-level provider configuration (`replyDraftProvider`) separate
+ * from persisted draft provenance (`selectedDraft`), returns `null` during
+ * loading/error/empty states, and avoids claiming live AI is disabled unless
+ * the workspace is confirmed to use `"mock"`.
+ */
+export function resolveDraftReplyBanner({
+  isLoading,
+  error,
+  selectedDraft,
+  replyDraftProvider,
+  brandName = BRAND.name,
+}: Readonly<{
+  isLoading: boolean;
+  error: string | null;
+  selectedDraft: Pick<SavedReplyDraft, "provider" | "isDemo"> | null;
+  replyDraftProvider?: ReplyDraftProviderKind | null;
+  brandName?: string;
+}>): DraftReplyBanner | null {
+  if (isLoading || error !== null || selectedDraft === null) {
+    return null;
+  }
+
+  if (selectedDraft.provider === "gemini" && !selectedDraft.isDemo) {
+    return {
+      tone: "neutral",
+      text: "AI-suggested reply grounded in your saved business profile and catalogue. Review and edit before approving; nothing is sent without your approval.",
+    };
+  }
+
+  const workspaceProvider: ReplyDraftProviderKind | null =
+    replyDraftProvider ?? null;
+
+  switch (workspaceProvider) {
+    case "gemini":
+      return {
+        tone: "warning",
+        text: `This saved draft was generated earlier by ${brandName}'s demonstration mock provider. Click Regenerate draft to generate a live Gemini AI draft; nothing sends automatically without your explicit action.`,
+      };
+    case "mock":
+      return {
+        tone: "warning",
+        text: `Demonstration output from ${brandName}'s mock provider (no live AI model is enabled). Approval records your review; nothing sends automatically without your explicit action.`,
+      };
+    case null:
+      return {
+        tone: "warning",
+        text: `This saved draft is demonstration output from ${brandName}'s mock provider. Approval records your review; nothing sends automatically without your explicit action.`,
+      };
+  }
 }
 

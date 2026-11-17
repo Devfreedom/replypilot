@@ -100,6 +100,7 @@ export async function resetTestData(pool: Pool): Promise<void> {
         outbound_messages,
         whatsapp_messages,
         whatsapp_conversations,
+        whatsapp_onboarding_sessions,
         whatsapp_connections,
         customers,
         reply_drafts,

@@ -318,7 +318,7 @@ export async function updateCatalogueEntry(
           description = $4,
           price_minor = $5,
           currency_code = $6,
-          is_active = $7,
+          is_active = COALESCE($7, is_active),
           availability_notes = $8,
           updated_at = now()
       WHERE workspace_id = $1 AND id = $2
@@ -331,7 +331,7 @@ export async function updateCatalogueEntry(
       input.description,
       input.priceMinor ?? null,
       input.currencyCode,
-      input.isActive ?? true,
+      input.isActive ?? null,
       input.availabilityNotes ?? null,
     ],
   );
@@ -426,7 +426,7 @@ export async function updateKnowledgeEntry(
       SET title = $3,
           answer = $4,
           entry_type = $5,
-          is_active = $6,
+          is_active = COALESCE($6, is_active),
           updated_at = now()
       WHERE workspace_id = $1 AND id = $2
       RETURNING ${KNOWLEDGE_COLUMNS}
@@ -437,7 +437,7 @@ export async function updateKnowledgeEntry(
       input.title,
       input.answer,
       input.entryType,
-      input.isActive ?? true,
+      input.isActive ?? null,
     ],
   );
 

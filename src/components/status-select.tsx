@@ -25,7 +25,7 @@ export function StatusSelect({
         onChange={(event) =>
           onStatusChange(lead.id, event.target.value as LeadStatus)
         }
-        className={`badge cursor-pointer pr-7 ring-1 ring-inset outline-none disabled:cursor-not-allowed disabled:opacity-60 ${statusStyles[lead.status]}`}
+        className={`badge min-h-9 cursor-pointer px-3 pr-7 ring-1 ring-inset ring-current/25 outline-none disabled:cursor-not-allowed disabled:opacity-60 ${statusStyles[lead.status]}`}
       >
         {LEAD_STATUSES.map((status) => (
           <option key={status} value={status}>

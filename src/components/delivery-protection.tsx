@@ -1,6 +1,14 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { type FormEvent, useEffect, useMemo, useState } from "react";
+import {
+  hasFieldErrors,
+  mapSuppressionServerErrors,
+  validateSuppressionField,
+  validateSuppressionFields,
+  type SuppressionField,
+  type SuppressionFieldErrors,
+} from "@/lib/business-validation";
 import {
   DELIVERY_EVENT_OUTCOMES,
   SUPPRESSION_REASONS,
@@ -28,7 +36,14 @@ import {
   type WhatsAppConversation,
 } from "@/lib/whatsapp";
 import { useAuth } from "./auth-provider";
-import { Alert, CardSection, PageHeading, SectionState, Spinner } from "./ui";
+import {
+  Alert,
+  CardSection,
+  FormField,
+  PageHeading,
+  SectionState,
+  Spinner,
+} from "./ui";
 
 const PAGE_SIZE = 20;
 const WORKER_POLL_MS = 5_000;
@@ -60,6 +75,24 @@ function formatDate(value: string | null): string {
     dateStyle: "medium",
     timeStyle: "short",
   }).format(new Date(value));
+}
+
+function summarizeWorkerTick(lastTick: Record<string, unknown>): string {
+  const entries = Object.entries(lastTick).filter(
+    ([, value]) =>
+      typeof value === "number" ||
+      typeof value === "string" ||
+      typeof value === "boolean",
+  );
+
+  if (entries.length === 0) {
+    return "Heartbeat recorded.";
+  }
+
+  return entries
+    .slice(0, 4)
+    .map(([key, value]) => `${key}: ${String(value)}`)
+    .join(" · ");
 }
 
 function outcomeBadgeClass(outcome: DeliveryEventOutcome): string {
@@ -108,6 +141,8 @@ export function DeliveryProtection() {
   const [suppressReason, setSuppressReason] =
     useState<SuppressionReason>("opt_out");
   const [suppressNotes, setSuppressNotes] = useState("");
+  const [suppressionFieldErrors, setSuppressionFieldErrors] =
+    useState<SuppressionFieldErrors>({});
   const [suppressing, setSuppressing] = useState(false);
   const [reloadToken, setReloadToken] = useState(0);
 
@@ -342,12 +377,46 @@ export function DeliveryProtection() {
     return [...byCustomer.values()];
   }, [conversations, suppressions]);
 
-  async function suppressCustomer() {
-    if (!selectedCustomerId) return;
+  function blurSuppressionField(
+    field: SuppressionField,
+    override?: Partial<Record<SuppressionField, string>>,
+  ) {
+    const message = validateSuppressionField(field, {
+      customerId: override?.customerId ?? selectedCustomerId,
+      reason: override?.reason ?? suppressReason,
+      notes: override?.notes ?? suppressNotes,
+    });
 
-    setSuppressing(true);
+    setSuppressionFieldErrors((current) => ({
+      ...current,
+      [field]: message,
+    }));
+  }
+
+  async function suppressCustomer(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const formElement = event.currentTarget;
     setError(null);
     setNotice(null);
+
+    const validationErrors = validateSuppressionFields({
+      customerId: selectedCustomerId,
+      reason: suppressReason,
+      notes: suppressNotes,
+    });
+
+    setSuppressionFieldErrors(validationErrors);
+
+    if (hasFieldErrors(validationErrors)) {
+      requestAnimationFrame(() => {
+        formElement
+          .querySelector<HTMLElement>('[aria-invalid="true"]')
+          ?.focus();
+      });
+      return;
+    }
+
+    setSuppressing(true);
 
     try {
       const response = await fetch(
@@ -364,9 +433,21 @@ export function DeliveryProtection() {
       const data = await readJson(response);
 
       if (!response.ok) {
-        throw new Error(
-          apiError(data, "Unable to suppress this customer."),
+        const mapped = mapSuppressionServerErrors(
+          data,
+          "Unable to suppress this customer.",
         );
+        setSuppressionFieldErrors(mapped.fieldErrors);
+
+        if (hasFieldErrors(mapped.fieldErrors)) {
+          requestAnimationFrame(() => {
+            formElement
+              .querySelector<HTMLElement>('[aria-invalid="true"]')
+              ?.focus();
+          });
+        }
+
+        throw new Error(mapped.formError ?? "Unable to suppress this customer.");
       }
 
       const parsed = parseSuppressionResponse(data);
@@ -379,6 +460,7 @@ export function DeliveryProtection() {
 
       setSelectedCustomerId("");
       setSuppressNotes("");
+      setSuppressionFieldErrors({});
       setNotice(
         "Customer suppressed. Queued outbound messages will be cancelled and no new sends are permitted.",
       );
@@ -444,13 +526,19 @@ export function DeliveryProtection() {
       </PageHeading>
 
       <div className="mt-4 space-y-3">
-        <Alert tone="info">
-          <span className="font-semibold">Test environment.</span>{" "}
-          The mock provider never contacts WhatsApp. Delivery events shown here
-          come from signed local webhook fixtures. Meta sending is restricted to
-          the configured test workspace, sender, and recipient allowlist, and is
-          rejected in production.
-        </Alert>
+        {protection?.providerForWorkspace === "whatsapp" ? (
+          <Alert tone="info">
+            <span className="font-semibold">WhatsApp delivery active.</span>{" "}
+            Outbound messages follow the 24-hour customer service window and
+            skip customers marked as suppressed or opted out.
+          </Alert>
+        ) : (
+          <Alert tone="info">
+            <span className="font-semibold">Test preview mode.</span> The mock
+            provider keeps replies inside this workspace and never delivers them
+            to customer handsets.
+          </Alert>
+        )}
 
         {error ? (
           <Alert tone="danger">
@@ -491,8 +579,8 @@ export function DeliveryProtection() {
                   </dt>
                   <dd className="mt-0.5 font-semibold text-ink">
                     {protection.providerForWorkspace === "whatsapp"
-                      ? "Meta WhatsApp Cloud API"
-                      : "Mock provider (no real delivery)"}
+                      ? "WhatsApp Cloud API"
+                      : "Mock provider (test preview only)"}
                   </dd>
                 </div>
                 <div>
@@ -590,13 +678,13 @@ export function DeliveryProtection() {
                       <p className="text-[11px] font-medium text-ink-soft">
                         {OUTBOUND_STATUS_LABELS[status]}
                       </p>
-                      <p className="text-lg font-bold text-ink">
+                      <p className="numeric-tabular text-lg font-bold text-ink">
                         {workerStatus.queue.counts[status] ?? 0}
                       </p>
                     </div>
                   ))}
                 </div>
-                <p className="mt-3 text-xs text-ink-soft">
+                <p className="numeric-tabular mt-3 text-xs text-ink-soft">
                   Oldest queued record:{" "}
                   {formatDate(workerStatus.queue.oldestQueuedAt)}
                 </p>
@@ -625,18 +713,25 @@ export function DeliveryProtection() {
                           >
                             {worker.stale ? "Stale" : "Live"}
                           </span>
-                          <span className="text-ink-faint">
+                          <span className="text-ink-soft">
                             {worker.workerId}
                           </span>
                         </div>
-                        <p className="mt-1 text-ink-soft">
+                        <p className="numeric-tabular mt-1 text-ink-soft">
                           Last seen {formatDate(worker.lastSeenAt)} · started{" "}
                           {formatDate(worker.workerStartedAt)}
                         </p>
-                        <p className="mt-1 break-words text-ink-faint">
-                          Last tick:{" "}
-                          {JSON.stringify(worker.lastTick)}
+                        <p className="numeric-tabular mt-1 text-ink-soft">
+                          {summarizeWorkerTick(worker.lastTick)}
                         </p>
+                        <details className="mt-1.5">
+                          <summary className="cursor-pointer font-medium text-ink-soft hover:text-ink">
+                            Technical details
+                          </summary>
+                          <pre className="mt-1.5 overflow-x-auto rounded-lg bg-hushed p-2 font-mono text-[11px] text-ink-soft">
+                            {JSON.stringify(worker.lastTick, null, 2)}
+                          </pre>
+                        </details>
                       </li>
                     ))
                   )}
@@ -655,68 +750,103 @@ export function DeliveryProtection() {
                 Only the workspace owner can suppress or restore customers.
               </Alert>
             ) : (
-              <div className="grid gap-3 border-b border-line pb-4 sm:grid-cols-[minmax(0,1fr)_minmax(0,12rem)_minmax(0,1fr)_auto] sm:items-end">
-                <label className="field-label">
-                  Customer
-                  <select
-                    value={selectedCustomerId}
-                    onChange={(event) =>
-                      setSelectedCustomerId(event.target.value)
-                    }
-                    className="input mt-1"
-                    disabled={suppressing || candidates.length === 0}
-                  >
-                    <option value="">
-                      {candidates.length === 0
-                        ? "No unsuppressed customers with conversations"
-                        : "Choose a customer"}
-                    </option>
-                    {candidates.map((candidate) => (
-                      <option key={candidate.id} value={candidate.id}>
-                        {candidate.label}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <label className="field-label">
-                  Reason
-                  <select
-                    value={suppressReason}
-                    onChange={(event) =>
-                      setSuppressReason(event.target.value as SuppressionReason)
-                    }
-                    className="input mt-1"
-                    disabled={suppressing}
-                  >
-                    {SUPPRESSION_REASONS.map((reason) => (
-                      <option key={reason} value={reason}>
-                        {SUPPRESSION_REASON_LABELS[reason]}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <label className="field-label">
-                  Notes (optional)
-                  <input
-                    value={suppressNotes}
-                    onChange={(event) => setSuppressNotes(event.target.value)}
-                    maxLength={500}
-                    className="input mt-1"
-                    placeholder="Fictional demo note"
-                    disabled={suppressing}
-                  />
-                </label>
-                <button
-                  type="button"
-                  onClick={() => void suppressCustomer()}
-                  disabled={
-                    suppressing || selectedCustomerId.length === 0
-                  }
-                  className="btn btn-secondary"
+              <form
+                noValidate
+                onSubmit={(event) => void suppressCustomer(event)}
+                className="grid gap-3 border-b border-line pb-4 sm:grid-cols-[minmax(0,1fr)_minmax(0,12rem)_minmax(0,1fr)_auto] sm:items-start"
+              >
+                <FormField
+                  id="suppress-customer"
+                  label="Customer"
+                  error={suppressionFieldErrors.customerId}
                 >
-                  {suppressing ? "Suppressing…" : "Suppress customer"}
-                </button>
-              </div>
+                  {(fieldProps) => (
+                    <select
+                      {...fieldProps}
+                      value={selectedCustomerId}
+                      onChange={(event) =>
+                        setSelectedCustomerId(event.target.value)
+                      }
+                      onBlur={(event) =>
+                        blurSuppressionField("customerId", {
+                          customerId: event.target.value,
+                        })
+                      }
+                      className="select"
+                      disabled={suppressing || candidates.length === 0}
+                    >
+                      <option value="">
+                        {candidates.length === 0
+                          ? "No unsuppressed customers with conversations"
+                          : "Choose a customer"}
+                      </option>
+                      {candidates.map((candidate) => (
+                        <option key={candidate.id} value={candidate.id}>
+                          {candidate.label}
+                        </option>
+                      ))}
+                    </select>
+                  )}
+                </FormField>
+                <FormField
+                  id="suppress-reason"
+                  label="Reason"
+                  error={suppressionFieldErrors.reason}
+                >
+                  {(fieldProps) => (
+                    <select
+                      {...fieldProps}
+                      value={suppressReason}
+                      onChange={(event) =>
+                        setSuppressReason(event.target.value as SuppressionReason)
+                      }
+                      onBlur={(event) =>
+                        blurSuppressionField("reason", {
+                          reason: event.target.value,
+                        })
+                      }
+                      className="select"
+                      disabled={suppressing}
+                    >
+                      {SUPPRESSION_REASONS.map((reason) => (
+                        <option key={reason} value={reason}>
+                          {SUPPRESSION_REASON_LABELS[reason]}
+                        </option>
+                      ))}
+                    </select>
+                  )}
+                </FormField>
+                <FormField
+                  id="suppress-notes"
+                  label="Notes (optional)"
+                  error={suppressionFieldErrors.notes}
+                >
+                  {(fieldProps) => (
+                    <input
+                      {...fieldProps}
+                      value={suppressNotes}
+                      onChange={(event) => setSuppressNotes(event.target.value)}
+                      onBlur={(event) =>
+                        blurSuppressionField("notes", {
+                          notes: event.target.value,
+                        })
+                      }
+                      className="input"
+                      placeholder="Reason or customer request note"
+                      disabled={suppressing}
+                    />
+                  )}
+                </FormField>
+                <div className="sm:pt-6">
+                  <button
+                    type="submit"
+                    disabled={suppressing || candidates.length === 0}
+                    className="btn btn-secondary w-full sm:w-auto"
+                  >
+                    {suppressing ? "Suppressing…" : "Suppress customer"}
+                  </button>
+                </div>
+              </form>
             )}
 
             {suppressions.length === 0 ? (
@@ -753,7 +883,7 @@ export function DeliveryProtection() {
                             {item.suppression.notes}
                           </p>
                         ) : null}
-                        <p className="mt-1 text-[11px] text-ink-faint">
+                        <p className="numeric-tabular mt-1 text-[11px] text-ink-soft">
                           Suppressed {formatDate(item.suppression.suppressedAt)}
                         </p>
                       </div>
@@ -855,14 +985,14 @@ export function DeliveryProtection() {
                       ) : null}
                     </div>
                     <p className="mt-1 break-all text-xs text-ink-soft">
-                      wamid: {event.providerMessageId}
+                      Message reference: {event.providerMessageId}
                     </p>
                     {event.outboundContent ? (
                       <p className="mt-1 line-clamp-2 text-xs text-ink">
                         {event.outboundContent}
                       </p>
                     ) : null}
-                    <dl className="mt-2 grid gap-2 text-[11px] text-ink-faint sm:grid-cols-3">
+                    <dl className="numeric-tabular mt-2 grid gap-2 text-[11px] text-ink-soft sm:grid-cols-3">
                       <div>
                         <dt className="font-medium">Provider time</dt>
                         <dd>{formatDate(event.providerTimestamp)}</dd>

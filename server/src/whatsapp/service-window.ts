@@ -39,7 +39,18 @@ export async function checkServiceWindow(
   workspaceId: string,
   customerId: string,
   now: Date = new Date(),
+  connectionId?: string | null,
 ): Promise<ServiceWindowResult> {
+  const params: unknown[] = [workspaceId, customerId, now];
+  const connectionClause =
+    typeof connectionId === "string" && connectionId.length > 0
+      ? "AND conversation.whatsapp_connection_id = $4"
+      : "";
+
+  if (connectionClause) {
+    params.push(connectionId);
+  }
+
   const result = await pool.query<{ provider_timestamp: Date }>(
     `
       SELECT message.provider_timestamp
@@ -51,10 +62,15 @@ export async function checkServiceWindow(
         AND conversation.customer_id = $2
         AND message.direction = 'inbound'
         AND message.provider_timestamp IS NOT NULL
-      ORDER BY message.provider_timestamp DESC, message.created_at DESC, message.id DESC
+        ${connectionClause}
+      ORDER BY
+        (message.provider_timestamp <= $3) DESC,
+        message.provider_timestamp DESC,
+        message.created_at DESC,
+        message.id DESC
       LIMIT 1
     `,
-    [workspaceId, customerId],
+    params,
   );
 
   const row = result.rows[0];

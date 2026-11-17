@@ -16,6 +16,7 @@ import {
   preferredConversationIdForDraft,
   retryBlockDescription,
   sendPolicyChoiceForDraftSelection,
+  shouldClearOutboundOnDraftUpdate,
 } from "./messaging.js";
 
 const outboundMessage = {
@@ -208,5 +209,29 @@ test("approval policy labels cover every supported choice", () => {
   assert.equal(
     APPROVAL_SEND_POLICY_LABELS.approve_and_send,
     "Approve and queue for sending",
+  );
+});
+
+test("shouldClearOutboundOnDraftUpdate clears outbound state on draft switch or reset to draft status", () => {
+  assert.equal(
+    shouldClearOutboundOnDraftUpdate("draft-1", {
+      id: "draft-2",
+      status: "approved",
+    }),
+    true,
+  );
+  assert.equal(
+    shouldClearOutboundOnDraftUpdate("draft-1", {
+      id: "draft-1",
+      status: "draft",
+    }),
+    true,
+  );
+  assert.equal(
+    shouldClearOutboundOnDraftUpdate("draft-1", {
+      id: "draft-1",
+      status: "approved",
+    }),
+    false,
   );
 });

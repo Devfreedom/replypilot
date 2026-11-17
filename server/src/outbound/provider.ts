@@ -24,6 +24,17 @@ export type OutboundProviderSendResult = Readonly<{
   status: "sent";
 }>;
 
+/**
+ * Name of the provider that simulates delivery without contacting Meta.
+ *
+ * The name is the routing key persisted on `outbound_messages.provider` and
+ * used to claim rows, so it is the single place that identifies a simulated
+ * delivery. A simulated provider cannot observe the WhatsApp connection, so a
+ * simulated success must never be recorded once the connection stopped being
+ * usable.
+ */
+export const MOCK_OUTBOUND_PROVIDER_NAME = "mock";
+
 export interface OutboundMessageProvider {
   readonly name: string;
   readonly idempotency: "guaranteed" | "unsupported";
@@ -88,7 +99,7 @@ function positiveCountEntries(
 }
 
 export class MockOutboundMessageProvider implements OutboundMessageProvider {
-  readonly name = "mock";
+  readonly name = MOCK_OUTBOUND_PROVIDER_NAME;
   readonly idempotency = "guaranteed" as const;
   private readonly failures = new Map<string, number>();
   private readonly ambiguous = new Map<string, number>();

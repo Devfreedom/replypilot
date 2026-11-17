@@ -36,14 +36,26 @@ export const replyDraftSourceSchema = z
 
 export type ReplyDraftSource = z.infer<typeof replyDraftSourceSchema>;
 
-const MAX_SOURCES = 50;
+export const MAX_SOURCES = 50;
+const MAX_SOURCE_REASON_LENGTH = 300;
+const MAX_VISIBLE_TERM_LENGTH = 40;
 
 export const replyDraftSourcesSchema = z
   .array(replyDraftSourceSchema)
   .max(MAX_SOURCES);
 
+function formatVisibleTerm(term: string): string {
+  if (term.length <= MAX_VISIBLE_TERM_LENGTH) {
+    return `"${term}"`;
+  }
+
+  return `"${term.slice(0, MAX_VISIBLE_TERM_LENGTH - 3)}..."`;
+}
+
 function sourceReason(lead: Lead, searchableText: string): string {
-  const enquiryTerms = searchTerms(`${lead.service} ${lead.lastMessage}`);
+  const enquiryTerms = searchTerms(
+    `${lead.service ?? ""} ${lead.lastMessage ?? ""}`,
+  );
   const sharedTerms = [...searchTerms(searchableText)]
     .filter((term) => enquiryTerms.has(term))
     .sort();
@@ -52,7 +64,7 @@ function sourceReason(lead: Lead, searchableText: string): string {
     return "Selected by the current keyword rule. Keyword matching is not semantic retrieval; verify that this fact is relevant.";
   }
 
-  const visibleTerms = sharedTerms.slice(0, 3).map((term) => `"${term}"`);
+  const visibleTerms = sharedTerms.slice(0, 3).map(formatVisibleTerm);
   const termList =
     visibleTerms.length === 1
       ? visibleTerms[0]
@@ -60,14 +72,19 @@ function sourceReason(lead: Lead, searchableText: string): string {
           visibleTerms[visibleTerms.length - 1]
         }`;
 
-  return `Keyword match on ${termList}. Keyword matching only, not semantic retrieval; verify that this fact is relevant.`;
+  const reason = `Keyword match on ${termList}. Keyword matching only, not semantic retrieval; verify that this fact is relevant.`;
+
+  return reason.length <= MAX_SOURCE_REASON_LENGTH
+    ? reason
+    : `${reason.slice(0, MAX_SOURCE_REASON_LENGTH - 3)}...`;
 }
 
 function catalogueContent(entry: CatalogueEntry): string {
   const details: string[] = [];
+  const description = (entry.description ?? "").trim();
 
-  if (entry.description.trim()) {
-    details.push(entry.description.trim());
+  if (description) {
+    details.push(description);
   }
 
   if (entry.priceMinor === null) {
@@ -78,8 +95,10 @@ function catalogueContent(entry: CatalogueEntry): string {
     );
   }
 
-  if (entry.availabilityNotes?.trim()) {
-    details.push(`Availability: ${entry.availabilityNotes.trim()}`);
+  const availabilityNotes = (entry.availabilityNotes ?? "").trim();
+
+  if (availabilityNotes) {
+    details.push(`Availability: ${availabilityNotes}`);
   }
 
   return details.join("\n");
@@ -89,12 +108,15 @@ export function buildCatalogueReplySource(
   entry: CatalogueEntry,
   lead: Lead,
 ): ReplyDraftSource {
+  const name = entry.name ?? "";
+  const description = entry.description ?? "";
+
   return {
     id: entry.id,
     type: "catalogue",
-    title: entry.name,
+    title: name,
     content: catalogueContent(entry),
-    reason: sourceReason(lead, `${entry.name} ${entry.description}`),
+    reason: sourceReason(lead, `${name} ${description}`),
     priceMinor: entry.priceMinor,
     currencyCode: entry.currencyCode,
   };
@@ -104,12 +126,15 @@ export function buildKnowledgeReplySource(
   entry: KnowledgeEntry,
   lead: Lead,
 ): ReplyDraftSource {
+  const title = entry.title ?? "";
+  const answer = (entry.answer ?? "").trim();
+
   return {
     id: entry.id,
     type: entry.entryType,
-    title: entry.title,
-    content: entry.answer.trim(),
-    reason: sourceReason(lead, `${entry.title} ${entry.answer}`),
+    title,
+    content: answer,
+    reason: sourceReason(lead, `${title} ${answer}`),
     priceMinor: null,
     currencyCode: null,
   };

@@ -43,7 +43,10 @@ export function mapReplyDraftRow(row: ReplyDraftRow): SavedReplyDraft {
     throw new Error("Stored reply draft contains invalid snapshot data.");
   }
 
-  if (row.provider !== "mock" || !row.is_demo) {
+  const isSupportedMock = row.provider === "mock" && row.is_demo === true;
+  const isSupportedGemini = row.provider === "gemini" && row.is_demo === false;
+
+  if (!isSupportedMock && !isSupportedGemini) {
     throw new Error("Stored reply draft has unsupported provider metadata.");
   }
 
@@ -54,8 +57,8 @@ export function mapReplyDraftRow(row: ReplyDraftRow): SavedReplyDraft {
     summary: row.summary,
     missingInformation: missingInformation.data,
     draftReply: row.draft_reply,
-    provider: "mock",
-    isDemo: true,
+    provider: row.provider,
+    isDemo: row.is_demo,
     status: row.status,
     sources: sources.data,
     approvedAt: row.approved_at ? row.approved_at.toISOString() : null,
@@ -275,19 +278,18 @@ async function mutateReplyDraft(
       return { kind: "not-found" };
     }
 
-    const sendingLock = await client.query(
+    const outboundLock = await client.query<{ id: string; status: string }>(
       `
-        SELECT id
+        SELECT id, status
         FROM outbound_messages
         WHERE workspace_id = $1
           AND reply_draft_id = $2
-          AND status = 'sending'
         FOR UPDATE
       `,
       [workspaceId, draftId],
     );
 
-    if (sendingLock.rows.length > 0) {
+    if (outboundLock.rows.some((row) => row.status === "sending")) {
       await client.query("ROLLBACK");
       return { kind: "send-in-progress" };
     }

@@ -1,4 +1,5 @@
 import type { Pool, PoolClient } from "pg";
+import { describeLeadNumber } from "../leads/phone.js";
 import type { OutboundMessageStatus } from "../messaging/types.js";
 import { encodeMessageCursor, type MessageCursor } from "./cursor.js";
 import { normalizeWhatsAppPhoneE164 } from "./phone.js";
@@ -215,21 +216,83 @@ export class WhatsAppWorkspaceNotFoundError extends Error {
 }
 
 /**
- * Resolves the provider phone-number ID to a connection row for this
- * workspace, creating it on first use. The unique key makes concurrent webhook
- * deliveries converge on one connection.
+ * Raised when a Meta phone-number ID is already owned by another workspace.
+ * The event is acknowledged and ignored instead of being stored, because a
+ * number may resolve to only one workspace.
+ */
+export class WhatsAppPhoneNumberOwnedByAnotherWorkspaceError extends Error {
+  constructor(
+    message = "This WhatsApp phone number is connected to another workspace.",
+  ) {
+    super(message);
+    this.name = "WhatsAppPhoneNumberOwnedByAnotherWorkspaceError";
+  }
+}
+
+/**
+ * Resolves the provider phone-number ID to an active connection row for this
+ * workspace, creating it on first use only when no connection row already
+ * exists for the phone-number ID.
+ *
+ * If the workspace already has a non-active connection row (for example
+ * disconnected, pending, or error), or if any workspace already holds a row for
+ * this phone-number ID, fail closed rather than silently reactivating or
+ * claiming the number.
  */
 async function ensureWhatsAppConnection(
   client: PoolClient,
   workspaceId: string,
   phoneNumberId: string,
 ): Promise<string> {
+  // Check ownership and lifecycle status atomically in one statement so a
+  // concurrent bootstrap commit between two reads never looks like foreign
+  // ownership or allows legacy provisioning of a non-active connection.
+  const existingConnection = await client.query<{
+    id: string;
+    workspace_id: string;
+    status: string;
+  }>(
+    `
+      SELECT id, workspace_id, status
+      FROM whatsapp_connections
+      WHERE phone_number_id = $1
+      ORDER BY
+        CASE status
+          WHEN 'active' THEN 0
+          WHEN 'pending' THEN 1
+          WHEN 'error' THEN 2
+          ELSE 3
+        END ASC,
+        created_at DESC,
+        id DESC
+      LIMIT 1
+    `,
+    [phoneNumberId],
+  );
+
+  const existingOwner = existingConnection.rows[0];
+
+  if (existingOwner) {
+    if (
+      existingOwner.workspace_id === workspaceId &&
+      existingOwner.status === "active"
+    ) {
+      return existingOwner.id;
+    }
+
+    throw new WhatsAppPhoneNumberOwnedByAnotherWorkspaceError();
+  }
+
   const created = await client.query<{ id: string }>(
     `
-      INSERT INTO whatsapp_connections (workspace_id, phone_number_id)
-      VALUES ($1, $2)
-      ON CONFLICT (workspace_id, phone_number_id)
-      DO NOTHING
+      INSERT INTO whatsapp_connections (
+        workspace_id,
+        phone_number_id,
+        status,
+        activated_at
+      )
+      VALUES ($1, $2, 'active', now())
+      ON CONFLICT DO NOTHING
       RETURNING id
     `,
     [workspaceId, phoneNumberId],
@@ -239,20 +302,22 @@ async function ensureWhatsAppConnection(
     return created.rows[0].id;
   }
 
-  const existing = await client.query<{ id: string }>(
+  const existing = await client.query<{ id: string; status: string }>(
     `
-      SELECT id
+      SELECT id, status
       FROM whatsapp_connections
       WHERE workspace_id = $1
         AND phone_number_id = $2
+      ORDER BY (status = 'active') DESC, created_at DESC, id DESC
+      LIMIT 1
     `,
     [workspaceId, phoneNumberId],
   );
 
   const row = existing.rows[0];
 
-  if (!row) {
-    throw new Error("WhatsApp connection insert did not return a row.");
+  if (!row || row.status !== "active") {
+    throw new WhatsAppPhoneNumberOwnedByAnotherWorkspaceError();
   }
 
   return row.id;
@@ -461,20 +526,46 @@ async function findLeadIdForSender(
   workspaceId: string,
   senderPhoneNumber: string,
 ): Promise<string | null> {
-  // The leads unique index makes this an exact, reliable identifier match.
+  // Both sides must have a verified international E.164 identity. A Meta `from`
+  // value is international digits without a leading "+", so normalize it to E.164
+  // and verify it via describeLeadNumber; a bare legacy lead number without a
+  // "+" prefix never has a resolved E.164 identity and must not match.
+  //
   // Name similarities and business-scoped user IDs are deliberately not used.
-  const result = await client.query<{ id: string }>(
+  const senderE164 = normalizeWhatsAppPhoneE164(senderPhoneNumber);
+  const senderIdentity = describeLeadNumber(senderE164);
+
+  if (!senderIdentity.resolved || !senderIdentity.e164) {
+    return null;
+  }
+
+  const result = await client.query<{
+    id: string;
+    whatsapp_number: string | null;
+  }>(
     `
-      SELECT id
+      SELECT id, whatsapp_number
       FROM leads
       WHERE workspace_id = $1
         AND whatsapp_number = $2
       LIMIT 1
     `,
-    [workspaceId, senderPhoneNumber],
+    [workspaceId, senderIdentity.e164],
   );
 
-  return result.rows[0]?.id ?? null;
+  const row = result.rows[0];
+
+  if (!row) {
+    return null;
+  }
+
+  const leadIdentity = describeLeadNumber(row.whatsapp_number);
+
+  if (!leadIdentity.resolved || leadIdentity.e164 !== senderIdentity.e164) {
+    return null;
+  }
+
+  return row.id;
 }
 
 async function updateConversationAfterMessage(

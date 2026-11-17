@@ -1,7 +1,50 @@
 import { randomUUID } from "node:crypto";
+import { isIP } from "node:net";
 import { betterAuth } from "better-auth";
 import type { Pool } from "pg";
 import { ensureWorkspaceForUser } from "../workspaces/repository.js";
+
+/**
+ * Validates that an entry is a syntactically valid IPv4/IPv6 address or CIDR
+ * block (`ip/prefix` with `0..32` for IPv4 or `0..128` for IPv6).
+ */
+export function isValidProxyIpOrCidr(entry: string): boolean {
+  if (!entry) {
+    return false;
+  }
+
+  const slashIndex = entry.indexOf("/");
+
+  if (slashIndex === -1) {
+    return isIP(entry) === 4 || isIP(entry) === 6;
+  }
+
+  const parts = entry.split("/");
+
+  if (parts.length !== 2) {
+    return false;
+  }
+
+  const [ip, prefixText] = parts;
+
+  if (!ip || !prefixText || !/^(?:0|[1-9][0-9]*)$/.test(prefixText)) {
+    return false;
+  }
+
+  const family = isIP(ip);
+
+  if (family === 0) {
+    return false;
+  }
+
+  const prefix = Number(prefixText);
+
+  if (family === 4) {
+    return prefix >= 0 && prefix <= 32;
+  }
+
+  return prefix >= 0 && prefix <= 128;
+}
 
 export type AuthRateLimitOptions = Readonly<{
   enabled?: boolean;
@@ -9,12 +52,37 @@ export type AuthRateLimitOptions = Readonly<{
   max?: number;
 }>;
 
+export const AUTH_MIN_PASSWORD_LENGTH = 8;
+export const AUTH_MAX_PASSWORD_LENGTH = 128;
+export const AUTH_RESET_TOKEN_EXPIRES_IN_SECONDS = 900;
+
+export type PasswordResetEmailPayload = Readonly<{
+  user: Readonly<{ id: string; email: string; name: string }>;
+  url: string;
+  token: string;
+}>;
+
+export type SendResetPasswordEmailHook = (
+  data: PasswordResetEmailPayload,
+) => Promise<void> | void;
+
 export type CreateAuthOptions = Readonly<{
   pool: Pool;
   secret: string;
   baseURL?: string;
   trustedOrigins: string[];
   rateLimit?: AuthRateLimitOptions;
+  nodeEnv?: "development" | "test" | "production";
+  sendResetPasswordEmail?: SendResetPasswordEmailHook;
+  /**
+   * CIDR ranges of proxies that are allowed to set the client IP header.
+   *
+   * Better Auth resolves the client IP itself, and it can only do so when the
+   * forwarded header carries exactly one address, or when the proxies that may
+   * append to it are known. Without this list every client shares one
+   * rate-limit bucket per path behind a proxy.
+   */
+  trustedProxyCidrs?: string[];
 }>;
 
 export function createAuth({
@@ -23,7 +91,22 @@ export function createAuth({
   baseURL,
   trustedOrigins,
   rateLimit,
+  nodeEnv = "development",
+  sendResetPasswordEmail,
+  trustedProxyCidrs,
 }: CreateAuthOptions) {
+  const trustedProxies = [
+    ...new Set((trustedProxyCidrs ?? []).map((entry) => entry.trim())),
+  ].filter(Boolean);
+
+  for (const entry of trustedProxies) {
+    if (!isValidProxyIpOrCidr(entry)) {
+      throw new Error(
+        `Invalid trusted proxy IP or CIDR in auth config: ${entry}`,
+      );
+    }
+  }
+
   return betterAuth({
     appName: "ReplyPilot",
     secret,
@@ -32,16 +115,55 @@ export function createAuth({
     database: pool,
     emailAndPassword: {
       enabled: true,
-      minPasswordLength: 8,
-      maxPasswordLength: 128,
+      minPasswordLength: AUTH_MIN_PASSWORD_LENGTH,
+      maxPasswordLength: AUTH_MAX_PASSWORD_LENGTH,
       requireEmailVerification: false,
+      resetPasswordTokenExpiresIn: AUTH_RESET_TOKEN_EXPIRES_IN_SECONDS,
+      revokeSessionsOnPasswordReset: true,
+      sendResetPassword: async ({ user, url, token }) => {
+        if (sendResetPasswordEmail) {
+          await sendResetPasswordEmail({
+            user: { id: user.id, email: user.email, name: user.name },
+            url,
+            token,
+          });
+          return;
+        }
+
+        // Never log tokens, reset links, or user emails in production or test logs.
+        if (nodeEnv === "development") {
+          console.info(
+            `[dev-only] Password reset link (expires in ${AUTH_RESET_TOKEN_EXPIRES_IN_SECONDS / 60}m): ${url}`,
+          );
+          return;
+        }
+
+        if (nodeEnv === "production") {
+          console.warn(
+            "Password reset requested, but no production email delivery provider is configured.",
+          );
+        }
+      },
     },
     rateLimit: {
       enabled: rateLimit?.enabled ?? true,
       window: rateLimit?.window ?? 60,
       max: rateLimit?.max ?? 100,
+      customRules: {
+        "/sign-in/email": { window: 60, max: 10 },
+        "/sign-up/email": { window: 60, max: 5 },
+        "/request-password-reset": { window: 60, max: 3 },
+        "/reset-password": { window: 60, max: 5 },
+      },
     },
     advanced: {
+      // The Secure attribute is left to Better Auth, which derives it from the
+      // base URL protocol and falls back to NODE_ENV when there is no base URL.
+      // Overriding it with a NODE_ENV check would strip Secure from HTTPS
+      // deployments that do not set NODE_ENV=production.
+      ...(trustedProxies.length > 0
+        ? { ipAddress: { trustedProxies } }
+        : {}),
       database: {
         generateId: () => randomUUID(),
       },
