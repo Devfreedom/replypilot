@@ -26,8 +26,32 @@ import type { OutboundMessageRow } from "./types.js";
 export const DEFAULT_WORKER_BATCH_SIZE = 10;
 export const DEFAULT_WORKER_RETRY_DELAY_MS = 2_000;
 export const DEFAULT_WORKER_STALE_AFTER_MS = 5 * 60 * 1_000;
+export const MIN_WORKER_STALE_AFTER_MS = 30_000;
 const MAX_RETRY_DELAY_MS = 60_000;
 const MAX_FAILURE_REASON_LENGTH = 1000;
+
+/**
+ * Validates `OUTBOUND_WORKER_STALE_MS`, enforcing a safe lower bound above
+ * `META_API_TIMEOUT_MS` (10_000 ms) so an active provider HTTP request cannot
+ * be declared stale mid-flight.
+ */
+export function parseWorkerStaleAfterMs(raw: string | undefined): number {
+  const trimmed = raw?.trim();
+
+  if (!trimmed) {
+    return DEFAULT_WORKER_STALE_AFTER_MS;
+  }
+
+  const value = Number(trimmed);
+
+  if (!Number.isInteger(value) || value < MIN_WORKER_STALE_AFTER_MS) {
+    throw new Error(
+      `OUTBOUND_WORKER_STALE_MS must be an integer of at least ${MIN_WORKER_STALE_AFTER_MS}.`,
+    );
+  }
+
+  return value;
+}
 
 /**
  * Reason stored when the connection state could not be read or confirmed.

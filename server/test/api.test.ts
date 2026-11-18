@@ -33,8 +33,14 @@ import type {
   OutboundMessageHistoryItem,
   OutboundMessageRecord,
 } from "../src/outbound/types.js";
-import { runOutboundWorkerOnce } from "../src/outbound/worker.js";
-import { claimQueuedOutboundMessages } from "../src/outbound/repository.js";
+import {
+  parseWorkerStaleAfterMs,
+  runOutboundWorkerOnce,
+} from "../src/outbound/worker.js";
+import {
+  claimQueuedOutboundMessages,
+  processOutboundDeliveryEvent,
+} from "../src/outbound/repository.js";
 import { updateReplyDraftText } from "../src/reply-drafts/repository.js";
 import { recordWorkerHeartbeat } from "../src/outbound/worker-status.js";
 import {
@@ -272,6 +278,7 @@ type TestAuthOptions = Readonly<{
   baseURL?: string;
   trustedOrigins?: string[];
   rateLimit?: TestAuthRateLimit;
+  trustedProxyCidrs?: string[];
 }>;
 
 let pool: Pool;
@@ -307,6 +314,7 @@ async function startServer(
       // exercised explicitly against a dedicated app instance instead of
       // tripping Better Auth's sign-up rule during unrelated tests.
       rateLimit: authOptions.rateLimit ?? { enabled: false },
+      trustedProxyCidrs: authOptions.trustedProxyCidrs,
     },
   }).listen(0, "127.0.0.1");
   await once(appServer, "listening");
@@ -716,10 +724,12 @@ function requestAs(
   path: string,
   method = "GET",
   body?: unknown,
+  extraHeaders?: Record<string, string>,
 ): Promise<Response> {
   const headers = new Headers({
     cookie: session.cookie,
     "x-forwarded-for": TEST_CLIENT_IP,
+    ...(extraHeaders ?? {}),
   });
 
   if (body !== undefined) {
@@ -3561,6 +3571,7 @@ test("authentication rate limits repeated sign-in attempts", async () => {
       window: 60,
       max: 100,
     },
+    trustedProxyCidrs: ["127.0.0.1/32", "::1/128"],
   });
 
   try {
@@ -3609,6 +3620,7 @@ test("authentication rate limits repeated sign-up attempts", async () => {
       window: 60,
       max: 100,
     },
+    trustedProxyCidrs: ["127.0.0.1/32", "::1/128"],
   });
 
   try {
@@ -3672,7 +3684,7 @@ test("the API sends security headers and only sends HSTS over HTTPS", async () =
     "HSTS is not sent over a plain HTTP request",
   );
 
-  const secureResponse = await nativeFetch(`${baseUrl}/api/workspace`, {
+  const untrustedProtoResponse = await nativeFetch(`${baseUrl}/api/workspace`, {
     headers: {
       cookie: requireSession().cookie,
       "x-forwarded-for": TEST_CLIENT_IP,
@@ -3680,12 +3692,38 @@ test("the API sends security headers and only sends HSTS over HTTPS", async () =
     },
   });
 
-  assert.equal(secureResponse.status, 200);
-  assert.match(
-    secureResponse.headers.get("strict-transport-security") ?? "",
-    /max-age=\d+/,
-    "HSTS is sent for a request the proxy marked as HTTPS",
+  assert.equal(untrustedProtoResponse.status, 200);
+  assert.equal(
+    untrustedProtoResponse.headers.get("strict-transport-security"),
+    null,
+    "Untrusted X-Forwarded-Proto: https must not emit HSTS when trustedProxyCidrs is unset",
   );
+
+  const trustedProxyApp = await startServer(pool, undefined, {
+    trustedProxyCidrs: ["127.0.0.1/32", "::1/128"],
+  });
+
+  try {
+    const secureResponse = await nativeFetch(
+      `${trustedProxyApp.baseUrl}/api/workspace`,
+      {
+        headers: {
+          cookie: requireSession().cookie,
+          "x-forwarded-for": TEST_CLIENT_IP,
+          "x-forwarded-proto": "https",
+        },
+      },
+    );
+
+    assert.equal(secureResponse.status, 200);
+    assert.match(
+      secureResponse.headers.get("strict-transport-security") ?? "",
+      /max-age=\d+/,
+      "HSTS is sent for a request a trusted proxy marked as HTTPS",
+    );
+  } finally {
+    await stopServer(trustedProxyApp.server);
+  }
 });
 
 test("legacy workspace bootstrap requires explicit guarded CLI input", async () => {
@@ -10762,7 +10800,8 @@ test("M13 worker-status API reports queue counts and live heartbeats", async () 
 
   assert.equal(payload.workers.length, 1);
   assert.equal(payload.workers[0]?.provider, "mock");
-  assert.equal(payload.workers[0]?.workerId, "test-host:1234");
+  assert.notEqual(payload.workers[0]?.workerId, "test-host:1234");
+  assert.match(payload.workers[0]?.workerId ?? "", /^worker-[0-9a-f]{12}$/);
   assert.equal(payload.workers[0]?.stale, false);
   assert.deepEqual(payload.workers[0]?.lastTick, { claimed: 1, sent: 1 });
 });
@@ -11062,6 +11101,8 @@ test("M14A connection API is workspace-scoped, owner-controlled, and never retur
       other,
       `/api/whatsapp/connections/${ownerConnectionId}/disconnect`,
       "POST",
+      undefined,
+      { origin: TEST_AUTH_ORIGIN },
     );
     assert.equal(foreignDisconnect.status, 404);
 
@@ -11093,6 +11134,8 @@ test("M14A connection API is workspace-scoped, owner-controlled, and never retur
       owner,
       `/api/whatsapp/connections/${ownerConnectionId}/disconnect`,
       "POST",
+      undefined,
+      { origin: TEST_AUTH_ORIGIN },
     );
     assert.equal(disconnect.status, 200);
     const disconnected = await readJson<ConnectionPayload>(disconnect);
@@ -13031,9 +13074,12 @@ async function createDisconnectedLeadConversation(options: {
     },
   );
 
-  const disconnected = await jsonRequest(
-    `/api/whatsapp/connections/${connectionId}/disconnect`,
-    "POST",
+  const disconnected = await fetch(
+    `${baseUrl}/api/whatsapp/connections/${connectionId}/disconnect`,
+    {
+      method: "POST",
+      headers: { origin: TEST_AUTH_ORIGIN },
+    },
   );
   assert.equal(disconnected.status, 200);
 
@@ -15758,5 +15804,328 @@ test("draft routes map upstream 429 rate limits and 504 timeouts to accurate HTT
     }
   } finally {
     console.error = originalError;
+  }
+});
+
+test("D1 untrusted X-Forwarded-For rotation cannot bypass sign-in or sign-up rate limits", async () => {
+  const limited = await startServer(pool, undefined, {
+    rateLimit: { enabled: true, window: 60, max: 100 },
+  });
+
+  try {
+    const signInStatuses: number[] = [];
+
+    for (let attempt = 0; attempt < 11; attempt += 1) {
+      const response = await nativeFetch(
+        `${limited.baseUrl}/api/auth/sign-in/email`,
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            origin: TEST_AUTH_ORIGIN,
+            "x-forwarded-for": `198.51.100.${150 + attempt}`,
+          },
+          body: JSON.stringify({
+            email: requireSession().email,
+            password: requireSession().password,
+          }),
+        },
+      );
+      signInStatuses.push(response.status);
+    }
+
+    assert.deepEqual(
+      signInStatuses.slice(0, 10),
+      Array.from({ length: 10 }, () => 200),
+    );
+    assert.equal(signInStatuses[10], 429);
+
+    const signUpStatuses: number[] = [];
+
+    for (let attempt = 0; attempt < 6; attempt += 1) {
+      const response = await nativeFetch(
+        `${limited.baseUrl}/api/auth/sign-up/email`,
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            origin: TEST_AUTH_ORIGIN,
+            "x-forwarded-for": `198.51.100.${180 + attempt}`,
+          },
+          body: JSON.stringify({
+            email: `spoof-signup-${randomUUID()}@example.test`,
+            password: "replypilot-test-password",
+            name: "Spoof Signup",
+          }),
+        },
+      );
+      signUpStatuses.push(response.status);
+    }
+
+    assert.deepEqual(
+      signUpStatuses.slice(0, 5),
+      Array.from({ length: 5 }, () => 200),
+    );
+    assert.equal(signUpStatuses[5], 429);
+  } finally {
+    await stopServer(limited.server);
+  }
+});
+
+test("D3 cross-tenant protection masking and worker-status anonymization/scrubbing", async () => {
+  const allowlistedOwner = requireSession();
+  const otherOwner = await registerUser({
+    email: `d3-other-${randomUUID()}@example.test`,
+    name: "D3 Other Workspace",
+  });
+
+  await withMetaOutboundEnabled(allowlistedOwner.workspace.id, async () => {
+    const app = await startWhatsAppServer({
+      workspaceId: allowlistedOwner.workspace.id,
+      phoneNumberId: TEST_WHATSAPP_PHONE_NUMBER_ID,
+    });
+
+    try {
+      const allowlistedRes = await nativeFetch(
+        `${app.baseUrl}/api/whatsapp/protection`,
+        {
+          headers: { cookie: allowlistedOwner.cookie },
+        },
+      );
+      assert.equal(allowlistedRes.status, 200);
+      const allowlistedPayload =
+        await readJson<ProtectionPayload>(allowlistedRes);
+      assert.equal(allowlistedPayload.meta.workspaceAllowlistedForMeta, true);
+      assert.equal(allowlistedPayload.meta.recipientAllowlistCount, 1);
+      assert.ok(allowlistedPayload.meta.senderPhoneNumberId);
+      assert.equal(allowlistedPayload.inboundWebhook.workspaceMatches, true);
+      assert.equal(
+        allowlistedPayload.inboundWebhook.phoneNumberId,
+        TEST_WHATSAPP_PHONE_NUMBER_ID,
+      );
+
+      const otherRes = await nativeFetch(
+        `${app.baseUrl}/api/whatsapp/protection`,
+        {
+          headers: { cookie: otherOwner.cookie },
+        },
+      );
+      assert.equal(otherRes.status, 200);
+      const otherPayload = await readJson<ProtectionPayload>(otherRes);
+      assert.equal(otherPayload.meta.workspaceAllowlistedForMeta, false);
+      assert.equal(otherPayload.meta.senderConfigured, false);
+      assert.equal(otherPayload.meta.senderPhoneNumberId, null);
+      assert.equal(otherPayload.meta.recipientAllowlistCount, 0);
+      assert.equal(otherPayload.inboundWebhook.workspaceMatches, false);
+      assert.equal(otherPayload.inboundWebhook.phoneNumberId, null);
+    } finally {
+      await stopServer(app.server);
+    }
+  });
+
+  await recordWorkerHeartbeat(pool, {
+    provider: "whatsapp",
+    workerId: "secret-prod-host.internal:4242",
+    workerStartedAt: new Date(),
+    lastTick: {
+      claimed: 2,
+      error: 'relation "auth_sessions" violates constraint "pg_internal"',
+    },
+  });
+
+  const statusRes = await requestAs(
+    otherOwner,
+    "/api/outbound-messages/worker-status",
+  );
+  assert.equal(statusRes.status, 200);
+  const statusPayload = await readJson<{
+    workers: Array<{
+      provider: string;
+      workerId: string;
+      lastTick: Record<string, unknown>;
+    }>;
+  }>(statusRes);
+  const serialized = JSON.stringify(statusPayload);
+  assert.equal(serialized.includes("secret-prod-host"), false);
+  assert.equal(serialized.includes("4242"), false);
+  assert.equal(serialized.includes("auth_sessions"), false);
+  assert.equal(serialized.includes("pg_internal"), false);
+  const worker = statusPayload.workers.find((w) => w.provider === "whatsapp");
+  assert.ok(worker);
+  assert.match(worker.workerId, /^worker-[0-9a-f]{12}$/);
+  assert.deepEqual(worker.lastTick, {
+    claimed: 2,
+    error: "worker_tick_failed",
+  });
+});
+
+test("A3/D3 unexpected DB errors in delivery webhook and pre-send validation sanitize persisted failure_reason", async () => {
+  const originalError = console.error;
+  console.error = () => undefined;
+
+  try {
+    const { lead, conversationId } = await createLeadWithConversation(
+      {},
+      { providerTimestamp: new Date() },
+    );
+    const draft = await createSavedDraftPayload(lead.id);
+    const approval = await approveSavedDraft(lead.id, draft.id, {
+      status: "approved",
+      sendPolicy: "approve_and_send",
+      conversationId,
+    });
+    assert.equal(approval.status, 200);
+    const outbound = (
+      await readJson<ReplyDraftApprovalPayload>(approval)
+    ).outboundMessage;
+    assert.ok(outbound);
+
+    const wamid = `wamid.a3-${randomUUID()}`;
+    await pool.query(
+      "UPDATE outbound_messages SET status = 'sent', provider_message_id = $2, sent_at = now() WHERE id = $1",
+      [outbound.id, wamid],
+    );
+
+    await pool.query(`
+      CREATE FUNCTION replypilot_test_a3_db_fault()
+      RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN
+        IF NEW.provider_status_at IS NOT NULL THEN
+          RAISE EXCEPTION 'secret_pg_table_leak_on_delivery';
+        END IF;
+        RETURN NEW;
+      END
+      $$
+    `);
+    await pool.query(`
+      CREATE TRIGGER replypilot_test_a3_db_fault
+      BEFORE UPDATE ON outbound_messages
+      FOR EACH ROW EXECUTE FUNCTION replypilot_test_a3_db_fault()
+    `);
+
+    try {
+      await assert.rejects(() =>
+        processOutboundDeliveryEvent(
+          pool,
+          requireSession().workspace.id,
+          {
+            providerMessageId: wamid,
+            phoneNumberId: TEST_WHATSAPP_PHONE_NUMBER_ID,
+            status: "delivered",
+            providerTimestamp: new Date(),
+            errorDescription: null,
+          },
+          null,
+        ),
+      );
+
+      const eventsRes = await fetch(
+        `${baseUrl}/api/whatsapp/delivery-events?limit=10`,
+      );
+      assert.equal(eventsRes.status, 200);
+      const eventsPayload = await readJson<{
+        events: Array<{ failureReason: string | null }>;
+      }>(eventsRes);
+      assert.ok(eventsPayload.events[0]?.failureReason);
+      assert.equal(
+        eventsPayload.events[0]?.failureReason?.includes(
+          "secret_pg_table_leak_on_delivery",
+        ),
+        false,
+      );
+    } finally {
+      await pool.query(
+        "DROP TRIGGER IF EXISTS replypilot_test_a3_db_fault ON outbound_messages",
+      );
+      await pool.query("DROP FUNCTION IF EXISTS replypilot_test_a3_db_fault()");
+    }
+
+    // Pre-send validation DB fault via ConnectionAwareMetaProvider
+    const throwingPool = new Proxy(pool, {
+      get(target, prop, receiver) {
+        if (prop === "query") {
+          return async () => {
+            throw new Error(
+              'pg error: column "secret_token_col" of relation "whatsapp_connections" failed',
+            );
+          };
+        }
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const provider = new ConnectionAwareMetaProvider(throwingPool, {
+      fetchImplementation: async () => new Response("{}", { status: 200 }),
+    });
+    await assert.rejects(
+      () =>
+        provider.send({
+          workspaceId: requireSession().workspace.id,
+          conversationId,
+          content: "Test",
+          idempotencyKey: `reply-draft:${draft.id}`,
+          recipientPhone: "+16505551234",
+        }),
+      (error: unknown) =>
+        error instanceof OutboundProviderError &&
+        !error.message.includes("secret_token_col") &&
+        !error.message.includes("whatsapp_connections"),
+    );
+  } finally {
+    console.error = originalError;
+  }
+});
+
+test("B1 disconnect requires allowed Origin and B3 enforces minimum OUTBOUND_WORKER_STALE_MS", async () => {
+  const owner = requireSession();
+  const connectionId = await withCredentialEncryption(() =>
+    registerTestConnection({
+      workspaceId: owner.workspace.id,
+      phoneNumberId: "106540000000999",
+      accessToken: "EAABc0B1DisconnectOriginTokenMustStaySecret123",
+    }),
+  );
+
+  const missingOrigin = await requestAs(
+    owner,
+    `/api/whatsapp/connections/${connectionId}/disconnect`,
+    "POST",
+  );
+  assert.equal(missingOrigin.status, 403);
+  assert.equal(
+    (await readJson<{ code?: string }>(missingOrigin)).code,
+    "origin_not_allowed",
+  );
+
+  const crossOrigin = await requestAs(
+    owner,
+    `/api/whatsapp/connections/${connectionId}/disconnect`,
+    "POST",
+    undefined,
+    { origin: "https://attacker.example" },
+  );
+  assert.equal(crossOrigin.status, 403);
+  assert.equal(
+    (await readJson<{ code?: string }>(crossOrigin)).code,
+    "origin_not_allowed",
+  );
+
+  const validOrigin = await requestAs(
+    owner,
+    `/api/whatsapp/connections/${connectionId}/disconnect`,
+    "POST",
+    undefined,
+    { origin: TEST_AUTH_ORIGIN },
+  );
+  assert.equal(validOrigin.status, 200);
+
+  // B3: OUTBOUND_WORKER_STALE_MS lower bound
+  assert.equal(parseWorkerStaleAfterMs(undefined), 300_000);
+  assert.equal(parseWorkerStaleAfterMs("30000"), 30_000);
+  for (const invalid of ["1", "9999", "29999", "0", "-5", "abc"]) {
+    assert.throws(
+      () => parseWorkerStaleAfterMs(invalid),
+      /OUTBOUND_WORKER_STALE_MS/,
+    );
   }
 });

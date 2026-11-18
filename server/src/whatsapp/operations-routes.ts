@@ -235,6 +235,13 @@ export function createWhatsAppOperationsRouter({
       ]);
 
     const runtime = process.env.NODE_ENV ?? "development";
+    const workspaceAllowlistedForMeta =
+      metaConfig !== null &&
+      isWorkspaceAllowedForMetaSending(metaConfig, workspace.id);
+    const webhookWorkspaceMatches =
+      whatsapp !== null &&
+      whatsapp.workspaceId !== undefined &&
+      whatsapp.workspaceId === workspace.id;
 
     response.status(200).json({
       runtime,
@@ -243,13 +250,15 @@ export function createWhatsAppOperationsRouter({
       connections,
       meta: {
         enabled: metaConfig !== null,
-        senderConfigured: metaConfig !== null,
-        senderPhoneNumberId: metaConfig?.senderPhoneNumberId ?? null,
-        recipientAllowlistCount: metaConfig?.allowedRecipients.size ?? 0,
+        senderConfigured: workspaceAllowlistedForMeta,
+        senderPhoneNumberId: workspaceAllowlistedForMeta
+          ? (metaConfig?.senderPhoneNumberId ?? null)
+          : null,
+        recipientAllowlistCount: workspaceAllowlistedForMeta
+          ? (metaConfig?.allowedRecipients.size ?? 0)
+          : 0,
         testWorkspaceConfigured: metaConfig !== null,
-        workspaceAllowlistedForMeta:
-          metaConfig !== null &&
-          isWorkspaceAllowedForMetaSending(metaConfig, workspace.id),
+        workspaceAllowlistedForMeta,
         productionBlocked: runtime === "production",
         productionProtection:
           runtime === "production"
@@ -260,11 +269,10 @@ export function createWhatsAppOperationsRouter({
       },
       inboundWebhook: {
         configured: whatsapp !== null,
-        phoneNumberId: whatsapp?.phoneNumberId ?? null,
-        workspaceMatches:
-          whatsapp !== null &&
-          whatsapp.workspaceId !== undefined &&
-          whatsapp.workspaceId === workspace.id,
+        phoneNumberId: webhookWorkspaceMatches
+          ? (whatsapp?.phoneNumberId ?? null)
+          : null,
+        workspaceMatches: webhookWorkspaceMatches,
       },
       suppressions: {
         count: suppressions.length,

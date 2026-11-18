@@ -1228,8 +1228,12 @@ export async function processOutboundDeliveryEvent(
       // Preserve the original processing error.
     }
 
-    const failure =
-      error instanceof Error ? error.message : "Unknown event-processing failure.";
+    console.error(
+      "Delivery event processing failed:",
+      error instanceof Error ? error.message : "Unknown event-processing failure.",
+    );
+    const safeFailure =
+      "Delivery event processing failed due to an internal error.";
     await pool.query(
       `
         INSERT INTO whatsapp_delivery_events (
@@ -1275,7 +1279,7 @@ export async function processOutboundDeliveryEvent(
         event.phoneNumberId,
         event.status,
         event.providerTimestamp,
-        boundedDeliveryReason(failure),
+        boundedDeliveryReason(safeFailure),
       ],
     );
     throw error;

@@ -264,13 +264,12 @@ export class MetaWhatsAppCloudProvider implements OutboundMessageProvider {
         throw error;
       }
 
-      const reason =
-        error instanceof Error ? error.message : "Pre-send validation failed";
+      console.error(
+        "Outbound pre-send validation failed:",
+        error instanceof Error ? error.message : "Unknown error",
+      );
       throw new OutboundProviderError(
-        truncateToCodePoints(
-          `Outbound send rejected before provider request: ${reason}`,
-          MAX_PROVIDER_ERROR_LENGTH,
-        ),
+        "Outbound send rejected before provider request: internal validation failed.",
       );
     }
 

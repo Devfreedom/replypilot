@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { Pool } from "pg";
 import {
   OUTBOUND_MESSAGE_STATUSES,
@@ -5,6 +6,56 @@ import {
 } from "../messaging/types.js";
 
 export const WORKER_HEARTBEAT_STALE_AFTER_MS = 30_000;
+
+const OPAQUE_WORKER_ID_PATTERN = /^worker-[0-9a-f]{8,32}$/i;
+const ALLOWED_NUMERIC_TICK_KEYS = [
+  "recovered",
+  "cancelled",
+  "claimed",
+  "sent",
+  "retried",
+  "failed",
+  "manualReview",
+  "skipped",
+] as const;
+
+export function anonymizeWorkerId(rawWorkerId: string): string {
+  const trimmed = rawWorkerId.trim();
+
+  if (OPAQUE_WORKER_ID_PATTERN.test(trimmed)) {
+    return trimmed.toLowerCase();
+  }
+
+  const digest = createHash("sha256")
+    .update(trimmed, "utf8")
+    .digest("hex")
+    .slice(0, 12);
+  return `worker-${digest}`;
+}
+
+export function sanitizeWorkerTick(
+  rawTick: unknown,
+): Readonly<Record<string, unknown>> {
+  if (typeof rawTick !== "object" || rawTick === null || Array.isArray(rawTick)) {
+    return {};
+  }
+
+  const record = rawTick as Record<string, unknown>;
+  const sanitized: Record<string, unknown> = {};
+
+  for (const key of ALLOWED_NUMERIC_TICK_KEYS) {
+    const value = record[key];
+    if (typeof value === "number" && Number.isFinite(value)) {
+      sanitized[key] = value;
+    }
+  }
+
+  if ("error" in record && record.error !== undefined && record.error !== null) {
+    sanitized.error = "worker_tick_failed";
+  }
+
+  return sanitized;
+}
 
 export type OutboundWorkerHeartbeat = Readonly<{
   provider: string;
@@ -83,13 +134,10 @@ export async function listWorkerHeartbeats(
 
   return result.rows.map((row) => ({
     provider: row.provider,
-    workerId: row.worker_id,
+    workerId: anonymizeWorkerId(row.worker_id),
     workerStartedAt: row.worker_started_at.toISOString(),
     lastSeenAt: row.last_seen_at.toISOString(),
-    lastTick:
-      typeof row.last_tick === "object" && row.last_tick !== null
-        ? (row.last_tick as Record<string, unknown>)
-        : {},
+    lastTick: sanitizeWorkerTick(row.last_tick),
   }));
 }
 

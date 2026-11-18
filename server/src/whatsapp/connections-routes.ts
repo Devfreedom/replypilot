@@ -19,6 +19,7 @@ import { createMetaGraphClient } from "./meta-graph.js";
 import {
   describeOnboardingOriginRejection,
   isOnboardingOriginAllowed,
+  resolveOnboardingOriginPolicy,
 } from "./onboarding-origin.js";
 import {
   createOnboardingRateLimiter,
@@ -130,6 +131,24 @@ export function createWhatsAppConnectionsRouter({
     return config;
   }
 
+  function requireDisconnectOrigin(
+    request: Request,
+    response: Response,
+  ): boolean {
+    const originPolicy =
+      embeddedSignup?.originPolicy ?? resolveOnboardingOriginPolicy();
+
+    if (!isOnboardingOriginAllowed(originPolicy, request.get("origin"))) {
+      response.status(403).json({
+        error: describeOnboardingOriginRejection(originPolicy),
+        code: "origin_not_allowed",
+      });
+      return false;
+    }
+
+    return true;
+  }
+
   function metaClient(config: EmbeddedSignupConfig) {
     return createMetaGraphClient(config, metaFetch);
   }
@@ -179,6 +198,10 @@ export function createWhatsAppConnectionsRouter({
 
       if (!connectionId.success) {
         sendValidationError(response, connectionId.error);
+        return;
+      }
+
+      if (!requireDisconnectOrigin(request, response)) {
         return;
       }
 

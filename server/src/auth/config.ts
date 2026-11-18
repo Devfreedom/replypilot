@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { isIP } from "node:net";
+import { BlockList, isIP } from "node:net";
 import { betterAuth } from "better-auth";
 import type { Pool } from "pg";
 import { ensureWorkspaceForUser } from "../workspaces/repository.js";
@@ -44,6 +44,101 @@ export function isValidProxyIpOrCidr(entry: string): boolean {
   }
 
   return prefix >= 0 && prefix <= 128;
+}
+
+/**
+ * Normalizes an IPv4, IPv6, or IPv4-mapped IPv6 (`::ffff:a.b.c.d`) address.
+ * Returns null if the input is empty or not a valid IP address.
+ */
+export function normalizeIpAddress(
+  value: string | null | undefined,
+): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const trimmed = value.trim();
+
+  if (!trimmed || isIP(trimmed) === 0) {
+    return null;
+  }
+
+  if (trimmed.toLowerCase().startsWith("::ffff:")) {
+    const ipv4 = trimmed.slice(7);
+    if (isIP(ipv4) === 4) {
+      return ipv4;
+    }
+  }
+
+  return trimmed.toLowerCase();
+}
+
+/**
+ * Compiles validated IP/CIDR entries into an IP-matching predicate backed by
+ * Node's `net.BlockList`. Fails closed on any malformed entry.
+ */
+export function createTrustedProxyMatcher(
+  entries: readonly string[],
+): (ip: string) => boolean {
+  const blockList = new BlockList();
+
+  for (const rawEntry of entries) {
+    const entry = rawEntry.trim();
+
+    if (!entry) {
+      continue;
+    }
+
+    if (!isValidProxyIpOrCidr(entry)) {
+      throw new Error(
+        `Invalid trusted proxy IP or CIDR in auth config: ${entry}`,
+      );
+    }
+
+    const slashIndex = entry.indexOf("/");
+
+    if (slashIndex === -1) {
+      const normalized = normalizeIpAddress(entry);
+      if (!normalized) {
+        throw new Error(
+          `Invalid trusted proxy IP or CIDR in auth config: ${entry}`,
+        );
+      }
+      const family = isIP(normalized) === 4 ? "ipv4" : "ipv6";
+      blockList.addAddress(normalized, family);
+      continue;
+    }
+
+    const ip = entry.slice(0, slashIndex);
+    const prefix = Number(entry.slice(slashIndex + 1));
+    const normalized = normalizeIpAddress(ip);
+
+    if (!normalized) {
+      throw new Error(
+        `Invalid trusted proxy IP or CIDR in auth config: ${entry}`,
+      );
+    }
+
+    const family = isIP(normalized) === 4 ? "ipv4" : "ipv6";
+    // If an IPv4-mapped CIDR was normalized to IPv4, only valid IPv4 prefixes apply;
+    // isValidProxyIpOrCidr already validated prefix against the raw address family.
+    if (isIP(ip) === 6 && family === "ipv4") {
+      blockList.addAddress(normalized, "ipv4");
+    } else {
+      blockList.addSubnet(normalized, prefix, family);
+    }
+  }
+
+  return (ip: string): boolean => {
+    const normalized = normalizeIpAddress(ip);
+
+    if (!normalized) {
+      return false;
+    }
+
+    const family = isIP(normalized) === 4 ? "ipv4" : "ipv6";
+    return blockList.check(normalized, family);
+  };
 }
 
 export type AuthRateLimitOptions = Readonly<{

@@ -25,6 +25,7 @@ async function startAuthTestServer(
   options: Readonly<{
     nodeEnv?: "development" | "test" | "production";
     rateLimit?: { enabled: boolean; window?: number; max?: number };
+    trustedProxyCidrs?: string[];
     sendResetPasswordEmail?: (
       data: PasswordResetEmailPayload,
     ) => Promise<void> | void;
@@ -37,6 +38,7 @@ async function startAuthTestServer(
       baseURL: TEST_AUTH_ORIGIN,
       trustedOrigins: [TEST_AUTH_ORIGIN],
       rateLimit: options.rateLimit ?? { enabled: false },
+      trustedProxyCidrs: options.trustedProxyCidrs,
       nodeEnv: options.nodeEnv ?? "test",
       sendResetPasswordEmail: options.sendResetPasswordEmail,
     },
@@ -424,6 +426,7 @@ test("expired password reset token is rejected cleanly by callback and reset end
 test("password reset endpoints enforce rate limits", async () => {
   const { server, baseUrl } = await startAuthTestServer(pool, {
     rateLimit: { enabled: true, window: 60, max: 100 },
+    trustedProxyCidrs: ["127.0.0.1/32", "::1/128"],
   });
 
   try {
@@ -466,5 +469,119 @@ test("password reset endpoints enforce rate limits", async () => {
     assert.equal(resetStatuses[5], 429);
   } finally {
     await stopServer(server);
+  }
+});
+
+test("D1 rotating X-Forwarded-For cannot bypass password-reset rate limits without trustedProxyCidrs and multi-hop trusted proxy resolves client IP", async () => {
+  const untrusted = await startAuthTestServer(pool, {
+    nodeEnv: "production",
+    rateLimit: { enabled: true, window: 60, max: 100 },
+  });
+
+  try {
+    const rotatedIps = [
+      "198.51.100.10",
+      "198.51.100.11",
+      "198.51.100.12",
+      "198.51.100.13",
+    ];
+    const statuses: number[] = [];
+
+    for (const spoofedIp of rotatedIps) {
+      const res = await fetch(
+        `${untrusted.baseUrl}/api/auth/request-password-reset`,
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            origin: TEST_AUTH_ORIGIN,
+            "x-forwarded-for": spoofedIp,
+          },
+          body: JSON.stringify({
+            email: "spoof@example.test",
+            redirectTo: "/reset-password",
+          }),
+        },
+      );
+      statuses.push(res.status);
+    }
+
+    assert.deepEqual(statuses.slice(0, 3), [200, 200, 200]);
+    assert.equal(
+      statuses[3],
+      429,
+      "Rotating X-Forwarded-For from an untrusted peer must share the socket IP bucket",
+    );
+  } finally {
+    await stopServer(untrusted.server);
+  }
+
+  // Multi-hop X-Forwarded-For behind trusted proxies resolves distinct client IPs
+  // without falling into Better Auth's shared no-trusted-ip bucket in production.
+  const trusted = await startAuthTestServer(pool, {
+    nodeEnv: "production",
+    rateLimit: { enabled: true, window: 60, max: 100 },
+    trustedProxyCidrs: ["127.0.0.1/32", "::1/128", "10.0.0.0/8"],
+  });
+
+  try {
+    for (let i = 0; i < 3; i += 1) {
+      const firstClient = await fetch(
+        `${trusted.baseUrl}/api/auth/request-password-reset`,
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            origin: TEST_AUTH_ORIGIN,
+            "x-forwarded-for": "203.0.113.41, 10.0.0.5",
+          },
+          body: JSON.stringify({
+            email: "client1@example.test",
+            redirectTo: "/reset-password",
+          }),
+        },
+      );
+      assert.equal(firstClient.status, 200);
+    }
+
+    const firstClientLimited = await fetch(
+      `${trusted.baseUrl}/api/auth/request-password-reset`,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          origin: TEST_AUTH_ORIGIN,
+          "x-forwarded-for": "203.0.113.41, 10.0.0.5",
+        },
+        body: JSON.stringify({
+          email: "client1@example.test",
+          redirectTo: "/reset-password",
+        }),
+      },
+    );
+    assert.equal(firstClientLimited.status, 429);
+
+    const secondClient = await fetch(
+      `${trusted.baseUrl}/api/auth/request-password-reset`,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          origin: TEST_AUTH_ORIGIN,
+          "x-forwarded-for": "203.0.113.42, 10.0.0.5",
+        },
+        body: JSON.stringify({
+          email: "client2@example.test",
+          redirectTo: "/reset-password",
+        }),
+      },
+    );
+    assert.equal(
+      secondClient.status,
+      200,
+      "Distinct clients behind trusted multi-hop proxies must not share a global null-IP bucket",
+    );
+  } finally {
+    await stopServer(trusted.server);
   }
 });
