@@ -775,28 +775,45 @@ export async function upsertVerifiedWhatsAppConnection(
     whatsappCredentialAad(input.workspaceId, input.phoneNumberId),
   );
   const verifiedAt = input.verifiedAt ?? new Date();
-  const ownedByOther = await queryable.query<{
-    id: string;
-    workspace_id: string;
-  }>(
-    `
-      SELECT id, workspace_id
-      FROM whatsapp_connections
-      WHERE phone_number_id = $1
-        AND status <> 'disconnected'
-        AND workspace_id <> $2
-      ORDER BY created_at ASC, id ASC
-      LIMIT 1
-    `,
-    [input.phoneNumberId, input.workspaceId],
-  );
-
-  if (ownedByOther.rows[0]) {
-    throw new WhatsAppConnectionConflictError();
-  }
+  const ownClient: PoolClient | null =
+    "totalCount" in queryable ? await queryable.connect() : null;
+  const client: PoolClient = ownClient ?? (queryable as PoolClient);
 
   try {
-    const result = await queryable.query<ConnectionRow>(
+    if (ownClient) {
+      await ownClient.query("BEGIN");
+    }
+
+    // Serialize concurrent onboardings for the same Meta phone-number ID so
+    // same-workspace upserts never race on the secondary partial unique index
+    // `whatsapp_connections_phone_number_id_uidx` before hitting the
+    // `(workspace_id, phone_number_id)` conflict arbiter.
+    await client.query(
+      "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+      [`whatsapp_connection:${input.phoneNumberId}`],
+    );
+
+    const ownedByOther = await client.query<{
+      id: string;
+      workspace_id: string;
+    }>(
+      `
+        SELECT id, workspace_id
+        FROM whatsapp_connections
+        WHERE phone_number_id = $1
+          AND status <> 'disconnected'
+          AND workspace_id <> $2
+        ORDER BY created_at ASC, id ASC
+        LIMIT 1
+      `,
+      [input.phoneNumberId, input.workspaceId],
+    );
+
+    if (ownedByOther.rows[0]) {
+      throw new WhatsAppConnectionConflictError();
+    }
+
+    const result = await client.query<ConnectionRow>(
       `
         INSERT INTO whatsapp_connections (
           workspace_id,
@@ -874,13 +891,27 @@ export async function upsertVerifiedWhatsAppConnection(
       throw new Error("WhatsApp connection upsert did not return a row.");
     }
 
+    if (ownClient) {
+      await ownClient.query("COMMIT");
+    }
+
     return mapConnectionSummary(row);
   } catch (error) {
+    if (ownClient) {
+      try {
+        await ownClient.query("ROLLBACK");
+      } catch {
+        // Preserve the original failure.
+      }
+    }
+
     if (isPhoneNumberOwnershipConflictError(error)) {
       throw new WhatsAppConnectionConflictError();
     }
 
     throw error;
+  } finally {
+    ownClient?.release();
   }
 }
 
