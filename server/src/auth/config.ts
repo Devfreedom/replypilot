@@ -161,6 +161,8 @@ export type SendResetPasswordEmailHook = (
   data: PasswordResetEmailPayload,
 ) => Promise<void> | void;
 
+export type SendResetPasswordEmail = SendResetPasswordEmailHook;
+
 export type CreateAuthOptions = Readonly<{
   pool: Pool;
   secret: string;
@@ -178,6 +180,12 @@ export type CreateAuthOptions = Readonly<{
    * rate-limit bucket per path behind a proxy.
    */
   trustedProxyCidrs?: string[];
+  /**
+   * Set by `createApp` when the Express client-IP normalization middleware has
+   * already verified `trustedProxyCidrs` and rewritten `X-Forwarded-For` to a
+   * single resolved client IP (including normalized socket-IP fallbacks).
+   */
+  clientIpNormalizedByApp?: boolean;
 }>;
 
 export function createAuth({
@@ -189,6 +197,7 @@ export function createAuth({
   nodeEnv = "development",
   sendResetPasswordEmail,
   trustedProxyCidrs,
+  clientIpNormalizedByApp = false,
 }: CreateAuthOptions) {
   const trustedProxies = [
     ...new Set((trustedProxyCidrs ?? []).map((entry) => entry.trim())),
@@ -256,7 +265,7 @@ export function createAuth({
       // base URL protocol and falls back to NODE_ENV when there is no base URL.
       // Overriding it with a NODE_ENV check would strip Secure from HTTPS
       // deployments that do not set NODE_ENV=production.
-      ...(trustedProxies.length > 0
+      ...(!clientIpNormalizedByApp && trustedProxies.length > 0
         ? { ipAddress: { trustedProxies } }
         : {}),
       database: {

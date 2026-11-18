@@ -2363,6 +2363,7 @@ test("H6 non-JSON HTTP 502/503 responses throw OutboundProviderAmbiguousError an
   await assert.rejects(
     () =>
       new ConnectionAwareMetaProvider(pool, {
+        enabled: true,
         legacyConfig: config,
         fetchImplementation: async () =>
           new Response("Service Unavailable", {
@@ -2519,6 +2520,7 @@ test("H8 pre-HTTP provider failures remain retryable and per-row DB errors do no
 
   let fetchCalls = 0;
   const badConfigProvider = new ConnectionAwareMetaProvider(pool, {
+    enabled: true,
     environment: encryptionEnv,
     fetchImplementation: async () => {
       fetchCalls += 1;

@@ -119,12 +119,12 @@ async function main(): Promise<void> {
   });
 
   // The WhatsApp provider resolves each conversation's workspace-owned
-  // connection at send time. The legacy test configuration is still passed for
-  // the single-test-workspace integration during migration. Registering it
-  // even when no connection exists is safe: only rows queued for the
-  // "whatsapp" provider are claimed.
+  // connection at send time, gated by the global META_OUTBOUND_ENABLED kill
+  // switch. Registering it even when disabled or unconfigured ensures queued
+  // "whatsapp" rows fail closed instead of falling back to mock delivery.
   providers.push({
     provider: new ConnectionAwareMetaProvider(pool, {
+      enabled: metaConfig !== null,
       legacyConfig: metaConfig,
     }),
     label: "whatsapp",
@@ -138,13 +138,17 @@ async function main(): Promise<void> {
     // Never log the access token or any credential. Only log non-secret
     // identifiers for operational visibility.
     log("outbound_worker_provider_meta", {
+      enabled: true,
       senderPhoneNumberId: metaConfig.senderPhoneNumberId,
       testWorkspaceId: metaConfig.testWorkspaceId,
       graphApiVersion: metaConfig.graphApiVersion,
       allowedRecipients: metaConfig.allowedRecipients.size,
     });
   } else {
-    log("outbound_worker_provider_meta", { legacyConfigured: false });
+    log("outbound_worker_provider_meta", {
+      enabled: false,
+      legacyConfigured: false,
+    });
   }
 
   if (Object.keys(mockFailKeys).length > 0) {

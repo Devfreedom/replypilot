@@ -174,6 +174,7 @@ export function createApp({
     trustedOrigins: authOptions.trustedOrigins ?? [],
     rateLimit: authOptions.rateLimit,
     trustedProxyCidrs: authOptions.trustedProxyCidrs,
+    clientIpNormalizedByApp: true,
     nodeEnv: authOptions.nodeEnv,
     sendResetPasswordEmail: authOptions.sendResetPasswordEmail,
   });

@@ -102,6 +102,8 @@ const environmentSchema = z
         typeof value === "string" && value.trim() === "" ? undefined : value,
       z.coerce.number().int().min(1_000).max(300_000).optional(),
     ),
+    RESEND_API_KEY: z.string().trim().min(1).optional(),
+    AUTH_EMAIL_FROM: z.string().trim().min(1).optional(),
   })
   .superRefine((value, context) => {
     if (value.NODE_ENV === "production" && !value.BETTER_AUTH_URL) {
@@ -123,6 +125,41 @@ const environmentSchema = z
         message: "must use https in production",
       });
     }
+
+    const hasResendKey = Boolean(value.RESEND_API_KEY);
+    const hasEmailFrom = Boolean(value.AUTH_EMAIL_FROM);
+
+    if (hasResendKey && !hasEmailFrom) {
+      context.addIssue({
+        code: "custom",
+        path: ["AUTH_EMAIL_FROM"],
+        message: "is required when RESEND_API_KEY is configured",
+      });
+    }
+
+    if (hasEmailFrom && !hasResendKey) {
+      context.addIssue({
+        code: "custom",
+        path: ["RESEND_API_KEY"],
+        message: "is required when AUTH_EMAIL_FROM is configured",
+      });
+    }
+
+    if (value.NODE_ENV === "production" && !hasResendKey) {
+      context.addIssue({
+        code: "custom",
+        path: ["RESEND_API_KEY"],
+        message: "is required in production",
+      });
+    }
+
+    if (value.NODE_ENV === "production" && !hasEmailFrom) {
+      context.addIssue({
+        code: "custom",
+        path: ["AUTH_EMAIL_FROM"],
+        message: "is required in production",
+      });
+    }
   });
 
 export type ServerConfig = Readonly<{
@@ -141,6 +178,10 @@ export type ServerConfig = Readonly<{
     model?: string;
     fallbackModel?: string;
     timeoutMs: number;
+  }> | null;
+  email: Readonly<{
+    apiKey: string;
+    from: string;
   }> | null;
 }>;
 
@@ -294,5 +335,12 @@ export function loadConfig(
         timeoutMs: result.data.GEMINI_TIMEOUT_MS ?? DEFAULT_GEMINI_TIMEOUT_MS,
       }
       : null,
+    email:
+      result.data.RESEND_API_KEY && result.data.AUTH_EMAIL_FROM
+        ? {
+            apiKey: result.data.RESEND_API_KEY,
+            from: result.data.AUTH_EMAIL_FROM,
+          }
+        : null,
   };
 }

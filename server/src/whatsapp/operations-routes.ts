@@ -264,7 +264,9 @@ export function createWhatsAppOperationsRouter({
           runtime === "production"
             ? "Meta sending is rejected because the API is running in production."
             : metaConfig === null
-              ? "Meta sending is disabled. The mock provider handles outbound records."
+              ? providerForWorkspace === "whatsapp"
+                ? "Meta sending is disabled (META_OUTBOUND_ENABLED=false). WhatsApp outbound records fail closed without calling Meta."
+                : "Meta sending is disabled. The mock provider handles outbound records."
               : "Meta sending is limited to the configured test workspace, sender, and recipient allowlist.",
       },
       inboundWebhook: {

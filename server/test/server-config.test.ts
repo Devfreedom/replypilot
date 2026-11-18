@@ -9,6 +9,8 @@ const BASE_ENVIRONMENT = {
   DATABASE_URL: "postgres://replypilot:replypilot@localhost:5432/replypilot",
   BETTER_AUTH_SECRET: "replypilot-production-test-secret-0123456789",
   BETTER_AUTH_URL: "https://replypilot.example.test",
+  RESEND_API_KEY: "re_test_placeholder_0123456789",
+  AUTH_EMAIL_FROM: "ReplyPilot <noreply@replypilot.example.test>",
 };
 
 test("no trusted proxies are configured by default", () => {
@@ -223,4 +225,93 @@ test("M2b loadConfig validates origin syntax, rejects production http origins, a
     BETTER_AUTH_TRUSTED_ORIGINS: "http://localhost:3001/",
   });
   assert.equal(devConfig.trustedOrigins.includes("http://localhost:3001"), true);
+});
+
+test("C1 loadConfig validates RESEND_API_KEY and AUTH_EMAIL_FROM pairing and requires email in production", () => {
+  const configured = loadConfig({
+    ...BASE_ENVIRONMENT,
+    RESEND_API_KEY: "  re_test_trimmed_key  ",
+    AUTH_EMAIL_FROM: "  ReplyPilot <noreply@replypilot.example.test>  ",
+  });
+  assert.deepEqual(configured.email, {
+    apiKey: "re_test_trimmed_key",
+    from: "ReplyPilot <noreply@replypilot.example.test>",
+  });
+
+  const devNoEmail = loadConfig({
+    NODE_ENV: "development",
+    DATABASE_URL: BASE_ENVIRONMENT.DATABASE_URL,
+    BETTER_AUTH_SECRET: BASE_ENVIRONMENT.BETTER_AUTH_SECRET,
+  });
+  assert.equal(devNoEmail.email, null);
+
+  // Missing both in production must fail closed.
+  assert.throws(
+    () =>
+      loadConfig({
+        NODE_ENV: BASE_ENVIRONMENT.NODE_ENV,
+        DATABASE_URL: BASE_ENVIRONMENT.DATABASE_URL,
+        BETTER_AUTH_SECRET: BASE_ENVIRONMENT.BETTER_AUTH_SECRET,
+        BETTER_AUTH_URL: BASE_ENVIRONMENT.BETTER_AUTH_URL,
+      }),
+    (error: unknown) => {
+      assert.ok(error instanceof ConfigError);
+      assert.match(error.message, /RESEND_API_KEY/);
+      assert.match(error.message, /AUTH_EMAIL_FROM/);
+      return true;
+    },
+  );
+
+  // Setting only one fails fast in both development and production.
+  for (const nodeEnv of ["development", "production"] as const) {
+    assert.throws(
+      () =>
+        loadConfig({
+          NODE_ENV: nodeEnv,
+          DATABASE_URL: BASE_ENVIRONMENT.DATABASE_URL,
+          BETTER_AUTH_SECRET: BASE_ENVIRONMENT.BETTER_AUTH_SECRET,
+          BETTER_AUTH_URL: BASE_ENVIRONMENT.BETTER_AUTH_URL,
+          RESEND_API_KEY: "re_test_only_key",
+        }),
+      (error: unknown) => {
+        assert.ok(error instanceof ConfigError);
+        assert.match(error.message, /AUTH_EMAIL_FROM/);
+        return true;
+      },
+    );
+
+    assert.throws(
+      () =>
+        loadConfig({
+          NODE_ENV: nodeEnv,
+          DATABASE_URL: BASE_ENVIRONMENT.DATABASE_URL,
+          BETTER_AUTH_SECRET: BASE_ENVIRONMENT.BETTER_AUTH_SECRET,
+          BETTER_AUTH_URL: BASE_ENVIRONMENT.BETTER_AUTH_URL,
+          AUTH_EMAIL_FROM: "ReplyPilot <noreply@replypilot.example.test>",
+        }),
+      (error: unknown) => {
+        assert.ok(error instanceof ConfigError);
+        assert.match(error.message, /RESEND_API_KEY/);
+        return true;
+      },
+    );
+  }
+
+  assert.throws(
+    () =>
+      loadConfig({
+        ...BASE_ENVIRONMENT,
+        RESEND_API_KEY: "   ",
+      }),
+    /RESEND_API_KEY/,
+  );
+
+  assert.throws(
+    () =>
+      loadConfig({
+        ...BASE_ENVIRONMENT,
+        AUTH_EMAIL_FROM: "   ",
+      }),
+    /AUTH_EMAIL_FROM/,
+  );
 });
