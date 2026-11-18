@@ -5,7 +5,10 @@ import {
   DEFAULT_GEMINI_TIMEOUT_MS,
 } from "./ai/reply-draft.js";
 import { isValidProxyIpOrCidr } from "./auth/config.js";
-import { loadMetaOutboundConfig } from "./outbound/meta-config.js";
+import {
+  loadGraphApiVersion,
+  loadMetaOutboundConfig,
+} from "./outbound/meta-config.js";
 import { loadWhatsAppConfig } from "./whatsapp/config.js";
 import {
   loadEmbeddedSignupConfig,
@@ -77,6 +80,7 @@ const environmentSchema = z
       .enum(["development", "test", "production"])
       .default("development"),
     PORT: z.coerce.number().int().min(1).max(65_535).default(4000),
+    HOST: z.string().trim().min(1).default("127.0.0.1"),
     DATABASE_URL: z.string().refine(isPostgresConnectionString, {
       message:
         "must be a valid postgres:// or postgresql:// connection URL with a host",
@@ -165,6 +169,7 @@ const environmentSchema = z
 export type ServerConfig = Readonly<{
   nodeEnv: "development" | "test" | "production";
   port: number;
+  host: string;
   databaseUrl: string;
   betterAuthSecret: string;
   betterAuthUrl: string;
@@ -258,7 +263,18 @@ function parseTrustedProxyCidrs(value: string | undefined): string[] {
 export function loadConfig(
   environment: NodeJS.ProcessEnv = process.env,
 ): ServerConfig {
+  try {
+    loadGraphApiVersion(environment);
+  } catch (error) {
+    throw new ConfigError(
+      `Invalid server environment: ${
+        error instanceof Error ? error.message : "META_GRAPH_API_VERSION is invalid"
+      }`,
+    );
+  }
+
   loadMetaOutboundConfig(environment);
+
   const embeddedSignup = loadEmbeddedSignupConfig(environment);
   const onboardingRateLimit = loadOnboardingRateLimitConfig(environment);
 
@@ -315,6 +331,7 @@ export function loadConfig(
   return {
     nodeEnv: result.data.NODE_ENV,
     port: result.data.PORT,
+    host: result.data.HOST,
     databaseUrl: result.data.DATABASE_URL,
     betterAuthSecret: result.data.BETTER_AUTH_SECRET,
     betterAuthUrl,

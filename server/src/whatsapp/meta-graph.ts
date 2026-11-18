@@ -11,6 +11,22 @@
 const DEFAULT_BASE_URL = "https://graph.facebook.com";
 const DEFAULT_TIMEOUT_MS = 10_000;
 const MAX_DESCRIPTION_LENGTH = 300;
+const GRAPH_NUMERIC_ID_PATTERN = /^\d{5,32}$/;
+const GRAPH_API_VERSION_PATTERN = /^v\d{1,3}\.\d{1,3}$/;
+
+/**
+ * Meta identifiers and the API version are interpolated into request paths.
+ * Anything that is not strictly numeric (or `vNN.N`) could rewrite the path or
+ * add a query string, sending the access token to an unintended endpoint.
+ */
+function assertGraphId(value: string, label: string): void {
+  if (!GRAPH_NUMERIC_ID_PATTERN.test(value)) {
+    throw new MetaGraphError(
+      `${label} must be a numeric Meta identifier.`,
+      "rejected",
+    );
+  }
+}
 
 export type MetaGraphErrorKind =
   | "rejected"
@@ -124,6 +140,13 @@ export class MetaGraphClient {
   constructor(options: MetaGraphClientOptions) {
     this.#appId = options.appId;
     this.#appSecret = options.appSecret;
+    if (!GRAPH_API_VERSION_PATTERN.test(options.graphApiVersion)) {
+      throw new MetaGraphError(
+        'The Graph API version must look like "v21.0".',
+        "rejected",
+      );
+    }
+
     this.#graphApiVersion = options.graphApiVersion;
     this.#fetch = options.fetchImplementation ?? globalThis.fetch;
     this.#timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
@@ -205,6 +228,7 @@ export class MetaGraphClient {
   }
 
   async getWaba(accessToken: string, wabaId: string): Promise<MetaWaba> {
+    assertGraphId(wabaId, "The Messaging account ID");
     const data = await this.#requestJson(wabaId, {
       accessToken,
       query: { fields: "id,name" },
@@ -226,6 +250,7 @@ export class MetaGraphClient {
     accessToken: string,
     wabaId: string,
   ): Promise<MetaPhoneNumber[]> {
+    assertGraphId(wabaId, "The Messaging account ID");
     const data = await this.#requestJson(`${wabaId}/phone_numbers`, {
       accessToken,
       query: { fields: "id,display_phone_number,verified_name" },
@@ -257,6 +282,7 @@ export class MetaGraphClient {
   }
 
   async subscribeApp(accessToken: string, wabaId: string): Promise<void> {
+    assertGraphId(wabaId, "The Messaging account ID");
     await this.#requestJson(`${wabaId}/subscribed_apps`, {
       method: "POST",
       accessToken,
@@ -267,6 +293,7 @@ export class MetaGraphClient {
     accessToken: string,
     wabaId: string,
   ): Promise<string[]> {
+    assertGraphId(wabaId, "The Messaging account ID");
     const data = await this.#requestJson(`${wabaId}/subscribed_apps`, {
       accessToken,
     });

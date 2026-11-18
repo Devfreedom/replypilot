@@ -281,6 +281,7 @@ type TestAuthOptions = Readonly<{
   trustedOrigins?: string[];
   rateLimit?: TestAuthRateLimit;
   trustedProxyCidrs?: string[];
+  nodeEnv?: "development" | "test" | "production";
 }>;
 
 let pool: Pool;
@@ -317,6 +318,7 @@ async function startServer(
       // tripping Better Auth's sign-up rule during unrelated tests.
       rateLimit: authOptions.rateLimit ?? { enabled: false },
       trustedProxyCidrs: authOptions.trustedProxyCidrs,
+      nodeEnv: authOptions.nodeEnv,
     },
   }).listen(0, "127.0.0.1");
   await once(appServer, "listening");
@@ -16859,4 +16861,202 @@ test("D4 concurrent mid-claim STOP webhook interleaving cancels sending row with
       await stopServer(app.server);
     }
   });
+});
+
+test("H-03 state-changing API routes reject cross-site requests and accept trusted or header-less callers", async () => {
+  const owner = requireSession();
+  const draftId = randomUUID();
+  const sendPath = `/api/reply-drafts/${draftId}/send`;
+
+  // Cross-origin (untrusted) browser requests are rejected before any handler runs.
+  for (const [path, method, body] of [
+    [sendPath, "POST", undefined],
+    [`/api/leads/${randomUUID()}/reply-drafts`, "POST", undefined],
+    [`/api/leads/${randomUUID()}/draft-reply`, "POST", undefined],
+    ["/api/settings/messaging", "PATCH", { defaultApprovalSendPolicy: "approve_only" }],
+    [`/api/whatsapp/customers/${randomUUID()}/suppression`, "DELETE", undefined],
+    ["/api/business/profile", "POST", {}],
+  ] as const) {
+    const response = await requestAs(owner, path, method, body, {
+      origin: "https://attacker.example",
+    });
+    assert.equal(response.status, 403, `${method} ${path} must reject a foreign origin`);
+    assert.deepEqual(await readJson<{ error: string; code: string }>(response), {
+      error: "Origin not allowed.",
+      code: "origin_not_allowed",
+    });
+  }
+
+  // The opaque "null" origin and malformed values are rejected too.
+  for (const origin of ["null", "not a url", "http://127.0.0.1:3000/path"]) {
+    const response = await requestAs(owner, sendPath, "POST", undefined, { origin });
+    assert.equal(response.status, 403, `origin "${origin}" must be rejected`);
+  }
+
+  // A no-Origin request that the browser labels cross-site is rejected.
+  for (const site of ["cross-site", "same-site"]) {
+    const response = await requestAs(owner, sendPath, "POST", undefined, {
+      "sec-fetch-site": site,
+    });
+    assert.equal(response.status, 403, `Sec-Fetch-Site ${site} must be rejected`);
+  }
+
+  // Trusted origins, same-origin fetch metadata, and header-less callers reach
+  // the handler (the draft does not exist, so the handler answers 404).
+  for (const headers of [
+    { origin: TEST_AUTH_ORIGIN },
+    { origin: "HTTP://127.0.0.1:3000" },
+    { "sec-fetch-site": "same-origin" },
+    { "sec-fetch-site": "none" },
+    {},
+  ] as Array<Record<string, string>>) {
+    const response = await requestAs(owner, sendPath, "POST", undefined, headers);
+    assert.equal(response.status, 404, `${JSON.stringify(headers)} must reach the handler`);
+  }
+
+  // Reads are never subject to the origin guard.
+  const read = await requestAs(owner, "/api/workspace", "GET", undefined, {
+    origin: "https://attacker.example",
+  });
+  assert.equal(read.status, 200);
+});
+
+test("M-02 a multi-value X-Forwarded-Proto behind a trusted proxy uses the rightmost hop and never crashes Better Auth", async () => {
+  const proxied = await startServer(pool, undefined, {
+    trustedProxyCidrs: ["127.0.0.1/32", "::1/128"],
+  });
+
+  try {
+    const sessionStatus = async (proto: string) => {
+      const response = await nativeFetch(`${proxied.baseUrl}/api/auth/get-session`, {
+        headers: {
+          cookie: requireSession().cookie,
+          "x-forwarded-for": "198.51.100.77",
+          "x-forwarded-proto": proto,
+        },
+      });
+      return {
+        status: response.status,
+        hsts: response.headers.get("strict-transport-security"),
+      };
+    };
+
+    const rightmostHttps = await sessionStatus("http, https");
+    assert.equal(rightmostHttps.status, 200);
+    assert.equal(rightmostHttps.hsts, "max-age=31536000");
+
+    const rightmostHttp = await sessionStatus("https, http");
+    assert.equal(rightmostHttp.status, 200);
+    assert.equal(rightmostHttp.hsts, null);
+
+    const uppercase = await sessionStatus("HTTPS");
+    assert.equal(uppercase.status, 200);
+    assert.equal(uppercase.hsts, "max-age=31536000");
+
+    for (const garbage of ["gopher", "https, javascript", "https,", ""]) {
+      const result = await sessionStatus(garbage);
+      assert.equal(result.status, 200, `"${garbage}" must not break the auth handler`);
+      assert.equal(result.hsts, null, `"${garbage}" must not enable HSTS`);
+    }
+  } finally {
+    await stopServer(proxied.server);
+  }
+
+  // Without a trusted proxy the header is ignored entirely.
+  const direct = await nativeFetch(`${baseUrl}/api/auth/get-session`, {
+    headers: {
+      cookie: requireSession().cookie,
+      "x-forwarded-proto": "https",
+    },
+  });
+  assert.equal(direct.status, 200);
+  assert.equal(direct.headers.get("strict-transport-security"), null);
+});
+
+test("M-11 production disconnect accepts trusted origins when Embedded Signup is not configured", async () => {
+  const owner = requireSession();
+  const previousAllowed = process.env.META_ONBOARDING_ALLOWED_ORIGIN;
+  delete process.env.META_ONBOARDING_ALLOWED_ORIGIN;
+
+  const production = await startServer(pool, undefined, {
+    nodeEnv: "production",
+    trustedOrigins: [TEST_AUTH_ORIGIN, "https://app.example.test"],
+  });
+
+  try {
+    const connectionId = await withCredentialEncryption(() =>
+      registerTestConnection({
+        workspaceId: owner.workspace.id,
+        phoneNumberId: "106540000000777",
+        accessToken: "EAABc0M11DisconnectTrustedOriginTokenSecret123",
+      }),
+    );
+    const path = `/api/whatsapp/connections/${connectionId}/disconnect`;
+
+    const foreign = await requestOn(production, owner, path, "POST", undefined, {
+      origin: "https://attacker.example",
+    });
+    assert.equal(foreign.status, 403);
+
+    const missing = await requestOn(production, owner, path, "POST", undefined, {
+      origin: null,
+    });
+    assert.equal(missing.status, 403);
+
+    const trusted = await requestOn(production, owner, path, "POST", undefined, {
+      origin: "https://app.example.test",
+    });
+    assert.equal(trusted.status, 200);
+    assert.equal(
+      (await readJson<{ connection: { status: string } }>(trusted)).connection.status,
+      "disconnected",
+    );
+  } finally {
+    if (previousAllowed === undefined) {
+      delete process.env.META_ONBOARDING_ALLOWED_ORIGIN;
+    } else {
+      process.env.META_ONBOARDING_ALLOWED_ORIGIN = previousAllowed;
+    }
+
+    await stopServer(production.server);
+  }
+});
+
+test("C-01 protection summary reports connection-backed sending when the global switch is on without legacy variables", async () => {
+  const previous = new Map(
+    META_OUTBOUND_ENV_KEYS.map((key) => [key, process.env[key]] as const),
+  );
+
+  try {
+    for (const key of META_OUTBOUND_ENV_KEYS) {
+      delete process.env[key];
+    }
+
+    process.env.META_OUTBOUND_ENABLED = "true";
+    process.env.META_GRAPH_API_VERSION = "v21.0";
+
+    const response = await requestAs(
+      requireSession(),
+      "/api/whatsapp/protection",
+    );
+    assert.equal(response.status, 200);
+    const payload = await readJson<ProtectionPayload>(response);
+
+    assert.equal(payload.meta.enabled, true);
+    assert.equal(payload.meta.testWorkspaceConfigured, false);
+    assert.equal(payload.meta.workspaceAllowlistedForMeta, false);
+    assert.equal(payload.meta.senderPhoneNumberId, null);
+    assert.equal(payload.meta.productionBlocked, false);
+    assert.match(payload.meta.productionProtection, /verified WhatsApp connection/);
+  } finally {
+    for (const key of META_OUTBOUND_ENV_KEYS) {
+      const value = previous.get(key);
+
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+  }
 });

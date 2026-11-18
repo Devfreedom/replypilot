@@ -892,3 +892,121 @@ test("C1 /api/auth/request-password-reset invokes Resend sender only for existin
     await stopServer(server);
   }
 });
+
+test("M-09 request-password-reset returns the same 200 whether or not the email provider fails", async () => {
+  const attempted: string[] = [];
+  const { server, baseUrl } = await startAuthTestServer(pool, {
+    nodeEnv: "production",
+    sendResetPasswordEmail: (payload) => {
+      attempted.push(payload.user.email);
+      throw new Error(`provider down for ${payload.user.email} ${payload.token}`);
+    },
+  });
+  const originalError = console.error;
+  const logged: string[] = [];
+  console.error = (...args: unknown[]) => {
+    logged.push(args.map((arg) => String(arg)).join(" "));
+  };
+
+  try {
+    const existingEmail = `m09-existing-${randomUUID()}@example.test`;
+    const missingEmail = `m09-missing-${randomUUID()}@example.test`;
+    await signUpUser(baseUrl, existingEmail);
+
+    const request = (email: string) =>
+      fetch(`${baseUrl}/api/auth/request-password-reset`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          origin: TEST_AUTH_ORIGIN,
+        },
+        body: JSON.stringify({ email, redirectTo: "/reset-password" }),
+      });
+
+    const existing = await request(existingEmail);
+    const missing = await request(missingEmail);
+
+    assert.deepEqual(attempted, [existingEmail]);
+    assert.equal(existing.status, 200);
+    assert.equal(missing.status, 200);
+    assert.deepEqual(await existing.json(), await missing.json());
+
+    const combined = logged.join("\n");
+    assert.equal(combined.includes(existingEmail), false);
+    assert.equal(combined.includes("provider down"), false);
+  } finally {
+    console.error = originalError;
+    await stopServer(server);
+  }
+});
+
+test("M-01 an empty X-Forwarded-For hop falls back to the socket IP instead of trusting a spoofed token to its left", async () => {
+  const { server, baseUrl } = await startAuthTestServer(pool, {
+    nodeEnv: "production",
+    rateLimit: { enabled: true, window: 60, max: 100 },
+    trustedProxyCidrs: ["127.0.0.1/32", "::1/128"],
+  });
+
+  try {
+    const statuses: number[] = [];
+
+    // Rotating the left token must not create a new rate-limit bucket. Before
+    // the fix the empty hop was dropped and the rotated token was trusted.
+    for (let attempt = 0; attempt < 11; attempt += 1) {
+      const response = await fetch(`${baseUrl}/api/auth/sign-in/email`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          origin: TEST_AUTH_ORIGIN,
+          "x-forwarded-for": `198.51.100.${100 + attempt}, , 127.0.0.1`,
+        },
+        body: JSON.stringify({
+          email: "m01-nobody@example.test",
+          password: "not-the-password-123",
+        }),
+      });
+      statuses.push(response.status);
+    }
+
+    assert.equal(statuses.slice(0, 10).includes(429), false);
+    assert.equal(statuses[10], 429);
+  } finally {
+    await stopServer(server);
+  }
+});
+
+test("M-01 a zone-indexed X-Forwarded-For client falls back to the socket IP", async () => {
+  const { server, baseUrl } = await startAuthTestServer(pool, {
+    nodeEnv: "production",
+    rateLimit: { enabled: true, window: 60, max: 100 },
+    trustedProxyCidrs: ["127.0.0.1/32", "::1/128"],
+  });
+
+  try {
+    // `/sign-up/email` allows five attempts per client; the socket bucket is
+    // shared by every request that fails IP validation.
+    const statuses: number[] = [];
+
+    for (let attempt = 0; attempt < 6; attempt += 1) {
+      const response = await fetch(`${baseUrl}/api/auth/sign-up/email`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          origin: TEST_AUTH_ORIGIN,
+          "x-forwarded-for": `2001:db8::${attempt + 1}%eth0`,
+        },
+        body: JSON.stringify({
+          email: `m01-zone-${randomUUID()}@example.test`,
+          password: "replypilot-test-password",
+          name: "Zone Index",
+        }),
+      });
+      statuses.push(response.status);
+    }
+
+    assert.equal(statuses.slice(0, 5).includes(429), false);
+    assert.equal(statuses[5], 429);
+  } finally {
+    await stopServer(server);
+  }
+});

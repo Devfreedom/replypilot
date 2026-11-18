@@ -19,6 +19,7 @@ import { createMetaGraphClient } from "./meta-graph.js";
 import {
   describeOnboardingOriginRejection,
   isOnboardingOriginAllowed,
+  normalizeOrigin,
   resolveOnboardingOriginPolicy,
 } from "./onboarding-origin.js";
 import {
@@ -78,12 +79,17 @@ export function createWhatsAppConnectionsRouter({
   embeddedSignup = null,
   metaFetch,
   onboardingRateLimit,
+  trustedOrigins = [],
+  nodeEnv,
 }: {
   pool: Pool;
   auth: AuthInstance;
   embeddedSignup?: EmbeddedSignupConfig | null;
   metaFetch?: typeof fetch;
   onboardingRateLimit?: OnboardingRateLimitConfig | null;
+  /** Origins the deployment trusts; the fallback when no onboarding origin is set. */
+  trustedOrigins?: readonly string[];
+  nodeEnv?: "development" | "test" | "production";
 }): Router {
   const router = Router();
   const requireMember = createRequireWorkspace({
@@ -136,9 +142,24 @@ export function createWhatsAppConnectionsRouter({
     response: Response,
   ): boolean {
     const originPolicy =
-      embeddedSignup?.originPolicy ?? resolveOnboardingOriginPolicy();
+      embeddedSignup?.originPolicy ??
+      resolveOnboardingOriginPolicy(
+        nodeEnv ? { ...process.env, NODE_ENV: nodeEnv } : process.env,
+      );
 
-    if (!isOnboardingOriginAllowed(originPolicy, request.get("origin"))) {
+    // Disconnecting is an owner action that does not need Embedded Signup. When
+    // no onboarding origin is configured, fall back to the origins the
+    // deployment already trusts instead of rejecting every production request.
+    const requestOrigin = normalizeOrigin(request.get("origin"));
+    const trustedFallback =
+      originPolicy.allowedOrigin === null &&
+      requestOrigin !== null &&
+      trustedOrigins.some((origin) => normalizeOrigin(origin) === requestOrigin);
+
+    if (
+      !trustedFallback &&
+      !isOnboardingOriginAllowed(originPolicy, request.get("origin"))
+    ) {
       response.status(403).json({
         error: describeOnboardingOriginRejection(originPolicy),
         code: "origin_not_allowed",

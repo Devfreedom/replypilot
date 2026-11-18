@@ -15,6 +15,7 @@ import {
 } from "../src/outbound/meta-config.js";
 import { ConnectionAwareMetaProvider } from "../src/outbound/meta-connection-provider.js";
 import { MetaWhatsAppCloudProvider } from "../src/outbound/meta-provider.js";
+import { MetaGraphClient, MetaGraphError } from "../src/whatsapp/meta-graph.js";
 import { loadConfig } from "../src/config.js";
 import {
   claimQueuedOutboundMessages,
@@ -2810,4 +2811,181 @@ test("M7 premature delivered webhook arriving before markOutboundSent is reconci
   assert.equal(events.rows.length, 1);
   assert.equal(events.rows[0]?.processing_outcome, "processed");
   assert.equal(events.rows[0]?.outbound_message_id, outboundId);
+});
+
+// ─── Red-team hardening Batch 1 (C-01, M-08) ────────────────────────────────
+
+test("C-01 META_OUTBOUND_ENABLED=true without legacy single-workspace variables enables connection-backed sending, even in production", () => {
+  for (const nodeEnv of ["development", "test", "production"]) {
+    assert.equal(
+      loadMetaOutboundConfig({
+        NODE_ENV: nodeEnv,
+        META_OUTBOUND_ENABLED: "true",
+        META_GRAPH_API_VERSION: "v21.0",
+      }),
+      null,
+    );
+  }
+
+  // Blank legacy values count as unset, and the version may be omitted.
+  assert.equal(
+    loadMetaOutboundConfig({
+      NODE_ENV: "production",
+      META_OUTBOUND_ENABLED: "true",
+      META_ACCESS_TOKEN: "   ",
+      META_TEST_RECIPIENT_PHONE_NUMBERS: "",
+    }),
+    null,
+  );
+
+  // A malformed Graph API version still fails fast.
+  assert.throws(
+    () =>
+      loadMetaOutboundConfig({
+        NODE_ENV: "production",
+        META_OUTBOUND_ENABLED: "true",
+        META_GRAPH_API_VERSION: "21.0",
+      }),
+    /META_GRAPH_API_VERSION/,
+  );
+
+  // Setting any legacy variable opts into the legacy checks.
+  assert.throws(
+    () =>
+      loadMetaOutboundConfig({
+        NODE_ENV: "production",
+        META_OUTBOUND_ENABLED: "true",
+        META_ACCESS_TOKEN: "EAABc0FakeTestAccessTokenAtLeast20Characters",
+      }),
+    /disabled in production/i,
+  );
+  assert.throws(
+    () =>
+      loadMetaOutboundConfig({
+        NODE_ENV: "development",
+        META_OUTBOUND_ENABLED: "true",
+        META_ACCESS_TOKEN: "EAABc0FakeTestAccessTokenAtLeast20Characters",
+      }),
+    /META_OUTBOUND_TEST_WORKSPACE_ID|WHATSAPP_SENDER_PHONE_NUMBER_ID/,
+  );
+
+  // The disabled switch is unchanged.
+  assert.equal(
+    loadMetaOutboundConfig({
+      NODE_ENV: "production",
+      META_OUTBOUND_ENABLED: "false",
+    }),
+    null,
+  );
+});
+
+test("C-01 loadConfig starts in production with the global switch on and no legacy variables, and rejects a malformed Graph API version", () => {
+  const environment = {
+    NODE_ENV: "production",
+    DATABASE_URL: "postgres://replypilot:replypilot@localhost:5432/replypilot",
+    BETTER_AUTH_SECRET: "replypilot-production-test-secret-0123456789",
+    BETTER_AUTH_URL: "https://replypilot.example.test",
+    RESEND_API_KEY: "re_test_placeholder_0123456789",
+    AUTH_EMAIL_FROM: "ReplyPilot <noreply@replypilot.example.test>",
+    META_OUTBOUND_ENABLED: "true",
+    META_GRAPH_API_VERSION: "v21.0",
+  };
+
+  assert.doesNotThrow(() => loadConfig(environment));
+
+  for (const enabled of ["true", "false"]) {
+    assert.throws(
+      () =>
+        loadConfig({
+          ...environment,
+          META_OUTBOUND_ENABLED: enabled,
+          META_GRAPH_API_VERSION: "21.0",
+        }),
+      /Invalid server environment:.*META_GRAPH_API_VERSION/,
+    );
+  }
+});
+
+test("M-08 MetaGraphClient rejects non-numeric account IDs and malformed versions before any request is made", async () => {
+  let calls = 0;
+  const fetchImplementation: typeof fetch = async () => {
+    calls += 1;
+    return new Response("{}", { status: 200 });
+  };
+  const client = new MetaGraphClient({
+    appId: "123456789012345",
+    appSecret: "replypilot-test-meta-app-secret-0123456789",
+    graphApiVersion: "v21.0",
+    fetchImplementation,
+  });
+
+  for (const wabaId of [
+    "../me",
+    "123456/../me",
+    "123456?fields=accounts",
+    "123456#",
+    "1234",
+    "abc12345",
+    "",
+  ]) {
+    for (const call of [
+      () => client.getWaba("token", wabaId),
+      () => client.listPhoneNumbers("token", wabaId),
+      () => client.subscribeApp("token", wabaId),
+      () => client.listSubscribedAppIds("token", wabaId),
+    ]) {
+      await assert.rejects(
+        call,
+        (error: unknown) =>
+          error instanceof MetaGraphError && error.kind === "rejected",
+        `Expected "${wabaId}" to be rejected`,
+      );
+    }
+  }
+
+  assert.equal(calls, 0);
+
+  for (const graphApiVersion of ["21.0", "v21", "v21.0/../x", "../v21.0", ""]) {
+    assert.throws(
+      () =>
+        new MetaGraphClient({
+          appId: "123456789012345",
+          appSecret: "replypilot-test-meta-app-secret-0123456789",
+          graphApiVersion,
+          fetchImplementation,
+        }),
+      MetaGraphError,
+      `Expected version "${graphApiVersion}" to be rejected`,
+    );
+  }
+});
+
+test("M-08 ConnectionAwareMetaProvider refuses a malformed Graph API version before calling Meta", async () => {
+  const config = step8MetaConfig();
+  const { conversationId } = await createQueuedMetaOutbound();
+  let calls = 0;
+
+  const provider = new ConnectionAwareMetaProvider(pool, {
+    enabled: true,
+    legacyConfig: { ...config, graphApiVersion: "v21.0/../me" },
+    fetchImplementation: async () => {
+      calls += 1;
+      return new Response("{}", { status: 200 });
+    },
+  });
+
+  await assert.rejects(
+    () =>
+      provider.send({
+        workspaceId: TEST_WORKSPACE_ID,
+        conversationId,
+        content: "Version injection",
+        idempotencyKey: `m08-${randomUUID()}`,
+        recipientPhone: TEST_CUSTOMER_PHONE,
+      }),
+    (error: unknown) =>
+      error instanceof OutboundProviderError &&
+      /Graph API version/.test(error.message),
+  );
+  assert.equal(calls, 0);
 });

@@ -27,12 +27,15 @@ import { createWhatsAppConnectionsRouter } from "./whatsapp/connections-routes.j
 import type { EmbeddedSignupConfig } from "./whatsapp/embedded-signup-config.js";
 import { createWhatsAppInboxRouter } from "./whatsapp/inbox-routes.js";
 import { createWhatsAppOperationsRouter } from "./whatsapp/operations-routes.js";
+import { normalizeOrigin } from "./whatsapp/onboarding-origin.js";
 import type { OnboardingRateLimitConfig } from "./whatsapp/onboarding-rate-limit.js";
 import type { WhatsAppIntegrationConfig } from "./whatsapp/types.js";
 import { createWhatsAppWebhookRouter } from "./whatsapp/webhook-routes.js";
 import { createWorkspaceRouter } from "./workspaces/routes.js";
 
 const JSON_BODY_LIMIT = "10kb";
+const STATE_CHANGING_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
+const SAME_SITE_FETCH_SITES = new Set(["same-origin", "none"]);
 const AUTH_BODY_LIMIT_BYTES = 16_384;
 
 function enforceAuthBodyLimit(
@@ -226,10 +229,10 @@ export function createApp({
     let resolvedClientIp: string | null = null;
 
     if (typeof headerValue === "string") {
-      const candidates = headerValue
-        .split(",")
-        .map((entry) => entry.trim())
-        .filter(Boolean);
+      // Empty hops (`a, , b` or a trailing comma) are malformed: they must
+      // stop the right-to-left walk instead of being skipped, otherwise a
+      // client-supplied token to their left would be trusted.
+      const candidates = headerValue.split(",").map((entry) => entry.trim());
 
       for (let i = candidates.length - 1; i >= 0; i -= 1) {
         const candidateIp = normalizeIpAddress(candidates[i]);
@@ -253,6 +256,25 @@ export function createApp({
       request.headers["x-forwarded-for"] = clientIp;
     } else {
       delete request.headers["x-forwarded-for"];
+    }
+
+    // A multi-hop proxy chain can produce `https, http`. Express reads the
+    // leftmost token while Better Auth builds a URL from the whole value, so
+    // keep only the rightmost token (the hop nearest to this server) and drop
+    // anything that is not exactly http or https.
+    const rawForwardedProto = request.headers["x-forwarded-proto"];
+    const protoValue = Array.isArray(rawForwardedProto)
+      ? rawForwardedProto.join(",")
+      : rawForwardedProto;
+    const lastProto =
+      typeof protoValue === "string"
+        ? protoValue.split(",").pop()?.trim().toLowerCase()
+        : undefined;
+
+    if (lastProto === "http" || lastProto === "https") {
+      request.headers["x-forwarded-proto"] = lastProto;
+    } else {
+      delete request.headers["x-forwarded-proto"];
     }
 
     next();
@@ -286,6 +308,57 @@ export function createApp({
     "/api/webhooks/whatsapp",
     createWhatsAppWebhookRouter({ pool, config: whatsapp }),
   );
+
+  // Cookie-authenticated state-changing API requests must come from an origin
+  // this deployment trusts. Better Auth enforces the same rule for /api/auth;
+  // this covers every other route, including body-optional POSTs that a
+  // cross-site form or `no-cors` fetch can send without a CORS preflight.
+  // A request with no Origin header is only rejected when the browser itself
+  // says it is cross-site (`Sec-Fetch-Site`), so server-to-server callers and
+  // older clients that send neither header keep working.
+  const allowedRequestOrigins = new Set<string>();
+
+  for (const candidate of [
+    authOptions.baseURL,
+    ...(authOptions.trustedOrigins ?? []),
+    embeddedSignup?.originPolicy?.allowedOrigin,
+  ]) {
+    const normalized = normalizeOrigin(candidate);
+
+    if (normalized) {
+      allowedRequestOrigins.add(normalized);
+    }
+  }
+
+  app.use("/api", (request: Request, response: Response, next: NextFunction) => {
+    if (!STATE_CHANGING_METHODS.has(request.method)) {
+      next();
+      return;
+    }
+
+    const origin = request.headers.origin;
+    let allowed: boolean;
+
+    if (origin !== undefined) {
+      const normalized = normalizeOrigin(origin);
+      allowed = normalized !== null && allowedRequestOrigins.has(normalized);
+    } else {
+      const fetchSite = request.headers["sec-fetch-site"];
+      allowed =
+        fetchSite === undefined ||
+        (typeof fetchSite === "string" &&
+          SAME_SITE_FETCH_SITES.has(fetchSite.trim().toLowerCase()));
+    }
+
+    if (!allowed) {
+      response
+        .status(403)
+        .json({ error: "Origin not allowed.", code: "origin_not_allowed" });
+      return;
+    }
+
+    next();
+  });
 
   app.use(express.json({ limit: JSON_BODY_LIMIT }));
 
@@ -326,6 +399,8 @@ export function createApp({
       embeddedSignup,
       metaFetch,
       onboardingRateLimit,
+      trustedOrigins: [...allowedRequestOrigins],
+      nodeEnv: authOptions.nodeEnv,
     }),
   );
   app.use(

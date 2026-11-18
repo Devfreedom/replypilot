@@ -49,6 +49,24 @@ export const META_OUTBOUND_ENV_KEYS = [
   "META_TEST_RECIPIENT_PHONE_NUMBERS",
 ] as const;
 
+/**
+ * Variables that describe the legacy single-test-workspace sender. They are
+ * only meaningful together; setting any of them opts into the legacy checks.
+ */
+const LEGACY_SINGLE_WORKSPACE_ENV_KEYS = [
+  "META_ACCESS_TOKEN",
+  "WHATSAPP_SENDER_PHONE_NUMBER_ID",
+  "META_OUTBOUND_TEST_WORKSPACE_ID",
+  "META_TEST_RECIPIENT_PHONE_NUMBERS",
+] as const;
+
+/** True when the global real-sending switch is on (`META_OUTBOUND_ENABLED=true`). */
+export function isMetaOutboundEnabled(
+  environment: NodeJS.ProcessEnv = process.env,
+): boolean {
+  return environment["META_OUTBOUND_ENABLED"]?.trim().toLowerCase() === "true";
+}
+
 export type MetaOutboundConfig = Readonly<{
   /**
    * Meta access token. Never exposed in logs, responses, or URLs.
@@ -83,6 +101,19 @@ export function loadMetaOutboundConfig(
   const enabledRaw = environment["META_OUTBOUND_ENABLED"]?.trim().toLowerCase();
 
   if (enabledRaw !== "true") {
+    return null;
+  }
+
+  // With no legacy single-workspace variable set, the global switch only
+  // enables sending through each workspace's own verified WhatsApp connection.
+  // There is no test workspace, sender, or allowlist to configure, so this is
+  // valid in production. A malformed Graph API version still fails fast.
+  const hasLegacyConfiguration = LEGACY_SINGLE_WORKSPACE_ENV_KEYS.some(
+    (key) => (environment[key]?.trim() ?? "") !== "",
+  );
+
+  if (!hasLegacyConfiguration) {
+    loadGraphApiVersion(environment);
     return null;
   }
 
