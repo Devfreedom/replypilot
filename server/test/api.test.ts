@@ -41,6 +41,8 @@ import {
   cancelOutboundClaim,
   claimQueuedOutboundMessages,
   isOutboundClaimAuthorized,
+  markOutboundSent,
+  markOutboundSentWhileConnectionActive,
   processOutboundDeliveryEvent,
 } from "../src/outbound/repository.js";
 import { updateReplyDraftText } from "../src/reply-drafts/repository.js";
@@ -95,6 +97,7 @@ import {
   WHATSAPP_CONNECTION_MISSING_CODE,
   WHATSAPP_CONNECTION_PENDING_CODE,
   WHATSAPP_CONNECTION_PENDING_MESSAGE,
+  WHATSAPP_CUSTOMER_SUPPRESSED_CODE,
   describeConnectionRejection,
 } from "../src/outbound/errors.js";
 import { ensureWorkspaceForUser } from "../src/workspaces/repository.js";
@@ -6153,14 +6156,7 @@ test("inbound opt-out suppresses idempotently and cancels queued sends without f
     );
     assert.equal(unrelatedSuppression.rows[0]?.count, 0);
 
-    const workerResult = await runOutboundWorkerOnce(
-      pool,
-      new MockOutboundMessageProvider(),
-      { staleAfterMs: 60_000 },
-    );
-    assert.equal(workerResult.cancelled, 1);
-    assert.equal(workerResult.claimed, 0);
-    const history = await pool.query<{
+    const historyBeforeWorker = await pool.query<{
       status: string;
       failure_reason: string | null;
     }>(
@@ -6171,8 +6167,19 @@ test("inbound opt-out suppresses idempotently and cancels queued sends without f
       `,
       [requireSession().workspace.id, draft.id],
     );
-    assert.equal(history.rows[0]?.status, "cancelled");
-    assert.match(history.rows[0]?.failure_reason ?? "", /suppressed/i);
+    assert.equal(historyBeforeWorker.rows[0]?.status, "cancelled");
+    assert.match(
+      historyBeforeWorker.rows[0]?.failure_reason ?? "",
+      /suppressed/i,
+    );
+
+    const workerResult = await runOutboundWorkerOnce(
+      pool,
+      new MockOutboundMessageProvider(),
+      { staleAfterMs: 60_000 },
+    );
+    assert.equal(workerResult.cancelled, 0);
+    assert.equal(workerResult.claimed, 0);
   } finally {
     await stopServer(app.server);
   }
@@ -6308,13 +6315,6 @@ test("a suppressed customer with an active service window is never sent to a pro
       },
     };
 
-    const workerResult = await runOutboundWorkerOnce(pool, countingProvider, {
-      staleAfterMs: 60_000,
-    });
-    assert.equal(workerResult.cancelled, 1);
-    assert.equal(workerResult.claimed, 0);
-    assert.equal(providerCalls, 0);
-
     const history = await pool.query<{
       status: string;
       failure_reason: string | null;
@@ -6328,6 +6328,13 @@ test("a suppressed customer with an active service window is never sent to a pro
     );
     assert.equal(history.rows[0]?.status, "cancelled");
     assert.match(history.rows[0]?.failure_reason ?? "", /suppressed/i);
+
+    const workerResult = await runOutboundWorkerOnce(pool, countingProvider, {
+      staleAfterMs: 60_000,
+    });
+    assert.equal(workerResult.cancelled, 0);
+    assert.equal(workerResult.claimed, 0);
+    assert.equal(providerCalls, 0);
   } finally {
     await stopServer(app.server);
   }
@@ -9678,16 +9685,22 @@ test("draft edits cancel queued work and worker cancels inactive conversations",
     sendPolicy: "approve_and_send",
     conversationId,
   });
-  assert.equal(reapproved.status, 409);
-  assert.match(
-    (await readJson<ErrorPayload>(reapproved)).error,
-    /cancelled.*new draft/i,
+  assert.equal(reapproved.status, 200);
+  const reapprovedBody = await readJson<{
+    draft: { status: string };
+    outboundMessage: OutboundMessageRecord | null;
+  }>(reapproved);
+  assert.equal(reapprovedBody.draft.status, "approved");
+  assert.equal(reapprovedBody.outboundMessage?.status, "queued");
+  assert.equal(
+    reapprovedBody.outboundMessage?.content,
+    "A changed reply that is not approved.",
   );
 
-  const draftsAfterConflict = await readJson<ReplyDraftsPayload>(
-    await listSavedDrafts(lead.id),
-  );
-  assert.equal(draftsAfterConflict.drafts[0]?.status, "draft");
+  const editedAgain = await patchSavedDraft(lead.id, draft.id, {
+    draftReply: "A second revised reply ready for manual send.",
+  });
+  assert.equal(editedAgain.status, 200);
 
   const reapprovedOnly = await approveSavedDraft(lead.id, draft.id, {
     status: "approved",
@@ -9695,12 +9708,25 @@ test("draft edits cancel queued work and worker cancels inactive conversations",
   });
   assert.equal(reapprovedOnly.status, 200);
 
-  const retry = await sendSavedDraft(draft.id);
-  assert.equal(retry.status, 409);
-  assert.match(
-    (await readJson<ErrorPayload>(retry)).error,
-    /draft content changed/i,
+  const manualRequeue = await sendSavedDraft(draft.id);
+  assert.equal(manualRequeue.status, 200);
+  const manualRequeueBody = await readJson<{
+    outboundMessage: OutboundMessageRecord;
+  }>(manualRequeue);
+  assert.equal(manualRequeueBody.outboundMessage.status, "queued");
+  assert.equal(
+    manualRequeueBody.outboundMessage.content,
+    "A second revised reply ready for manual send.",
   );
+
+  const sentRequeued = await runOutboundWorkerOnce(pool, provider, {
+    batchSize: 10,
+    baseRetryDelayMs: 0,
+    staleAfterMs: 60_000,
+  });
+  assert.equal(sentRequeued.sent, 1);
+  assert.equal(providerCalls, 1);
+  providerCalls = 0;
 
   const second = await createLeadWithConversation(
     { name: "Archived Conversation Lead" },
@@ -9756,6 +9782,27 @@ test("draft edits cancel queued work and worker cancels inactive conversations",
       WHERE workspace_id = $1 AND id = $2
     `,
     [requireSession().workspace.id, second.conversationId],
+  );
+
+  const requeuedAfterReopen = await sendSavedDraft(secondDraft.id);
+  assert.equal(requeuedAfterReopen.status, 200);
+  const requeuedAfterReopenBody = await readJson<{
+    outboundMessage: OutboundMessageRecord;
+  }>(requeuedAfterReopen);
+  assert.equal(requeuedAfterReopenBody.outboundMessage.status, "queued");
+
+  // Once an attempt has started and a row is cancelled afterwards, retry stays blocked.
+  await pool.query(
+    `
+      UPDATE outbound_messages
+      SET status = 'cancelled',
+          attempts = 1,
+          failure_reason = 'Cancelled after delivery attempt began.',
+          next_attempt_at = NULL,
+          updated_at = now()
+      WHERE workspace_id = $1 AND reply_draft_id = $2
+    `,
+    [requireSession().workspace.id, secondDraft.id],
   );
 
   const cancelledRetry = await sendSavedDraft(secondDraft.id);
@@ -10863,14 +10910,6 @@ test("M13 suppression API is workspace-scoped, cancels queued work, and restores
   );
   assert.equal(afterSuppression.protection.suppression?.reason, "opt_out");
 
-  const workerResult = await runOutboundWorkerOnce(
-    pool,
-    new MockOutboundMessageProvider(),
-    { staleAfterMs: 60_000 },
-  );
-  assert.equal(workerResult.cancelled, 1);
-  assert.equal(workerResult.claimed, 0);
-
   const history = await pool.query<{
     status: string;
     failure_reason: string | null;
@@ -10884,6 +10923,14 @@ test("M13 suppression API is workspace-scoped, cancels queued work, and restores
   );
   assert.equal(history.rows[0]?.status, "cancelled");
   assert.match(history.rows[0]?.failure_reason ?? "", /suppressed/i);
+
+  const workerResult = await runOutboundWorkerOnce(
+    pool,
+    new MockOutboundMessageProvider(),
+    { staleAfterMs: 60_000 },
+  );
+  assert.equal(workerResult.cancelled, 0);
+  assert.equal(workerResult.claimed, 0);
 
   const otherSession = await registerUser({
     email: `m13-isolation-${randomUUID()}@example.test`,
@@ -17332,4 +17379,246 @@ test("L-01 AAD-bound ciphertext swap across workspaces fails decryption while le
     );
     assert.equal(fetchCalls, 0);
   });
+});
+
+// ─── Batch 2B Hardening Regression Tests (H-06, M-03, H-07) ──────────────────
+
+test("H-06 rejects suppressed customers before queuing and allows queuing after unsuppress", async () => {
+  const { lead, conversationId } = await createLeadWithConversation();
+  const protectionRes = await fetch(
+    `${baseUrl}/api/whatsapp/conversations/${conversationId}/protection`,
+  );
+  assert.equal(protectionRes.status, 200);
+  const customerId = (
+    await readJson<{ protection: { customer: { id: string } } }>(protectionRes)
+  ).protection.customer.id;
+
+  const suppressRes = await jsonRequest(
+    `/api/whatsapp/customers/${customerId}/suppression`,
+    "PUT",
+    { reason: "opt_out", notes: "H-06 pre-queue block" },
+  );
+  assert.equal(suppressRes.status, 200);
+
+  const draft = await createSavedDraftPayload(lead.id);
+
+  // approve_and_send refuses before queuing when customer is suppressed
+  const blockedApprove = await approveSavedDraft(lead.id, draft.id, {
+    status: "approved",
+    sendPolicy: "approve_and_send",
+    conversationId,
+  });
+  assert.equal(blockedApprove.status, 409);
+  const blockedApproveBody = await readJson<{ error: string; code?: string }>(
+    blockedApprove,
+  );
+  assert.equal(blockedApproveBody.code, WHATSAPP_CUSTOMER_SUPPRESSED_CODE);
+  assert.match(blockedApproveBody.error, /suppressed/i);
+
+  const afterBlockedApprove = await pool.query<{ count: number }>(
+    "SELECT count(*)::int AS count FROM outbound_messages WHERE reply_draft_id = $1",
+    [draft.id],
+  );
+  assert.equal(afterBlockedApprove.rows[0]?.count, 0);
+
+  // approve_only still works (no customer-facing send), then manual send refuses with 409
+  const approvedOnly = await approveSavedDraft(lead.id, draft.id, {
+    status: "approved",
+    sendPolicy: "approve_only",
+  });
+  assert.equal(approvedOnly.status, 200);
+
+  const blockedManualSend = await sendSavedDraft(draft.id);
+  assert.equal(blockedManualSend.status, 409);
+  const blockedManualBody = await readJson<{ error: string; code?: string }>(
+    blockedManualSend,
+  );
+  assert.equal(blockedManualBody.code, WHATSAPP_CUSTOMER_SUPPRESSED_CODE);
+  assert.match(blockedManualBody.error, /suppressed/i);
+
+  const afterBlockedManual = await pool.query<{ count: number }>(
+    "SELECT count(*)::int AS count FROM outbound_messages WHERE reply_draft_id = $1",
+    [draft.id],
+  );
+  assert.equal(afterBlockedManual.rows[0]?.count, 0);
+
+  // Unsuppressing restores manual queuing
+  const unsuppressRes = await jsonRequest(
+    `/api/whatsapp/customers/${customerId}/suppression`,
+    "DELETE",
+  );
+  assert.equal(unsuppressRes.status, 200);
+
+  const allowedManualSend = await sendSavedDraft(draft.id);
+  assert.equal(allowedManualSend.status, 200);
+  const queuedBody = await readJson<OutboundMessagePayload>(allowedManualSend);
+  assert.equal(queuedBody.outboundMessage.status, "queued");
+});
+
+test("M-03 locks reply drafts against edit, unapprove, and regeneration once sent, delivered, read, or manual_review", async () => {
+  const workspaceId = requireSession().workspace.id;
+
+  for (const [index, lockedStatus] of (
+    ["sent", "delivered", "read", "manual_review"] as const
+  ).entries()) {
+    const waDigits = `234809000100${index}`;
+    const { lead, conversationId } = await createLeadWithConversation(
+      { name: `M-03 Locked Lead ${lockedStatus}` },
+      { senderWaId: waDigits, senderPhoneNumber: waDigits },
+    );
+    const draft = await createSavedDraftPayload(lead.id);
+    const approved = await approveSavedDraft(lead.id, draft.id, {
+      status: "approved",
+      sendPolicy: "approve_and_send",
+      conversationId,
+    });
+    assert.equal(approved.status, 200);
+
+    await pool.query(
+      `
+        UPDATE outbound_messages
+        SET status = $3,
+            provider_message_id = CASE WHEN $3 = 'manual_review' THEN NULL ELSE $4 END,
+            sent_at = CASE WHEN $3 = 'manual_review' THEN NULL ELSE now() END,
+            updated_at = now()
+        WHERE workspace_id = $1
+          AND reply_draft_id = $2
+      `,
+      [workspaceId, draft.id, lockedStatus, `wamid.m03.${lockedStatus}.${index}`],
+    );
+
+    const editRes = await patchSavedDraft(lead.id, draft.id, {
+      draftReply: "Attempted overwrite of sent history",
+    });
+    assert.equal(editRes.status, 409);
+    assert.equal(
+      (await readJson<{ code?: string }>(editRes)).code,
+      "outbound_in_progress",
+    );
+
+    const unapproveRes = await patchSavedDraft(lead.id, draft.id, {
+      status: "draft",
+    });
+    assert.equal(unapproveRes.status, 409);
+    assert.equal(
+      (await readJson<{ code?: string }>(unapproveRes)).code,
+      "outbound_in_progress",
+    );
+
+    const regenerateRes = await jsonRequest(
+      `/api/leads/${lead.id}/reply-drafts`,
+      "POST",
+      { draftId: draft.id },
+    );
+    assert.equal(regenerateRes.status, 409);
+    assert.equal(
+      (await readJson<{ code?: string }>(regenerateRes)).code,
+      "outbound_in_progress",
+    );
+  }
+});
+
+test("H-07 refreshes started_at on claim authorization and reconciles same-attempt manual_review to sent", async () => {
+  const first = await createLeadWithConversation(
+    { name: "H-07 Lead One" },
+    { senderWaId: "2348091112201", senderPhoneNumber: "2348091112201" },
+  );
+  const second = await createLeadWithConversation(
+    { name: "H-07 Lead Two" },
+    { senderWaId: "2348091112202", senderPhoneNumber: "2348091112202" },
+  );
+
+  const draft1 = await createSavedDraftPayload(first.lead.id);
+  const draft2 = await createSavedDraftPayload(second.lead.id);
+
+  assert.equal(
+    (
+      await approveSavedDraft(first.lead.id, draft1.id, {
+        status: "approved",
+        sendPolicy: "approve_and_send",
+        conversationId: first.conversationId,
+      })
+    ).status,
+    200,
+  );
+  assert.equal(
+    (
+      await approveSavedDraft(second.lead.id, draft2.id, {
+        status: "approved",
+        sendPolicy: "approve_and_send",
+        conversationId: second.conversationId,
+      })
+    ).status,
+    200,
+  );
+
+  const claimed = await claimQueuedOutboundMessages(pool, 10, "mock");
+  assert.equal(claimed.length, 2);
+  const row1 = claimed[0]!;
+  const row2 = claimed[1]!;
+
+  // Backdate row2's started_at as if row1 took a long time before row2 starts sending.
+  const staleStartedAt = new Date(Date.now() - 120_000);
+  await pool.query(
+    `
+      UPDATE outbound_messages
+      SET started_at = $2
+      WHERE id = $1
+    `,
+    [row2.id, staleStartedAt],
+  );
+
+  const authorized = await isOutboundClaimAuthorized(pool, row2);
+  assert.equal(authorized, true);
+
+  const refreshedRes = await pool.query<{ started_at: Date }>(
+    "SELECT started_at FROM outbound_messages WHERE id = $1",
+    [row2.id],
+  );
+  assert.ok(refreshedRes.rows[0]);
+  assert.ok(
+    refreshedRes.rows[0].started_at.getTime() > staleStartedAt.getTime() + 60_000,
+    "started_at should be refreshed close to now() before calling provider",
+  );
+
+  // Simulate stale sweep marking row1 and row2 as manual_review while provider response finishes.
+  await pool.query(
+    `
+      UPDATE outbound_messages
+      SET status = 'manual_review',
+          failure_reason = 'Provider outcome unknown; manual review required before retry.'
+      WHERE id = ANY($1::uuid[])
+    `,
+    [[row1.id, row2.id]],
+  );
+
+  // markOutboundSent reconciles same-attempt manual_review -> sent and clears failure_reason
+  const reconciled1 = await markOutboundSent(pool, row1, "wamid.h07.sent.1");
+  assert.ok(reconciled1);
+  assert.equal(reconciled1.status, "sent");
+  assert.equal(reconciled1.providerMessageId, "wamid.h07.sent.1");
+  assert.equal(reconciled1.failureReason, null);
+  assert.ok(reconciled1.sentAt);
+
+  // markOutboundSentWhileConnectionActive refuses a mismatched attempt count
+  const mismatched = await markOutboundSentWhileConnectionActive(
+    pool,
+    { ...row2, attempts: row2.attempts + 1 },
+    "wamid.h07.stale.attempt",
+  );
+  assert.deepEqual(mismatched, { kind: "not-updated" });
+
+  // markOutboundSentWhileConnectionActive reconciles same-attempt manual_review -> sent
+  const reconciled2 = await markOutboundSentWhileConnectionActive(
+    pool,
+    row2,
+    "wamid.h07.sent.2",
+  );
+  assert.equal(reconciled2.kind, "sent");
+  if (reconciled2.kind === "sent") {
+    assert.equal(reconciled2.message.status, "sent");
+    assert.equal(reconciled2.message.providerMessageId, "wamid.h07.sent.2");
+    assert.equal(reconciled2.message.failureReason, null);
+    assert.ok(reconciled2.message.sentAt);
+  }
 });

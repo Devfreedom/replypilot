@@ -12,7 +12,15 @@ import type {
 export type ReplyDraftMutationResult =
   | Readonly<{ kind: "updated"; draft: SavedReplyDraft }>
   | Readonly<{ kind: "not-found" }>
-  | Readonly<{ kind: "send-in-progress" }>;
+  | Readonly<{ kind: "send-in-progress" }>
+  | Readonly<{ kind: "outbound-in-progress" }>;
+
+const LOCKED_SENT_OUTBOUND_STATUSES = new Set([
+  "sent",
+  "delivered",
+  "read",
+  "manual_review",
+]);
 
 export const REPLY_DRAFT_COLUMNS = `
   id,
@@ -292,6 +300,15 @@ async function mutateReplyDraft(
     if (outboundLock.rows.some((row) => row.status === "sending")) {
       await client.query("ROLLBACK");
       return { kind: "send-in-progress" };
+    }
+
+    if (
+      outboundLock.rows.some((row) =>
+        LOCKED_SENT_OUTBOUND_STATUSES.has(row.status),
+      )
+    ) {
+      await client.query("ROLLBACK");
+      return { kind: "outbound-in-progress" };
     }
 
     const updated = await mutation(client);

@@ -198,6 +198,73 @@ export async function getOutboundMessageForDraft(
   return row ? mapOutboundMessageRow(row) : null;
 }
 
+export async function isConversationCustomerSuppressed(
+  client: Pool | PoolClient,
+  workspaceId: string,
+  conversationId: string,
+): Promise<boolean> {
+  const result = await client.query(
+    `
+      SELECT 1
+      FROM whatsapp_conversations AS conversation
+      JOIN customer_suppressions AS suppression
+        ON suppression.workspace_id = conversation.workspace_id
+       AND suppression.customer_id = conversation.customer_id
+      WHERE conversation.workspace_id = $1
+        AND conversation.id = $2
+      LIMIT 1
+    `,
+    [workspaceId, conversationId],
+  );
+
+  return result.rows.length > 0;
+}
+
+/**
+ * Re-queues an unattempted (`attempts = 0`) cancelled outbound record in-place
+ * with the newly approved draft content and active provider.
+ */
+export async function requeueUnattemptedCancelledOutbound(
+  client: PoolClient,
+  input: Readonly<{
+    workspaceId: string;
+    outboundMessageId: string;
+    conversationId: string;
+    content: string;
+    provider: string;
+  }>,
+): Promise<OutboundMessageRecord | null> {
+  const result = await client.query<OutboundMessageRow>(
+    `
+      UPDATE outbound_messages
+      SET conversation_id = $3,
+          content = $4,
+          provider = $5,
+          status = 'queued',
+          failure_reason = NULL,
+          queued_at = now(),
+          started_at = NULL,
+          next_attempt_at = now(),
+          updated_at = now()
+      WHERE workspace_id = $1
+        AND id = $2
+        AND status = 'cancelled'
+        AND attempts = 0
+      RETURNING ${OUTBOUND_MESSAGE_COLUMNS}
+    `,
+    [
+      input.workspaceId,
+      input.outboundMessageId,
+      input.conversationId,
+      input.content,
+      input.provider,
+    ],
+  );
+
+  const row = result.rows[0];
+  return row ? mapOutboundMessageRow(row) : null;
+}
+
 export async function insertQueuedOutboundMessage(
   client: PoolClient,
   input: Readonly<{
@@ -509,9 +576,9 @@ export async function claimQueuedOutboundMessages(
 }
 
 /**
- * Re-checks authorization after the claim commit. A draft can be edited while
- * the worker is between claim and provider call; in that window the claim must
- * be cancelled rather than sending content the owner no longer approved.
+ * Re-checks authorization after the claim commit and refreshes `started_at`
+ * immediately before calling the provider so sequential batch rows do not age
+ * out against `OUTBOUND_WORKER_STALE_MS` while earlier rows are being sent.
  */
 export async function isOutboundClaimAuthorized(
   pool: Pool,
@@ -519,19 +586,20 @@ export async function isOutboundClaimAuthorized(
 ): Promise<boolean> {
   const result = await pool.query(
     `
-      SELECT 1
-      FROM outbound_messages AS message
-      JOIN reply_drafts AS draft
-        ON draft.id = message.reply_draft_id
-       AND draft.workspace_id = message.workspace_id
-      JOIN whatsapp_conversations AS conversation
-        ON conversation.id = message.conversation_id
-       AND conversation.workspace_id = message.workspace_id
+      UPDATE outbound_messages AS message
+      SET started_at = now(),
+          updated_at = now()
+      FROM reply_drafts AS draft,
+           whatsapp_conversations AS conversation
       WHERE message.id = $1
         AND message.status = 'sending'
         AND message.attempts = $2
+        AND draft.id = message.reply_draft_id
+        AND draft.workspace_id = message.workspace_id
         AND draft.status = 'approved'
         AND draft.draft_reply = message.content
+        AND conversation.id = message.conversation_id
+        AND conversation.workspace_id = message.workspace_id
         AND conversation.status IN ('open', 'closed')
         AND NOT EXISTS (
           SELECT 1
@@ -539,12 +607,12 @@ export async function isOutboundClaimAuthorized(
           WHERE suppression.workspace_id = message.workspace_id
             AND suppression.customer_id = conversation.customer_id
         )
-      LIMIT 1
+      RETURNING message.id
     `,
     [row.id, row.attempts],
   );
 
-  return result.rows.length > 0;
+  return (result.rowCount ?? 0) > 0;
 }
 
 export async function cancelOutboundClaim(
@@ -594,13 +662,13 @@ export async function markOutboundSent(
         UPDATE outbound_messages
         SET status = 'sent',
             provider_message_id = $3,
-            sent_at = now(),
+            sent_at = COALESCE(sent_at, now()),
             failure_reason = NULL,
             next_attempt_at = NULL,
             updated_at = now()
         WHERE id = $1
-          AND status = 'sending'
           AND attempts = $2
+          AND status IN ('sending', 'manual_review')
         RETURNING ${OUTBOUND_MESSAGE_COLUMNS}, provider_status_at
       `,
       [row.id, row.attempts, providerMessageId],
@@ -779,13 +847,13 @@ export async function markOutboundSentWhileConnectionActive(
         UPDATE outbound_messages
         SET status = 'sent',
             provider_message_id = $3,
-            sent_at = now(),
+            sent_at = COALESCE(sent_at, now()),
             failure_reason = NULL,
             next_attempt_at = NULL,
             updated_at = now()
         WHERE id = $1
-          AND status = 'sending'
           AND attempts = $2
+          AND status IN ('sending', 'manual_review')
         RETURNING ${OUTBOUND_MESSAGE_COLUMNS}
       `,
       [row.id, row.attempts, providerMessageId],

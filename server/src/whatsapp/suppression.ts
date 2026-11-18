@@ -90,12 +90,13 @@ export async function getCustomerSuppression(
 }
 
 /**
- * Suppresses a customer within a workspace.
+ * Suppresses a customer within a workspace and cancels any queued outbound
+ * messages for that customer immediately.
  * Idempotent via the unique constraint on (workspace_id, customer_id).
  * Returns the existing or newly created suppression record.
  */
 export async function suppressCustomer(
-  pool: Pool | PoolClient,
+  poolOrClient: Pool | PoolClient,
   input: Readonly<{
     workspaceId: string;
     customerId: string;
@@ -104,40 +105,84 @@ export async function suppressCustomer(
     suppressedBy?: string | null;
   }>,
 ): Promise<SuppressionRecord> {
-  const result = await pool.query<SuppressionRow>(
-    `
-      INSERT INTO customer_suppressions (
-        workspace_id,
-        customer_id,
-        reason,
-        notes,
-        suppressed_by
-      )
-      VALUES ($1, $2, $3, $4, $5)
-      ON CONFLICT (workspace_id, customer_id)
-      DO UPDATE SET
-        reason = EXCLUDED.reason,
-        notes = COALESCE(EXCLUDED.notes, customer_suppressions.notes),
-        suppressed_at = EXCLUDED.suppressed_at,
-        suppressed_by = COALESCE(EXCLUDED.suppressed_by, customer_suppressions.suppressed_by)
-      RETURNING id, workspace_id, customer_id, reason, notes, suppressed_at, suppressed_by
-    `,
-    [
-      input.workspaceId,
-      input.customerId,
-      input.reason,
-      input.notes ?? null,
-      input.suppressedBy ?? null,
-    ],
-  );
+  const ownClient: PoolClient | null =
+    "totalCount" in poolOrClient ? await poolOrClient.connect() : null;
+  const client: PoolClient = ownClient ?? (poolOrClient as PoolClient);
 
-  const row = result.rows[0];
+  try {
+    if (ownClient) {
+      await ownClient.query("BEGIN");
+    }
 
-  if (!row) {
-    throw new Error("Customer suppression insert/update did not return a row.");
+    const result = await client.query<SuppressionRow>(
+      `
+        INSERT INTO customer_suppressions (
+          workspace_id,
+          customer_id,
+          reason,
+          notes,
+          suppressed_by
+        )
+        VALUES ($1, $2, $3, $4, $5)
+        ON CONFLICT (workspace_id, customer_id)
+        DO UPDATE SET
+          reason = EXCLUDED.reason,
+          notes = COALESCE(EXCLUDED.notes, customer_suppressions.notes),
+          suppressed_at = EXCLUDED.suppressed_at,
+          suppressed_by = COALESCE(EXCLUDED.suppressed_by, customer_suppressions.suppressed_by)
+        RETURNING id, workspace_id, customer_id, reason, notes, suppressed_at, suppressed_by
+      `,
+      [
+        input.workspaceId,
+        input.customerId,
+        input.reason,
+        input.notes ?? null,
+        input.suppressedBy ?? null,
+      ],
+    );
+
+    const row = result.rows[0];
+
+    if (!row) {
+      throw new Error(
+        "Customer suppression insert/update did not return a row.",
+      );
+    }
+
+    await client.query(
+      `
+        UPDATE outbound_messages AS message
+        SET status = 'cancelled',
+            failure_reason = 'Outbound send cancelled: customer is suppressed.',
+            next_attempt_at = NULL,
+            updated_at = now()
+        FROM whatsapp_conversations AS conversation
+        WHERE conversation.id = message.conversation_id
+          AND conversation.workspace_id = message.workspace_id
+          AND message.workspace_id = $1
+          AND conversation.customer_id = $2
+          AND message.status = 'queued'
+      `,
+      [input.workspaceId, input.customerId],
+    );
+
+    if (ownClient) {
+      await ownClient.query("COMMIT");
+    }
+
+    return mapRow(row);
+  } catch (error) {
+    if (ownClient) {
+      try {
+        await ownClient.query("ROLLBACK");
+      } catch {
+        // Preserve the original failure.
+      }
+    }
+    throw error;
+  } finally {
+    ownClient?.release();
   }
-
-  return mapRow(row);
 }
 
 /**

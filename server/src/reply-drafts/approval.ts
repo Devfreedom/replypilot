@@ -4,6 +4,8 @@ import { resolveOutboundProviderName } from "../outbound/meta-config.js";
 import {
   getOutboundMessageForDraft,
   insertQueuedOutboundMessage,
+  isConversationCustomerSuppressed,
+  requeueUnattemptedCancelledOutbound,
   resolveConversationForLead,
 } from "../outbound/repository.js";
 import { getConversationConnectionStatus } from "../whatsapp/connections.js";
@@ -35,6 +37,7 @@ export type ApproveReplyDraftResult =
   | Readonly<{ kind: "conversation-required" }>
   | Readonly<{ kind: "conversation-ambiguous" }>
   | Readonly<{ kind: "conversation-not-found" }>
+  | Readonly<{ kind: "customer-suppressed" }>
   | Readonly<{
       kind: "connection-unusable";
       code: string;
@@ -138,17 +141,30 @@ export async function approveReplyDraft(
         };
       }
 
+      if (
+        await isConversationCustomerSuppressed(
+          client,
+          input.workspaceId,
+          conversation.conversationId,
+        )
+      ) {
+        await client.query("ROLLBACK");
+        return { kind: "customer-suppressed" };
+      }
+
+      const resolvedProvider = await resolveOutboundProviderName(
+        client,
+        input.workspaceId,
+        conversation.conversationId,
+      );
+
       outboundMessage = await insertQueuedOutboundMessage(client, {
         workspaceId: input.workspaceId,
         conversationId: conversation.conversationId,
         replyDraftId: input.draftId,
         content: current.draft_reply,
         idempotencyKey: `reply-draft:${input.draftId}`,
-        provider: await resolveOutboundProviderName(
-          client,
-          input.workspaceId,
-          conversation.conversationId,
-        ),
+        provider: resolvedProvider,
       });
 
       if (!outboundMessage) {
@@ -159,17 +175,31 @@ export async function approveReplyDraft(
         );
 
         if (
-          !existingOutbound ||
-          existingOutbound.status !== "queued" ||
-          existingOutbound.content !== current.draft_reply ||
-          existingOutbound.conversationId !== conversation.conversationId
+          existingOutbound?.status === "cancelled" &&
+          existingOutbound.attempts === 0
+        ) {
+          outboundMessage = await requeueUnattemptedCancelledOutbound(client, {
+            workspaceId: input.workspaceId,
+            outboundMessageId: existingOutbound.id,
+            conversationId: conversation.conversationId,
+            content: current.draft_reply,
+            provider: resolvedProvider,
+          });
+        }
+
+        if (
+          !outboundMessage &&
+          (!existingOutbound ||
+            existingOutbound.status !== "queued" ||
+            existingOutbound.content !== current.draft_reply ||
+            existingOutbound.conversationId !== conversation.conversationId)
         ) {
           await client.query("ROLLBACK");
           return {
             kind: "outbound-conflict",
             message:
               existingOutbound?.status === "cancelled"
-                ? "This draft's previous outbound send was cancelled. Create a new draft to send revised content."
+                ? "This draft's previous outbound send was cancelled after delivery attempts started. Create a new draft to send revised content."
                 : existingOutbound &&
                     existingOutbound.conversationId !==
                       conversation.conversationId
@@ -178,7 +208,7 @@ export async function approveReplyDraft(
           };
         }
 
-        outboundMessage = existingOutbound;
+        outboundMessage = outboundMessage ?? existingOutbound;
       }
     }
 
