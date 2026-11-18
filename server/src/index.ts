@@ -3,6 +3,7 @@ import {
   GeminiReplyDraftProvider,
   MockReplyDraftProvider,
 } from "./ai/reply-draft.js";
+import { createResendPasswordResetEmailSender } from "./auth/password-reset-email.js";
 import { loadConfig } from "./config.js";
 import { createPool } from "./db/pool.js";
 import { assertRequiredMigrations } from "./db/schema.js";
@@ -30,6 +31,9 @@ async function start(): Promise<void> {
       trustedOrigins: config.trustedOrigins,
       trustedProxyCidrs: config.trustedProxyCidrs,
       nodeEnv: config.nodeEnv,
+      sendResetPasswordEmail: config.email
+        ? createResendPasswordResetEmailSender(config.email)
+        : undefined,
     },
     replyDraftProvider,
     whatsapp: config.whatsapp,

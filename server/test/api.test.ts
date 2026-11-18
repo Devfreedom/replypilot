@@ -33,8 +33,16 @@ import type {
   OutboundMessageHistoryItem,
   OutboundMessageRecord,
 } from "../src/outbound/types.js";
-import { runOutboundWorkerOnce } from "../src/outbound/worker.js";
-import { claimQueuedOutboundMessages } from "../src/outbound/repository.js";
+import {
+  parseWorkerStaleAfterMs,
+  runOutboundWorkerOnce,
+} from "../src/outbound/worker.js";
+import {
+  cancelOutboundClaim,
+  claimQueuedOutboundMessages,
+  isOutboundClaimAuthorized,
+  processOutboundDeliveryEvent,
+} from "../src/outbound/repository.js";
 import { updateReplyDraftText } from "../src/reply-drafts/repository.js";
 import { recordWorkerHeartbeat } from "../src/outbound/worker-status.js";
 import {
@@ -272,6 +280,7 @@ type TestAuthOptions = Readonly<{
   baseURL?: string;
   trustedOrigins?: string[];
   rateLimit?: TestAuthRateLimit;
+  trustedProxyCidrs?: string[];
 }>;
 
 let pool: Pool;
@@ -307,6 +316,7 @@ async function startServer(
       // exercised explicitly against a dedicated app instance instead of
       // tripping Better Auth's sign-up rule during unrelated tests.
       rateLimit: authOptions.rateLimit ?? { enabled: false },
+      trustedProxyCidrs: authOptions.trustedProxyCidrs,
     },
   }).listen(0, "127.0.0.1");
   await once(appServer, "listening");
@@ -716,10 +726,12 @@ function requestAs(
   path: string,
   method = "GET",
   body?: unknown,
+  extraHeaders?: Record<string, string>,
 ): Promise<Response> {
   const headers = new Headers({
     cookie: session.cookie,
     "x-forwarded-for": TEST_CLIENT_IP,
+    ...(extraHeaders ?? {}),
   });
 
   if (body !== undefined) {
@@ -3561,6 +3573,7 @@ test("authentication rate limits repeated sign-in attempts", async () => {
       window: 60,
       max: 100,
     },
+    trustedProxyCidrs: ["127.0.0.1/32", "::1/128"],
   });
 
   try {
@@ -3609,6 +3622,7 @@ test("authentication rate limits repeated sign-up attempts", async () => {
       window: 60,
       max: 100,
     },
+    trustedProxyCidrs: ["127.0.0.1/32", "::1/128"],
   });
 
   try {
@@ -3672,7 +3686,7 @@ test("the API sends security headers and only sends HSTS over HTTPS", async () =
     "HSTS is not sent over a plain HTTP request",
   );
 
-  const secureResponse = await nativeFetch(`${baseUrl}/api/workspace`, {
+  const untrustedProtoResponse = await nativeFetch(`${baseUrl}/api/workspace`, {
     headers: {
       cookie: requireSession().cookie,
       "x-forwarded-for": TEST_CLIENT_IP,
@@ -3680,12 +3694,38 @@ test("the API sends security headers and only sends HSTS over HTTPS", async () =
     },
   });
 
-  assert.equal(secureResponse.status, 200);
-  assert.match(
-    secureResponse.headers.get("strict-transport-security") ?? "",
-    /max-age=\d+/,
-    "HSTS is sent for a request the proxy marked as HTTPS",
+  assert.equal(untrustedProtoResponse.status, 200);
+  assert.equal(
+    untrustedProtoResponse.headers.get("strict-transport-security"),
+    null,
+    "Untrusted X-Forwarded-Proto: https must not emit HSTS when trustedProxyCidrs is unset",
   );
+
+  const trustedProxyApp = await startServer(pool, undefined, {
+    trustedProxyCidrs: ["127.0.0.1/32", "::1/128"],
+  });
+
+  try {
+    const secureResponse = await nativeFetch(
+      `${trustedProxyApp.baseUrl}/api/workspace`,
+      {
+        headers: {
+          cookie: requireSession().cookie,
+          "x-forwarded-for": TEST_CLIENT_IP,
+          "x-forwarded-proto": "https",
+        },
+      },
+    );
+
+    assert.equal(secureResponse.status, 200);
+    assert.match(
+      secureResponse.headers.get("strict-transport-security") ?? "",
+      /max-age=\d+/,
+      "HSTS is sent for a request a trusted proxy marked as HTTPS",
+    );
+  } finally {
+    await stopServer(trustedProxyApp.server);
+  }
 });
 
 test("legacy workspace bootstrap requires explicit guarded CLI input", async () => {
@@ -10762,7 +10802,8 @@ test("M13 worker-status API reports queue counts and live heartbeats", async () 
 
   assert.equal(payload.workers.length, 1);
   assert.equal(payload.workers[0]?.provider, "mock");
-  assert.equal(payload.workers[0]?.workerId, "test-host:1234");
+  assert.notEqual(payload.workers[0]?.workerId, "test-host:1234");
+  assert.match(payload.workers[0]?.workerId ?? "", /^worker-[0-9a-f]{12}$/);
   assert.equal(payload.workers[0]?.stale, false);
   assert.deepEqual(payload.workers[0]?.lastTick, { claimed: 1, sent: 1 });
 });
@@ -11062,6 +11103,8 @@ test("M14A connection API is workspace-scoped, owner-controlled, and never retur
       other,
       `/api/whatsapp/connections/${ownerConnectionId}/disconnect`,
       "POST",
+      undefined,
+      { origin: TEST_AUTH_ORIGIN },
     );
     assert.equal(foreignDisconnect.status, 404);
 
@@ -11093,6 +11136,8 @@ test("M14A connection API is workspace-scoped, owner-controlled, and never retur
       owner,
       `/api/whatsapp/connections/${ownerConnectionId}/disconnect`,
       "POST",
+      undefined,
+      { origin: TEST_AUTH_ORIGIN },
     );
     assert.equal(disconnect.status, 200);
     const disconnected = await readJson<ConnectionPayload>(disconnect);
@@ -11360,6 +11405,7 @@ test("M14A outbound provider selects the conversation connection's own credentia
     }> = [];
 
     const provider = new ConnectionAwareMetaProvider(pool, {
+      enabled: true,
       environment: process.env,
       now: () => now,
       fetchImplementation: async (input, init) => {
@@ -11478,6 +11524,7 @@ test("M14A disconnected and expired connections refuse outbound sends before HTT
 
     let fetchCalls = 0;
     const provider = new ConnectionAwareMetaProvider(pool, {
+      enabled: true,
       environment: process.env,
       now: () => now,
       fetchImplementation: async () => {
@@ -11546,6 +11593,7 @@ test("M14A legacy single-test-workspace sending still works and all protections 
 
       let fetchCalls = 0;
       const provider = new ConnectionAwareMetaProvider(pool, {
+        enabled: true,
         environment: process.env,
         legacyConfig: loadMetaOutboundConfig(),
         now: () => now,
@@ -13031,9 +13079,12 @@ async function createDisconnectedLeadConversation(options: {
     },
   );
 
-  const disconnected = await jsonRequest(
-    `/api/whatsapp/connections/${connectionId}/disconnect`,
-    "POST",
+  const disconnected = await fetch(
+    `${baseUrl}/api/whatsapp/connections/${connectionId}/disconnect`,
+    {
+      method: "POST",
+      headers: { origin: TEST_AUTH_ORIGIN },
+    },
   );
   assert.equal(disconnected.status, 200);
 
@@ -13312,6 +13363,7 @@ test("M14C the worker makes no Meta HTTP request for a disconnected connection",
 
   let fetchCalls = 0;
   const provider = new ConnectionAwareMetaProvider(pool, {
+    enabled: true,
     environment: process.env,
     fetchImplementation: async () => {
       fetchCalls += 1;
@@ -15759,4 +15811,1052 @@ test("draft routes map upstream 429 rate limits and 504 timeouts to accurate HTT
   } finally {
     console.error = originalError;
   }
+});
+
+test("D1 untrusted X-Forwarded-For rotation cannot bypass sign-in or sign-up rate limits", async () => {
+  const limited = await startServer(pool, undefined, {
+    rateLimit: { enabled: true, window: 60, max: 100 },
+  });
+
+  try {
+    const signInStatuses: number[] = [];
+
+    for (let attempt = 0; attempt < 11; attempt += 1) {
+      const response = await nativeFetch(
+        `${limited.baseUrl}/api/auth/sign-in/email`,
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            origin: TEST_AUTH_ORIGIN,
+            "x-forwarded-for": `198.51.100.${150 + attempt}`,
+          },
+          body: JSON.stringify({
+            email: requireSession().email,
+            password: requireSession().password,
+          }),
+        },
+      );
+      signInStatuses.push(response.status);
+    }
+
+    assert.deepEqual(
+      signInStatuses.slice(0, 10),
+      Array.from({ length: 10 }, () => 200),
+    );
+    assert.equal(signInStatuses[10], 429);
+
+    const signUpStatuses: number[] = [];
+
+    for (let attempt = 0; attempt < 6; attempt += 1) {
+      const response = await nativeFetch(
+        `${limited.baseUrl}/api/auth/sign-up/email`,
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            origin: TEST_AUTH_ORIGIN,
+            "x-forwarded-for": `198.51.100.${180 + attempt}`,
+          },
+          body: JSON.stringify({
+            email: `spoof-signup-${randomUUID()}@example.test`,
+            password: "replypilot-test-password",
+            name: "Spoof Signup",
+          }),
+        },
+      );
+      signUpStatuses.push(response.status);
+    }
+
+    assert.deepEqual(
+      signUpStatuses.slice(0, 5),
+      Array.from({ length: 5 }, () => 200),
+    );
+    assert.equal(signUpStatuses[5], 429);
+  } finally {
+    await stopServer(limited.server);
+  }
+});
+
+test("D3 cross-tenant protection masking and worker-status anonymization/scrubbing", async () => {
+  const allowlistedOwner = requireSession();
+  const otherOwner = await registerUser({
+    email: `d3-other-${randomUUID()}@example.test`,
+    name: "D3 Other Workspace",
+  });
+
+  await withMetaOutboundEnabled(allowlistedOwner.workspace.id, async () => {
+    const app = await startWhatsAppServer({
+      workspaceId: allowlistedOwner.workspace.id,
+      phoneNumberId: TEST_WHATSAPP_PHONE_NUMBER_ID,
+    });
+
+    try {
+      const allowlistedRes = await nativeFetch(
+        `${app.baseUrl}/api/whatsapp/protection`,
+        {
+          headers: { cookie: allowlistedOwner.cookie },
+        },
+      );
+      assert.equal(allowlistedRes.status, 200);
+      const allowlistedPayload =
+        await readJson<ProtectionPayload>(allowlistedRes);
+      assert.equal(allowlistedPayload.meta.workspaceAllowlistedForMeta, true);
+      assert.equal(allowlistedPayload.meta.recipientAllowlistCount, 1);
+      assert.ok(allowlistedPayload.meta.senderPhoneNumberId);
+      assert.equal(allowlistedPayload.inboundWebhook.workspaceMatches, true);
+      assert.equal(
+        allowlistedPayload.inboundWebhook.phoneNumberId,
+        TEST_WHATSAPP_PHONE_NUMBER_ID,
+      );
+
+      const otherRes = await nativeFetch(
+        `${app.baseUrl}/api/whatsapp/protection`,
+        {
+          headers: { cookie: otherOwner.cookie },
+        },
+      );
+      assert.equal(otherRes.status, 200);
+      const otherPayload = await readJson<ProtectionPayload>(otherRes);
+      assert.equal(otherPayload.meta.workspaceAllowlistedForMeta, false);
+      assert.equal(otherPayload.meta.senderConfigured, false);
+      assert.equal(otherPayload.meta.senderPhoneNumberId, null);
+      assert.equal(otherPayload.meta.recipientAllowlistCount, 0);
+      assert.equal(otherPayload.inboundWebhook.workspaceMatches, false);
+      assert.equal(otherPayload.inboundWebhook.phoneNumberId, null);
+    } finally {
+      await stopServer(app.server);
+    }
+  });
+
+  await recordWorkerHeartbeat(pool, {
+    provider: "whatsapp",
+    workerId: "secret-prod-host.internal:4242",
+    workerStartedAt: new Date(),
+    lastTick: {
+      claimed: 2,
+      error: 'relation "auth_sessions" violates constraint "pg_internal"',
+    },
+  });
+
+  const statusRes = await requestAs(
+    otherOwner,
+    "/api/outbound-messages/worker-status",
+  );
+  assert.equal(statusRes.status, 200);
+  const statusPayload = await readJson<{
+    workers: Array<{
+      provider: string;
+      workerId: string;
+      lastTick: Record<string, unknown>;
+    }>;
+  }>(statusRes);
+  const serialized = JSON.stringify(statusPayload);
+  assert.equal(serialized.includes("secret-prod-host"), false);
+  assert.equal(serialized.includes("4242"), false);
+  assert.equal(serialized.includes("auth_sessions"), false);
+  assert.equal(serialized.includes("pg_internal"), false);
+  const worker = statusPayload.workers.find((w) => w.provider === "whatsapp");
+  assert.ok(worker);
+  assert.match(worker.workerId, /^worker-[0-9a-f]{12}$/);
+  assert.deepEqual(worker.lastTick, {
+    claimed: 2,
+    error: "worker_tick_failed",
+  });
+});
+
+test("A3/D3 unexpected DB errors in delivery webhook and pre-send validation sanitize persisted failure_reason", async () => {
+  const originalError = console.error;
+  console.error = () => undefined;
+
+  try {
+    const { lead, conversationId } = await createLeadWithConversation(
+      {},
+      { providerTimestamp: new Date() },
+    );
+    const draft = await createSavedDraftPayload(lead.id);
+    const approval = await approveSavedDraft(lead.id, draft.id, {
+      status: "approved",
+      sendPolicy: "approve_and_send",
+      conversationId,
+    });
+    assert.equal(approval.status, 200);
+    const outbound = (
+      await readJson<ReplyDraftApprovalPayload>(approval)
+    ).outboundMessage;
+    assert.ok(outbound);
+
+    const wamid = `wamid.a3-${randomUUID()}`;
+    await pool.query(
+      "UPDATE outbound_messages SET status = 'sent', provider_message_id = $2, sent_at = now() WHERE id = $1",
+      [outbound.id, wamid],
+    );
+
+    await pool.query(`
+      CREATE FUNCTION replypilot_test_a3_db_fault()
+      RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN
+        IF NEW.provider_status_at IS NOT NULL THEN
+          RAISE EXCEPTION 'secret_pg_table_leak_on_delivery';
+        END IF;
+        RETURN NEW;
+      END
+      $$
+    `);
+    await pool.query(`
+      CREATE TRIGGER replypilot_test_a3_db_fault
+      BEFORE UPDATE ON outbound_messages
+      FOR EACH ROW EXECUTE FUNCTION replypilot_test_a3_db_fault()
+    `);
+
+    try {
+      await assert.rejects(() =>
+        processOutboundDeliveryEvent(
+          pool,
+          requireSession().workspace.id,
+          {
+            providerMessageId: wamid,
+            phoneNumberId: TEST_WHATSAPP_PHONE_NUMBER_ID,
+            status: "delivered",
+            providerTimestamp: new Date(),
+            errorDescription: null,
+          },
+          null,
+        ),
+      );
+
+      const eventsRes = await fetch(
+        `${baseUrl}/api/whatsapp/delivery-events?limit=10`,
+      );
+      assert.equal(eventsRes.status, 200);
+      const eventsPayload = await readJson<{
+        events: Array<{ failureReason: string | null }>;
+      }>(eventsRes);
+      assert.ok(eventsPayload.events[0]?.failureReason);
+      assert.equal(
+        eventsPayload.events[0]?.failureReason?.includes(
+          "secret_pg_table_leak_on_delivery",
+        ),
+        false,
+      );
+    } finally {
+      await pool.query(
+        "DROP TRIGGER IF EXISTS replypilot_test_a3_db_fault ON outbound_messages",
+      );
+      await pool.query("DROP FUNCTION IF EXISTS replypilot_test_a3_db_fault()");
+    }
+
+    // Pre-send validation DB fault via ConnectionAwareMetaProvider
+    const throwingPool = new Proxy(pool, {
+      get(target, prop, receiver) {
+        if (prop === "query") {
+          return async () => {
+            throw new Error(
+              'pg error: column "secret_token_col" of relation "whatsapp_connections" failed',
+            );
+          };
+        }
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const provider = new ConnectionAwareMetaProvider(throwingPool, {
+      enabled: true,
+      fetchImplementation: async () => new Response("{}", { status: 200 }),
+    });
+    await assert.rejects(
+      () =>
+        provider.send({
+          workspaceId: requireSession().workspace.id,
+          conversationId,
+          content: "Test",
+          idempotencyKey: `reply-draft:${draft.id}`,
+          recipientPhone: "+16505551234",
+        }),
+      (error: unknown) =>
+        error instanceof OutboundProviderError &&
+        !error.message.includes("secret_token_col") &&
+        !error.message.includes("whatsapp_connections"),
+    );
+  } finally {
+    console.error = originalError;
+  }
+});
+
+test("B1 disconnect requires allowed Origin and B3 enforces minimum OUTBOUND_WORKER_STALE_MS", async () => {
+  const owner = requireSession();
+  const connectionId = await withCredentialEncryption(() =>
+    registerTestConnection({
+      workspaceId: owner.workspace.id,
+      phoneNumberId: "106540000000999",
+      accessToken: "EAABc0B1DisconnectOriginTokenMustStaySecret123",
+    }),
+  );
+
+  const missingOrigin = await requestAs(
+    owner,
+    `/api/whatsapp/connections/${connectionId}/disconnect`,
+    "POST",
+  );
+  assert.equal(missingOrigin.status, 403);
+  assert.equal(
+    (await readJson<{ code?: string }>(missingOrigin)).code,
+    "origin_not_allowed",
+  );
+
+  const crossOrigin = await requestAs(
+    owner,
+    `/api/whatsapp/connections/${connectionId}/disconnect`,
+    "POST",
+    undefined,
+    { origin: "https://attacker.example" },
+  );
+  assert.equal(crossOrigin.status, 403);
+  assert.equal(
+    (await readJson<{ code?: string }>(crossOrigin)).code,
+    "origin_not_allowed",
+  );
+
+  const validOrigin = await requestAs(
+    owner,
+    `/api/whatsapp/connections/${connectionId}/disconnect`,
+    "POST",
+    undefined,
+    { origin: TEST_AUTH_ORIGIN },
+  );
+  assert.equal(validOrigin.status, 200);
+
+  // B3: OUTBOUND_WORKER_STALE_MS lower bound
+  assert.equal(parseWorkerStaleAfterMs(undefined), 300_000);
+  assert.equal(parseWorkerStaleAfterMs("30000"), 30_000);
+  for (const invalid of ["1", "9999", "29999", "0", "-5", "abc"]) {
+    assert.throws(
+      () => parseWorkerStaleAfterMs(invalid),
+      /OUTBOUND_WORKER_STALE_MS/,
+    );
+  }
+});
+
+test("C2 META_OUTBOUND_ENABLED=false blocks active whatsapp_connections from calling Meta while mock provider still works", async () => {
+  const owner = requireSession();
+  const otherOwner = await registerUser({
+    email: `c2-mock-${randomUUID()}@example.test`,
+    name: "C2 Mock Workspace",
+  });
+  const previousEnabled = process.env.META_OUTBOUND_ENABLED;
+  process.env.META_OUTBOUND_ENABLED = "false";
+
+  try {
+    await withCredentialEncryption(async () => {
+      const phoneNumberId = "106540000000801";
+      await registerTestConnection({
+        workspaceId: owner.workspace.id,
+        phoneNumberId,
+        accessToken: "EAABc0C2KillSwitchTokenMustStayUnused123456",
+      });
+
+      const now = new Date();
+      const { lead, conversationId } = await createLeadWithConversation(
+        { name: "C2 Blocked Customer" },
+        {
+          phoneNumberId,
+          senderWaId: "16505553801",
+          senderPhoneNumber: "16505553801",
+          providerTimestamp: now,
+        },
+      );
+
+      const protectionRes = await requestAs(
+        owner,
+        "/api/whatsapp/protection",
+      );
+      assert.equal(protectionRes.status, 200);
+      const protectionPayload =
+        await readJson<ProtectionPayload>(protectionRes);
+      assert.equal(protectionPayload.providerForWorkspace, "whatsapp");
+      assert.equal(protectionPayload.meta.enabled, false);
+      assert.match(
+        protectionPayload.meta.productionProtection,
+        /META_OUTBOUND_ENABLED=false/,
+      );
+
+      const draft = await createSavedDraftPayload(lead.id);
+      const approved = await approveSavedDraft(lead.id, draft.id, {
+        status: "approved",
+        sendPolicy: "approve_and_send",
+        conversationId,
+      });
+      assert.equal(approved.status, 200);
+      const approvedPayload =
+        await readJson<ReplyDraftApprovalPayload>(approved);
+      assert.equal(approvedPayload.outboundMessage?.provider, "whatsapp");
+      const whatsappOutboundId = approvedPayload.outboundMessage?.id;
+      assert.ok(whatsappOutboundId);
+
+      // Separate workspace without Meta connection still queues and delivers via mock.
+      const mockLeadRes = await requestAs(otherOwner, "/api/leads", "POST", {
+        name: "C2 Mock Lead",
+        service: "Photography",
+        channel: "WhatsApp",
+        whatsappNumber: "+16505553802",
+        lastMessage: "Need quote",
+        status: "New",
+      });
+      assert.equal(mockLeadRes.status, 201);
+      const mockLead = (await readJson<{ lead: Lead }>(mockLeadRes)).lead;
+      await persistInboundMessages(pool, otherOwner.workspace.id, [
+        inboundMessage({
+          phoneNumberId: "106540000000899",
+          senderWaId: "16505553802",
+          senderPhoneNumber: "16505553802",
+          providerTimestamp: now,
+        }),
+      ]);
+      const mockConvId = (
+        await pool.query<{ id: string }>(
+          "SELECT id FROM whatsapp_conversations WHERE workspace_id = $1",
+          [otherOwner.workspace.id],
+        )
+      ).rows[0]?.id;
+      assert.ok(mockConvId);
+      const mockDraftRes = await requestAs(
+        otherOwner,
+        `/api/leads/${mockLead.id}/reply-drafts`,
+        "POST",
+        {},
+      );
+      assert.equal(mockDraftRes.status, 201);
+      const mockDraft = (await readJson<ReplyDraftPayload>(mockDraftRes)).draft;
+      const mockApproved = await requestAs(
+        otherOwner,
+        `/api/leads/${mockLead.id}/reply-drafts/${mockDraft.id}`,
+        "PATCH",
+        {
+          status: "approved",
+          sendPolicy: "approve_and_send",
+          conversationId: mockConvId,
+        },
+      );
+      assert.equal(mockApproved.status, 200);
+      const mockOutboundId = (
+        await readJson<ReplyDraftApprovalPayload>(mockApproved)
+      ).outboundMessage?.id;
+      assert.ok(mockOutboundId);
+
+      let fetchCalls = 0;
+      const provider = new ConnectionAwareMetaProvider(pool, {
+        environment: { ...process.env, META_OUTBOUND_ENABLED: "false" },
+        legacyConfig: loadMetaOutboundConfig({
+          ...process.env,
+          META_OUTBOUND_ENABLED: "false",
+        }),
+        now: () => now,
+        fetchImplementation: async () => {
+          fetchCalls += 1;
+          return new Response(
+            JSON.stringify({ messages: [{ id: "wamid.must-not-send" }] }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          );
+        },
+      });
+
+      await assert.rejects(
+        () =>
+          provider.send({
+            workspaceId: owner.workspace.id,
+            conversationId,
+            content: "Blocked by kill switch",
+            idempotencyKey: `c2-direct-${randomUUID()}`,
+            recipientPhone: "+16505553801",
+          }),
+        (error: unknown) =>
+          error instanceof OutboundProviderError &&
+          /META_OUTBOUND_ENABLED=false/.test(error.message),
+      );
+      assert.equal(fetchCalls, 0);
+
+      const waTick = await runOutboundWorkerOnce(pool, provider, {
+        batchSize: 10,
+        baseRetryDelayMs: 0,
+        staleAfterMs: 60_000,
+      });
+      assert.equal(waTick.claimed, 1);
+      assert.equal(waTick.sent, 0);
+      assert.equal(waTick.retried, 1);
+      assert.equal(
+        fetchCalls,
+        0,
+        "META_OUTBOUND_ENABLED=false must block all external Meta HTTP calls even with active whatsapp_connections",
+      );
+
+      const waRow = await pool.query<{
+        status: string;
+        failure_reason: string | null;
+        provider_message_id: string | null;
+      }>(
+        "SELECT status, failure_reason, provider_message_id FROM outbound_messages WHERE id = $1",
+        [whatsappOutboundId],
+      );
+      assert.notEqual(waRow.rows[0]?.status, "sent");
+      assert.equal(waRow.rows[0]?.provider_message_id, null);
+      assert.match(
+        waRow.rows[0]?.failure_reason ?? "",
+        /META_OUTBOUND_ENABLED=false/,
+      );
+
+      // Mock provider still delivers mock-routed rows normally.
+      const mockTick = await runOutboundWorkerOnce(
+        pool,
+        new MockOutboundMessageProvider(),
+        { batchSize: 10, baseRetryDelayMs: 0, staleAfterMs: 60_000 },
+      );
+      assert.equal(mockTick.sent, 1);
+      const mockRow = await pool.query<{ status: string }>(
+        "SELECT status FROM outbound_messages WHERE id = $1",
+        [mockOutboundId],
+      );
+      assert.equal(mockRow.rows[0]?.status, "sent");
+
+      // In NODE_ENV=production, unset META_OUTBOUND_ENABLED remains blocked, while
+      // META_OUTBOUND_ENABLED="true" (without legacy single-tenant config) or
+      // explicit options.enabled allows onboarded connection sending.
+      const prodUnsetProvider = new ConnectionAwareMetaProvider(pool, {
+        environment: {
+          ...process.env,
+          NODE_ENV: "production",
+          META_OUTBOUND_ENABLED: undefined,
+        },
+        now: () => now,
+        fetchImplementation: async () => {
+          fetchCalls += 1;
+          return new Response("{}", { status: 200 });
+        },
+      });
+      await assert.rejects(
+        () =>
+          prodUnsetProvider.send({
+            workspaceId: owner.workspace.id,
+            conversationId,
+            content: "Blocked when unset in production",
+            idempotencyKey: `c2-prod-unset-${randomUUID()}`,
+            recipientPhone: "+16505553801",
+          }),
+        (error: unknown) =>
+          error instanceof OutboundProviderError &&
+          /META_OUTBOUND_ENABLED=false/.test(error.message),
+      );
+      assert.equal(fetchCalls, 0);
+
+      const prodEnabledEnvProvider = new ConnectionAwareMetaProvider(pool, {
+        environment: {
+          ...process.env,
+          NODE_ENV: "production",
+          META_OUTBOUND_ENABLED: "true",
+        },
+        now: () => now,
+        fetchImplementation: async () => {
+          fetchCalls += 1;
+          return new Response(
+            JSON.stringify({ messages: [{ id: `wamid.c2-prod-${randomUUID()}` }] }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          );
+        },
+      });
+      const prodEnvSent = await prodEnabledEnvProvider.send({
+        workspaceId: owner.workspace.id,
+        conversationId,
+        content: "Allowed in production via META_OUTBOUND_ENABLED=true",
+        idempotencyKey: `c2-prod-env-${randomUUID()}`,
+        recipientPhone: "+16505553801",
+      });
+      assert.match(prodEnvSent.providerMessageId, /^wamid\.c2-prod-/);
+      assert.equal(fetchCalls, 1);
+
+      const prodEnabledOptProvider = new ConnectionAwareMetaProvider(pool, {
+        enabled: true,
+        legacyConfig: null,
+        environment: {
+          ...process.env,
+          NODE_ENV: "production",
+          META_OUTBOUND_ENABLED: "false",
+        },
+        now: () => now,
+        fetchImplementation: async () => {
+          fetchCalls += 1;
+          return new Response(
+            JSON.stringify({ messages: [{ id: `wamid.c2-opt-${randomUUID()}` }] }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          );
+        },
+      });
+      const prodOptSent = await prodEnabledOptProvider.send({
+        workspaceId: owner.workspace.id,
+        conversationId,
+        content: "Allowed in production via options.enabled",
+        idempotencyKey: `c2-prod-opt-${randomUUID()}`,
+        recipientPhone: "+16505553801",
+      });
+      assert.match(prodOptSent.providerMessageId, /^wamid\.c2-opt-/);
+      assert.equal(fetchCalls, 2);
+    });
+  } finally {
+    if (previousEnabled === undefined) {
+      delete process.env.META_OUTBOUND_ENABLED;
+    } else {
+      process.env.META_OUTBOUND_ENABLED = previousEnabled;
+    }
+  }
+});
+
+test("D2 cross-workspace foreign-UUID requests are rejected across secondary endpoints", async () => {
+  const ownerA = requireSession();
+  const ownerB = await registerUser({
+    email: `d2-owner-b-${randomUUID()}@example.test`,
+    name: "D2 Workspace B",
+  });
+
+  await withCredentialEncryption(async () => {
+    const now = new Date();
+    // Set up Workspace A resources (lead + draft + approve_only draft).
+    const leadARes = await requestAs(ownerA, "/api/leads", "POST", {
+      name: "D2 Lead A",
+      service: "Photography",
+      channel: "WhatsApp",
+      whatsappNumber: "+16505553901",
+      lastMessage: "Workspace A enquiry",
+      status: "New",
+    });
+    assert.equal(leadARes.status, 201);
+    const leadA = (await readJson<{ lead: Lead }>(leadARes)).lead;
+    const draftA1 = await createSavedDraftPayload(leadA.id);
+    const draftA2 = await createSavedDraftPayload(leadA.id);
+    const approveA2Res = await approveSavedDraft(leadA.id, draftA2.id, {
+      status: "approved",
+      sendPolicy: "approve_only",
+    });
+    assert.equal(approveA2Res.status, 200);
+
+    // Set up Workspace B resources (connection, lead, conversation, suppression, outbound, delivery event).
+    const connectionBId = await registerTestConnection({
+      workspaceId: ownerB.workspace.id,
+      phoneNumberId: "106540000000802",
+      accessToken: "EAABc0D2WorkspaceBTokenMustStayIsolated1234",
+    });
+    const leadBRes = await requestAs(ownerB, "/api/leads", "POST", {
+      name: "D2 Lead B",
+      service: "Photography",
+      channel: "WhatsApp",
+      whatsappNumber: "+16505553902",
+      lastMessage: "Workspace B enquiry",
+      status: "New",
+    });
+    assert.equal(leadBRes.status, 201);
+    const leadB = (await readJson<{ lead: Lead }>(leadBRes)).lead;
+
+    await persistInboundMessages(pool, ownerB.workspace.id, [
+      inboundMessage({
+        phoneNumberId: "106540000000802",
+        senderWaId: "16505553902",
+        senderPhoneNumber: "16505553902",
+        providerTimestamp: now,
+      }),
+    ]);
+
+    const convBRow = (
+      await pool.query<{ id: string; customer_id: string }>(
+        "SELECT id, customer_id FROM whatsapp_conversations WHERE workspace_id = $1 LIMIT 1",
+        [ownerB.workspace.id],
+      )
+    ).rows[0];
+    assert.ok(convBRow);
+    const conversationBId = convBRow.id;
+    const customerBId = convBRow.customer_id;
+
+    // Link Conversation B to Lead B so by-lead returns data for Workspace B (but [] for A).
+    await pool.query(
+      "UPDATE whatsapp_conversations SET lead_id = $2 WHERE id = $1",
+      [conversationBId, leadB.id],
+    );
+
+    const suppressBRes = await requestAs(
+      ownerB,
+      `/api/whatsapp/customers/${customerBId}/suppression`,
+      "PUT",
+      { reason: "admin", notes: "D2 Workspace B suppression" },
+    );
+    assert.equal(suppressBRes.status, 200);
+
+    const draftBRes = await requestAs(
+      ownerB,
+      `/api/leads/${leadB.id}/reply-drafts`,
+      "POST",
+      {},
+    );
+    assert.equal(draftBRes.status, 201);
+    const draftB = (await readJson<ReplyDraftPayload>(draftBRes)).draft;
+    const wamidB = `wamid.d2-b-${randomUUID()}`;
+    const outboundBInserted = await pool.query<{ id: string }>(
+      `
+        INSERT INTO outbound_messages (
+          workspace_id,
+          conversation_id,
+          reply_draft_id,
+          provider,
+          content,
+          status,
+          provider_message_id,
+          idempotency_key,
+          max_attempts,
+          sent_at
+        )
+        VALUES ($1, $2, $3, 'mock', $4, 'sent', $5, $6, 3, now())
+        RETURNING id
+      `,
+      [
+        ownerB.workspace.id,
+        conversationBId,
+        draftB.id,
+        draftB.draftReply,
+        wamidB,
+        `d2-outbound-${randomUUID()}`,
+      ],
+    );
+    const outboundBId = outboundBInserted.rows[0]?.id;
+    assert.ok(outboundBId);
+    await processOutboundDeliveryEvent(
+      pool,
+      ownerB.workspace.id,
+      {
+        providerMessageId: wamidB,
+        phoneNumberId: "106540000000802",
+        status: "delivered",
+        providerTimestamp: now,
+        errorDescription: null,
+      },
+      null,
+    );
+
+    const app = await startOnboardingServer();
+
+    try {
+      const cases: Array<{
+        name: string;
+        path: string;
+        method: string;
+        body?: unknown;
+        expectedStatus: number;
+        assertPayload?: (data: unknown) => void;
+      }> = [
+        {
+          name: "PATCH /api/leads/:id/reply-drafts/:draftId with Workspace B conversationId",
+          path: `/api/leads/${leadA.id}/reply-drafts/${draftA1.id}`,
+          method: "PATCH",
+          body: {
+            status: "approved",
+            sendPolicy: "approve_and_send",
+            conversationId: conversationBId,
+          },
+          expectedStatus: 409,
+        },
+        {
+          name: "POST /api/reply-drafts/:id/send with Workspace B conversationId",
+          path: `/api/reply-drafts/${draftA2.id}/send`,
+          method: "POST",
+          body: { conversationId: conversationBId },
+          expectedStatus: 409,
+        },
+        {
+          name: "POST /api/whatsapp/connections/:connectionId/verify with Workspace B connectionId",
+          path: `/api/whatsapp/connections/${connectionBId}/verify`,
+          method: "POST",
+          expectedStatus: 404,
+        },
+        {
+          name: "DELETE /api/whatsapp/customers/:customerId/suppression with Workspace B customerId",
+          path: `/api/whatsapp/customers/${customerBId}/suppression`,
+          method: "DELETE",
+          expectedStatus: 404,
+        },
+        {
+          name: "GET /api/whatsapp/conversations/:conversationId/protection with Workspace B conversationId",
+          path: `/api/whatsapp/conversations/${conversationBId}/protection`,
+          method: "GET",
+          expectedStatus: 404,
+        },
+        {
+          name: "GET /api/leads/:id/whatsapp-conversations with Workspace B leadId",
+          path: `/api/leads/${leadB.id}/whatsapp-conversations`,
+          method: "GET",
+          expectedStatus: 404,
+        },
+        {
+          name: "GET /api/conversations/by-lead/:leadId with Workspace B leadId",
+          path: `/api/conversations/by-lead/${leadB.id}`,
+          method: "GET",
+          expectedStatus: 200,
+          assertPayload: (data) => {
+            assert.deepEqual(
+              (data as { conversations: unknown[] }).conversations,
+              [],
+            );
+          },
+        },
+        {
+          name: "GET /api/outbound-messages?conversationId=<Workspace B id>",
+          path: `/api/outbound-messages?conversationId=${conversationBId}`,
+          method: "GET",
+          expectedStatus: 200,
+          assertPayload: (data) => {
+            assert.deepEqual((data as { messages: unknown[] }).messages, []);
+          },
+        },
+        {
+          name: "GET /api/whatsapp/delivery-events?outboundMessageId=<Workspace B id>",
+          path: `/api/whatsapp/delivery-events?outboundMessageId=${outboundBId}`,
+          method: "GET",
+          expectedStatus: 200,
+          assertPayload: (data) => {
+            assert.deepEqual((data as { events: unknown[] }).events, []);
+          },
+        },
+      ];
+
+      for (const probe of cases) {
+        const res = await requestOn(
+          app,
+          ownerA,
+          probe.path,
+          probe.method,
+          probe.body,
+        );
+        assert.equal(
+          res.status,
+          probe.expectedStatus,
+          `${probe.name} expected HTTP ${probe.expectedStatus}, got ${res.status}`,
+        );
+        const json = await readJson<unknown>(res);
+        probe.assertPayload?.(json);
+      }
+
+      // Confirm zero outbound rows were created in Workspace A and zero Meta API calls occurred.
+      const outboundACount = await pool.query<{ count: string }>(
+        "SELECT count(*)::text AS count FROM outbound_messages WHERE workspace_id = $1",
+        [ownerA.workspace.id],
+      );
+      assert.equal(outboundACount.rows[0]?.count, "0");
+      assert.equal(app.calls.length, 0);
+
+      // Confirm Workspace B's customer suppression remains intact.
+      const suppressionsBRes = await requestOn(
+        app,
+        ownerB,
+        "/api/whatsapp/suppressions",
+      );
+      assert.equal(suppressionsBRes.status, 200);
+      const suppressionsB = await readJson<{
+        total: number;
+        suppressions: Array<{ customer: { id: string } }>;
+      }>(suppressionsBRes);
+      assert.equal(suppressionsB.total, 1);
+      assert.equal(suppressionsB.suppressions[0]?.customer.id, customerBId);
+    } finally {
+      await stopServer(app.server);
+    }
+  });
+});
+
+test("D4 concurrent mid-claim STOP webhook interleaving cancels sending row with zero Meta HTTP calls", async () => {
+  const owner = requireSession();
+
+  await withCredentialEncryption(async () => {
+    await registerTestConnection({
+      workspaceId: owner.workspace.id,
+      phoneNumberId: TEST_WHATSAPP_PHONE_NUMBER_ID,
+      accessToken: "EAABc0D4ConcurrencyTestTokenThatMustStaySecret123",
+    });
+
+    const now = new Date();
+    const { lead: lead1, conversationId: conversation1Id } =
+      await createLeadWithConversation(
+        { name: "D4 Lead One" },
+        {
+          phoneNumberId: TEST_WHATSAPP_PHONE_NUMBER_ID,
+          senderWaId: "16505554001",
+          senderPhoneNumber: "16505554001",
+          providerTimestamp: now,
+        },
+      );
+    const { lead: lead2, conversationId: conversation2Id } =
+      await createLeadWithConversation(
+        { name: "D4 Lead Two" },
+        {
+          phoneNumberId: TEST_WHATSAPP_PHONE_NUMBER_ID,
+          senderWaId: "16505554002",
+          senderPhoneNumber: "16505554002",
+          providerTimestamp: now,
+        },
+      );
+
+    const draft1 = await createSavedDraftPayload(lead1.id);
+    const draft2 = await createSavedDraftPayload(lead2.id);
+
+    const approved1 = await approveSavedDraft(lead1.id, draft1.id, {
+      status: "approved",
+      sendPolicy: "approve_and_send",
+      conversationId: conversation1Id,
+    });
+    const approved2 = await approveSavedDraft(lead2.id, draft2.id, {
+      status: "approved",
+      sendPolicy: "approve_and_send",
+      conversationId: conversation2Id,
+    });
+    assert.equal(approved1.status, 200);
+    assert.equal(approved2.status, 200);
+
+    const outbound1Id = (await readJson<ReplyDraftApprovalPayload>(approved1))
+      .outboundMessage?.id;
+    const outbound2Id = (await readJson<ReplyDraftApprovalPayload>(approved2))
+      .outboundMessage?.id;
+    assert.ok(outbound1Id);
+    assert.ok(outbound2Id);
+
+    // Guarantee claim order: outbound1 claimed first, outbound2 also claimed into 'sending' in the same tick.
+    await pool.query(
+      "UPDATE outbound_messages SET queued_at = now() - interval '10 seconds' WHERE id = $1",
+      [outbound1Id],
+    );
+
+    const app = await startWhatsAppServer({
+      workspaceId: owner.workspace.id,
+      phoneNumberId: TEST_WHATSAPP_PHONE_NUMBER_ID,
+      appSecret: TEST_WHATSAPP_APP_SECRET,
+    });
+
+    try {
+      const dispatchedNumbers: string[] = [];
+      let observedRow2SendingBeforeStop = false;
+
+      const provider = new ConnectionAwareMetaProvider(pool, {
+        enabled: true,
+        environment: process.env,
+        now: () => now,
+        fetchImplementation: async (_input, init) => {
+          const parsedBody = init?.body
+            ? (JSON.parse(String(init.body)) as { to?: string })
+            : {};
+          const recipient = parsedBody.to ?? "";
+          dispatchedNumbers.push(recipient);
+
+          if (recipient === "16505554001") {
+            const midState = await pool.query<{ status: string }>(
+              "SELECT status FROM outbound_messages WHERE id = $1",
+              [outbound2Id],
+            );
+            observedRow2SendingBeforeStop =
+              midState.rows[0]?.status === "sending";
+
+            // Customer 2 sends STOP concurrently AFTER claimQueuedOutboundMessages
+            // transitioned row 2 to 'sending', BEFORE row 2 reaches dispatch.
+            const stopRes = await postWhatsApp(
+              app,
+              whatsappEnvelope([
+                whatsappChange({
+                  phoneNumberId: TEST_WHATSAPP_PHONE_NUMBER_ID,
+                  messages: [
+                    textWhatsAppMessage({
+                      id: `wamid.d4-stop-2-${randomUUID()}`,
+                      from: "16505554002",
+                      text: "STOP",
+                      timestamp: String(Math.floor(Date.now() / 1_000)),
+                    }),
+                  ],
+                }),
+              ]),
+            );
+            assert.equal(stopRes.status, 200);
+          }
+
+          return new Response(
+            JSON.stringify({ messages: [{ id: `wamid.d4-${randomUUID()}` }] }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          );
+        },
+      });
+
+      const tickResult = await runOutboundWorkerOnce(pool, provider, {
+        batchSize: 10,
+        baseRetryDelayMs: 0,
+        staleAfterMs: 60_000,
+      });
+
+      assert.equal(observedRow2SendingBeforeStop, true);
+      assert.equal(tickResult.claimed, 2);
+      assert.equal(tickResult.sent, 1);
+      assert.equal(tickResult.cancelled, 1);
+      assert.deepEqual(
+        dispatchedNumbers,
+        ["16505554001"],
+        "Zero Meta HTTP requests may be made for Customer 2 after mid-claim STOP",
+      );
+
+      const row2Final = await pool.query<{
+        status: string;
+        provider_message_id: string | null;
+      }>(
+        "SELECT status, provider_message_id FROM outbound_messages WHERE id = $1",
+        [outbound2Id],
+      );
+      assert.equal(row2Final.rows[0]?.status, "cancelled");
+      assert.equal(row2Final.rows[0]?.provider_message_id, null);
+
+      // Also verify direct post-claim / pre-send guard when Customer 1 sends STOP
+      // after claimQueuedOutboundMessages has transitioned a row to status = 'sending'.
+      const draft3 = await createSavedDraftPayload(lead1.id);
+      const approved3 = await approveSavedDraft(lead1.id, draft3.id, {
+        status: "approved",
+        sendPolicy: "approve_and_send",
+        conversationId: conversation1Id,
+      });
+      assert.equal(approved3.status, 200);
+      const claimedRows = await claimQueuedOutboundMessages(pool, 10, "whatsapp");
+      assert.equal(claimedRows.length, 1);
+      const claimedRow3 = claimedRows[0];
+      assert.ok(claimedRow3);
+
+      const stopRes1 = await postWhatsApp(
+        app,
+        whatsappEnvelope([
+          whatsappChange({
+            phoneNumberId: TEST_WHATSAPP_PHONE_NUMBER_ID,
+            messages: [
+              textWhatsAppMessage({
+                id: `wamid.d4-stop-1-${randomUUID()}`,
+                from: "16505554001",
+                text: "STOP",
+                timestamp: String(Math.floor(Date.now() / 1_000)),
+              }),
+            ],
+          }),
+        ]),
+      );
+      assert.equal(stopRes1.status, 200);
+
+      assert.equal(await isOutboundClaimAuthorized(pool, claimedRow3), false);
+      await assert.rejects(
+        () =>
+          provider.send({
+            workspaceId: claimedRow3.workspace_id,
+            conversationId: claimedRow3.conversation_id,
+            content: claimedRow3.content,
+            idempotencyKey: claimedRow3.idempotency_key,
+            recipientPhone: claimedRow3.customer_phone_e164,
+          }),
+        /suppressed/i,
+      );
+      assert.deepEqual(dispatchedNumbers, ["16505554001"]);
+      assert.equal(await cancelOutboundClaim(pool, claimedRow3), true);
+    } finally {
+      await stopServer(app.server);
+    }
+  });
 });

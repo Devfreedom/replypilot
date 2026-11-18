@@ -235,6 +235,13 @@ export function createWhatsAppOperationsRouter({
       ]);
 
     const runtime = process.env.NODE_ENV ?? "development";
+    const workspaceAllowlistedForMeta =
+      metaConfig !== null &&
+      isWorkspaceAllowedForMetaSending(metaConfig, workspace.id);
+    const webhookWorkspaceMatches =
+      whatsapp !== null &&
+      whatsapp.workspaceId !== undefined &&
+      whatsapp.workspaceId === workspace.id;
 
     response.status(200).json({
       runtime,
@@ -243,28 +250,31 @@ export function createWhatsAppOperationsRouter({
       connections,
       meta: {
         enabled: metaConfig !== null,
-        senderConfigured: metaConfig !== null,
-        senderPhoneNumberId: metaConfig?.senderPhoneNumberId ?? null,
-        recipientAllowlistCount: metaConfig?.allowedRecipients.size ?? 0,
+        senderConfigured: workspaceAllowlistedForMeta,
+        senderPhoneNumberId: workspaceAllowlistedForMeta
+          ? (metaConfig?.senderPhoneNumberId ?? null)
+          : null,
+        recipientAllowlistCount: workspaceAllowlistedForMeta
+          ? (metaConfig?.allowedRecipients.size ?? 0)
+          : 0,
         testWorkspaceConfigured: metaConfig !== null,
-        workspaceAllowlistedForMeta:
-          metaConfig !== null &&
-          isWorkspaceAllowedForMetaSending(metaConfig, workspace.id),
+        workspaceAllowlistedForMeta,
         productionBlocked: runtime === "production",
         productionProtection:
           runtime === "production"
             ? "Meta sending is rejected because the API is running in production."
             : metaConfig === null
-              ? "Meta sending is disabled. The mock provider handles outbound records."
+              ? providerForWorkspace === "whatsapp"
+                ? "Meta sending is disabled (META_OUTBOUND_ENABLED=false). WhatsApp outbound records fail closed without calling Meta."
+                : "Meta sending is disabled. The mock provider handles outbound records."
               : "Meta sending is limited to the configured test workspace, sender, and recipient allowlist.",
       },
       inboundWebhook: {
         configured: whatsapp !== null,
-        phoneNumberId: whatsapp?.phoneNumberId ?? null,
-        workspaceMatches:
-          whatsapp !== null &&
-          whatsapp.workspaceId !== undefined &&
-          whatsapp.workspaceId === workspace.id,
+        phoneNumberId: webhookWorkspaceMatches
+          ? (whatsapp?.phoneNumberId ?? null)
+          : null,
+        workspaceMatches: webhookWorkspaceMatches,
       },
       suppressions: {
         count: suppressions.length,

@@ -12,6 +12,8 @@ import {
 } from "./ai/reply-draft.js";
 import {
   createAuth,
+  createTrustedProxyMatcher,
+  normalizeIpAddress,
   type AuthRateLimitOptions,
   type SendResetPasswordEmailHook,
 } from "./auth/config.js";
@@ -172,13 +174,89 @@ export function createApp({
     trustedOrigins: authOptions.trustedOrigins ?? [],
     rateLimit: authOptions.rateLimit,
     trustedProxyCidrs: authOptions.trustedProxyCidrs,
+    clientIpNormalizedByApp: true,
     nodeEnv: authOptions.nodeEnv,
     sendResetPasswordEmail: authOptions.sendResetPasswordEmail,
   });
 
+  const trustedProxies = [
+    ...new Set(
+      (authOptions.trustedProxyCidrs ?? []).map((entry) => entry.trim()),
+    ),
+  ].filter(Boolean);
+  const isTrustedProxyIp =
+    trustedProxies.length > 0
+      ? createTrustedProxyMatcher(trustedProxies)
+      : null;
+
   app.disable("x-powered-by");
 
-  app.set("trust proxy", 1);
+  app.set(
+    "trust proxy",
+    isTrustedProxyIp ? (ip: string) => isTrustedProxyIp(ip) : false,
+  );
+
+  // Strip untrusted forwarded headers before HSTS, Better Auth, or route
+  // handlers inspect them, and normalize X-Forwarded-For to a single verified
+  // client IP so Better Auth never falls back to a shared "no-trusted-ip"
+  // bucket or accepts client-spoofed single-hop headers.
+  app.use((request: Request, _response: Response, next: NextFunction) => {
+    const socketIp = normalizeIpAddress(request.socket?.remoteAddress);
+    const peerTrusted =
+      socketIp !== null &&
+      isTrustedProxyIp !== null &&
+      isTrustedProxyIp(socketIp);
+
+    if (!peerTrusted) {
+      delete request.headers["x-forwarded-for"];
+      delete request.headers["x-forwarded-proto"];
+
+      if (socketIp) {
+        request.headers["x-forwarded-for"] = socketIp;
+      }
+
+      next();
+      return;
+    }
+
+    const rawForwardedFor = request.headers["x-forwarded-for"];
+    const headerValue = Array.isArray(rawForwardedFor)
+      ? rawForwardedFor.join(",")
+      : rawForwardedFor;
+    let resolvedClientIp: string | null = null;
+
+    if (typeof headerValue === "string") {
+      const candidates = headerValue
+        .split(",")
+        .map((entry) => entry.trim())
+        .filter(Boolean);
+
+      for (let i = candidates.length - 1; i >= 0; i -= 1) {
+        const candidateIp = normalizeIpAddress(candidates[i]);
+
+        if (!candidateIp) {
+          break;
+        }
+
+        if (isTrustedProxyIp(candidateIp)) {
+          continue;
+        }
+
+        resolvedClientIp = candidateIp;
+        break;
+      }
+    }
+
+    const clientIp = resolvedClientIp ?? socketIp;
+
+    if (clientIp) {
+      request.headers["x-forwarded-for"] = clientIp;
+    } else {
+      delete request.headers["x-forwarded-for"];
+    }
+
+    next();
+  });
 
   app.use((request: Request, response: Response, next: NextFunction) => {
     response.setHeader("X-Content-Type-Options", "nosniff");

@@ -90,6 +90,12 @@ function connectionFailureReason(connection: ConversationConnection): string {
 export type ConnectionAwareMetaProviderOptions = Readonly<{
   /** Legacy single-workspace configuration; used only during migration. */
   legacyConfig?: MetaOutboundConfig | null;
+  /**
+   * Global kill switch for real Meta outbound sending (`META_OUTBOUND_ENABLED`).
+   * Must be true (or enabled via `META_OUTBOUND_ENABLED=true`) before any
+   * connection-backed Meta HTTP call is attempted.
+   */
+  enabled?: boolean;
   fetchImplementation?: typeof fetch;
   timeoutMs?: number;
   environment?: NodeJS.ProcessEnv;
@@ -102,6 +108,7 @@ export class ConnectionAwareMetaProvider implements OutboundMessageProvider {
 
   readonly #pool: Pool;
   readonly #legacyConfig: MetaOutboundConfig | null;
+  readonly #enabled: boolean;
   readonly #fetch: typeof fetch;
   readonly #timeoutMs: number;
   readonly #environment: NodeJS.ProcessEnv;
@@ -114,11 +121,21 @@ export class ConnectionAwareMetaProvider implements OutboundMessageProvider {
     this.#timeoutMs = options.timeoutMs ?? META_API_TIMEOUT_MS;
     this.#environment = options.environment ?? process.env;
     this.#now = options.now ?? (() => new Date());
+    this.#enabled =
+      options.enabled ??
+      this.#environment["META_OUTBOUND_ENABLED"]?.trim().toLowerCase() ===
+        "true";
   }
 
   async send(
     input: OutboundProviderSendInput,
   ): Promise<OutboundProviderSendResult> {
+    if (!this.#enabled) {
+      throw new OutboundProviderError(
+        "Outbound send rejected: real Meta outbound sending is disabled because META_OUTBOUND_ENABLED=false.",
+      );
+    }
+
     const { workspaceId, conversationId, content, recipientPhone } = input;
 
     let connection: ConversationConnection | null;
@@ -221,13 +238,12 @@ export class ConnectionAwareMetaProvider implements OutboundMessageProvider {
         throw error;
       }
 
-      const reason =
-        error instanceof Error ? error.message : "Pre-send validation failed";
+      console.error(
+        "Outbound pre-send validation failed:",
+        error instanceof Error ? error.message : "Unknown error",
+      );
       throw new OutboundProviderError(
-        truncateToCodePoints(
-          `Outbound send rejected before provider request: ${reason}`,
-          MAX_PROVIDER_ERROR_LENGTH,
-        ),
+        "Outbound send rejected before provider request: internal validation failed.",
       );
     }
 

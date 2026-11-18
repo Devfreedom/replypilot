@@ -1,15 +1,18 @@
-import { hostname } from "node:os";
+import { randomUUID } from "node:crypto";
 import { loadConfig } from "../config.js";
 import { createPool } from "../db/pool.js";
 import { loadMetaOutboundConfig } from "./meta-config.js";
 import { ConnectionAwareMetaProvider } from "./meta-connection-provider.js";
 import { MockOutboundMessageProvider, type OutboundMessageProvider } from "./provider.js";
-import { runOutboundWorkerOnce, type OutboundWorkerResult } from "./worker.js";
+import {
+  parseWorkerStaleAfterMs,
+  runOutboundWorkerOnce,
+  type OutboundWorkerResult,
+} from "./worker.js";
 import { recordWorkerHeartbeat } from "./worker-status.js";
 
 const DEFAULT_POLL_INTERVAL_MS = 2_000;
 const DEFAULT_BATCH_SIZE = 10;
-const DEFAULT_STALE_AFTER_MS = 5 * 60 * 1_000;
 
 function positiveInteger(name: string, fallback: number): number {
   const raw = process.env[name]?.trim();
@@ -89,12 +92,11 @@ async function main(): Promise<void> {
     "OUTBOUND_WORKER_BATCH_SIZE",
     DEFAULT_BATCH_SIZE,
   );
-  const staleAfterMs = positiveInteger(
-    "OUTBOUND_WORKER_STALE_MS",
-    DEFAULT_STALE_AFTER_MS,
+  const staleAfterMs = parseWorkerStaleAfterMs(
+    process.env.OUTBOUND_WORKER_STALE_MS,
   );
   const pool = createPool(config.databaseUrl);
-  const workerId = `${hostname()}:${process.pid}`;
+  const workerId = `worker-${randomUUID().slice(0, 12)}`;
   const workerStartedAt = new Date();
 
   // Local-only controlled failure controls. Empty in normal development.
@@ -106,6 +108,8 @@ async function main(): Promise<void> {
   // Load Meta outbound configuration. Fails closed for production and invalid
   // enabled configurations.
   const metaConfig = loadMetaOutboundConfig();
+  const metaOutboundEnabled =
+    process.env.META_OUTBOUND_ENABLED?.trim().toLowerCase() === "true";
 
   const providers: Array<
     Readonly<{ provider: OutboundMessageProvider; label: string }>
@@ -117,12 +121,12 @@ async function main(): Promise<void> {
   });
 
   // The WhatsApp provider resolves each conversation's workspace-owned
-  // connection at send time. The legacy test configuration is still passed for
-  // the single-test-workspace integration during migration. Registering it
-  // even when no connection exists is safe: only rows queued for the
-  // "whatsapp" provider are claimed.
+  // connection at send time, gated by the global META_OUTBOUND_ENABLED kill
+  // switch. Registering it even when disabled or unconfigured ensures queued
+  // "whatsapp" rows fail closed instead of falling back to mock delivery.
   providers.push({
     provider: new ConnectionAwareMetaProvider(pool, {
+      enabled: metaOutboundEnabled,
       legacyConfig: metaConfig,
     }),
     label: "whatsapp",
@@ -136,13 +140,17 @@ async function main(): Promise<void> {
     // Never log the access token or any credential. Only log non-secret
     // identifiers for operational visibility.
     log("outbound_worker_provider_meta", {
+      enabled: metaOutboundEnabled,
       senderPhoneNumberId: metaConfig.senderPhoneNumberId,
       testWorkspaceId: metaConfig.testWorkspaceId,
       graphApiVersion: metaConfig.graphApiVersion,
       allowedRecipients: metaConfig.allowedRecipients.size,
     });
   } else {
-    log("outbound_worker_provider_meta", { legacyConfigured: false });
+    log("outbound_worker_provider_meta", {
+      enabled: metaOutboundEnabled,
+      legacyConfigured: false,
+    });
   }
 
   if (Object.keys(mockFailKeys).length > 0) {
@@ -204,12 +212,12 @@ async function main(): Promise<void> {
           }
         } catch (error) {
           lastTick = {
-            error:
-              error instanceof Error ? error.message : "Unknown error.",
+            error: "worker_tick_failed",
           };
           log("outbound_worker_error", {
             provider: provider.name,
-            message: lastTick.error,
+            message:
+              error instanceof Error ? error.message : "Unknown error.",
           });
         }
 
