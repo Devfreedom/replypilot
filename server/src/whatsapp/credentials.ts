@@ -107,9 +107,59 @@ export function isCredentialEncryptionConfigured(
   }
 }
 
+export type WhatsAppCredentialAadOption =
+  | string
+  | Readonly<{ aad?: string }>;
+
+export function whatsappCredentialAad(
+  workspaceId: string,
+  phoneNumberId: string,
+): string {
+  return `${workspaceId}:${phoneNumberId}`;
+}
+
+function resolveAad(option?: WhatsAppCredentialAadOption): string {
+  if (typeof option === "string") {
+    return option;
+  }
+  return option?.aad ?? "";
+}
+
+function decryptOnce(
+  key: Buffer,
+  iv: Buffer,
+  authTag: Buffer,
+  ciphertext: Buffer,
+  aad: string,
+): string {
+  const decipher = createDecipheriv(ALGORITHM, key, iv, {
+    authTagLength: AUTH_TAG_BYTES,
+  });
+
+  if (aad) {
+    decipher.setAAD(Buffer.from(aad, "utf8"));
+  }
+
+  decipher.setAuthTag(authTag);
+
+  const plaintext = Buffer.concat([
+    decipher.update(ciphertext),
+    decipher.final(),
+  ]).toString("utf8");
+
+  if (!plaintext) {
+    throw new WhatsAppCredentialError(
+      "WhatsApp credential decrypted to an empty token.",
+    );
+  }
+
+  return plaintext;
+}
+
 export function encryptWhatsAppToken(
   token: string,
   environment: NodeJS.ProcessEnv = process.env,
+  aadOrOptions?: WhatsAppCredentialAadOption,
 ): EncryptedWhatsAppToken {
   const value = token.trim();
 
@@ -126,9 +176,15 @@ export function encryptWhatsAppToken(
   const key = readEncryptionKey(environment);
   const keyVersion = readKeyVersion(environment);
   const iv = randomBytes(IV_BYTES);
+  const aad = resolveAad(aadOrOptions);
   const cipher = createCipheriv(ALGORITHM, key, iv, {
     authTagLength: AUTH_TAG_BYTES,
   });
+
+  if (aad) {
+    cipher.setAAD(Buffer.from(aad, "utf8"));
+  }
+
   const ciphertext = Buffer.concat([
     cipher.update(value, "utf8"),
     cipher.final(),
@@ -156,6 +212,7 @@ export function decryptWhatsAppToken(
     keyVersion: string;
   }>,
   environment: NodeJS.ProcessEnv = process.env,
+  aadOrOptions?: WhatsAppCredentialAadOption,
 ): string {
   const key = readEncryptionKey(environment);
   const expectedVersion = readKeyVersion(environment);
@@ -186,27 +243,26 @@ export function decryptWhatsAppToken(
     );
   }
 
+  const aad = resolveAad(aadOrOptions);
+
   try {
-    const decipher = createDecipheriv(ALGORITHM, key, iv, {
-      authTagLength: AUTH_TAG_BYTES,
-    });
-    decipher.setAuthTag(authTag);
-
-    const plaintext = Buffer.concat([
-      decipher.update(ciphertext),
-      decipher.final(),
-    ]).toString("utf8");
-
-    if (!plaintext) {
-      throw new WhatsAppCredentialError(
-        "WhatsApp credential decrypted to an empty token.",
-      );
-    }
-
-    return plaintext;
+    return decryptOnce(key, iv, authTag, ciphertext, aad);
   } catch (error) {
     if (error instanceof WhatsAppCredentialError) {
       throw error;
+    }
+
+    // Legacy tokens encrypted before AAD tenant binding carry no AAD; retry
+    // once without AAD so existing stored rows remain readable while AAD-bound
+    // ciphertexts still fail authentication under any mismatched or empty AAD.
+    if (aad) {
+      try {
+        return decryptOnce(key, iv, authTag, ciphertext, "");
+      } catch (fallbackError) {
+        if (fallbackError instanceof WhatsAppCredentialError) {
+          throw fallbackError;
+        }
+      }
     }
 
     throw new WhatsAppCredentialError(

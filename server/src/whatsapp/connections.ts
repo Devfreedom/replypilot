@@ -13,6 +13,7 @@
 import type { Pool, PoolClient } from "pg";
 import {
   encryptWhatsAppToken,
+  whatsappCredentialAad,
   type EncryptedWhatsAppToken,
 } from "./credentials.js";
 import { WhatsAppPhoneNumberOwnedByAnotherWorkspaceError } from "./repository.js";
@@ -547,7 +548,11 @@ export async function registerWhatsAppConnection(
   environment: NodeJS.ProcessEnv = process.env,
 ): Promise<WhatsAppConnectionSummary> {
   const encryptedToken = input.accessToken
-    ? encryptWhatsAppToken(input.accessToken, environment)
+    ? encryptWhatsAppToken(
+        input.accessToken,
+        environment,
+        whatsappCredentialAad(input.workspaceId, input.phoneNumberId),
+      )
     : null;
   const status = input.status ?? "pending";
   const activatedAt = status === "active" ? new Date() : null;
@@ -767,6 +772,7 @@ export async function upsertVerifiedWhatsAppConnection(
   const encryptedToken = encryptWhatsAppToken(
     input.accessToken,
     environment,
+    whatsappCredentialAad(input.workspaceId, input.phoneNumberId),
   );
   const verifiedAt = input.verifiedAt ?? new Date();
   const ownedByOther = await queryable.query<{

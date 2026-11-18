@@ -1234,7 +1234,7 @@ export async function processOutboundDeliveryEvent(
     );
     const safeFailure =
       "Delivery event processing failed due to an internal error.";
-    await pool.query(
+    await client.query(
       `
         INSERT INTO whatsapp_delivery_events (
           event_key,

@@ -43,7 +43,10 @@ import {
   resolveConversationConnection,
   type ConversationConnection,
 } from "../whatsapp/connections.js";
-import { decryptWhatsAppToken } from "../whatsapp/credentials.js";
+import {
+  decryptWhatsAppToken,
+  whatsappCredentialAad,
+} from "../whatsapp/credentials.js";
 import { checkServiceWindow } from "../whatsapp/service-window.js";
 import { isCustomerSuppressed } from "../whatsapp/suppression.js";
 
@@ -385,6 +388,7 @@ export class ConnectionAwareMetaProvider implements OutboundMessageProvider {
         accessToken = decryptWhatsAppToken(
           connection.encryptedToken,
           this.#environment,
+          whatsappCredentialAad(workspaceId, connection.phoneNumberId),
         );
       } catch {
         // Never include the underlying encryption error: it may name

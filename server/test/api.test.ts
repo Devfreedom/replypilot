@@ -97,6 +97,14 @@ import {
   WHATSAPP_CONNECTION_PENDING_MESSAGE,
   describeConnectionRejection,
 } from "../src/outbound/errors.js";
+import { ensureWorkspaceForUser } from "../src/workspaces/repository.js";
+import { encodeMessageCursor } from "../src/whatsapp/cursor.js";
+import {
+  decryptWhatsAppToken,
+  encryptWhatsAppToken,
+  WhatsAppCredentialError,
+  whatsappCredentialAad,
+} from "../src/whatsapp/credentials.js";
 import { suppressCustomer } from "../src/whatsapp/suppression.js";
 import {
   getTestDatabaseUrl,
@@ -17059,4 +17067,269 @@ test("C-01 protection summary reports connection-backed sending when the global 
       }
     }
   }
+});
+
+test("H-08 & M-07 createPool enforces PostgreSQL timeouts with 0 override, ensureWorkspaceForUser uses fast-path, and delivery catch avoids max-1 pool deadlock", async () => {
+  const defaultPool = createPool(testDatabaseUrl);
+  const unlimitedPool = createPool(testDatabaseUrl, {
+    statementTimeoutMs: 0,
+    idleInTransactionSessionTimeoutMs: 0,
+  });
+
+  try {
+    const defStmt = await defaultPool.query<{ statement_timeout: string }>(
+      "SHOW statement_timeout",
+    );
+    const defIdle = await defaultPool.query<{
+      idle_in_transaction_session_timeout: string;
+    }>("SHOW idle_in_transaction_session_timeout");
+    assert.equal(defStmt.rows[0]?.statement_timeout, "15s");
+    assert.equal(defIdle.rows[0]?.idle_in_transaction_session_timeout, "30s");
+
+    const unlStmt = await unlimitedPool.query<{ statement_timeout: string }>(
+      "SHOW statement_timeout",
+    );
+    const unlIdle = await unlimitedPool.query<{
+      idle_in_transaction_session_timeout: string;
+    }>("SHOW idle_in_transaction_session_timeout");
+    assert.equal(unlStmt.rows[0]?.statement_timeout, "0");
+    assert.equal(unlIdle.rows[0]?.idle_in_transaction_session_timeout, "0");
+  } finally {
+    await defaultPool.end();
+    await unlimitedPool.end();
+  }
+
+  // H-08 fast-path: existing user workspace lookup must not call pool.connect().
+  const owner = requireSession();
+  let connectCount = 0;
+  const trackedPool = new Proxy(pool, {
+    get(target, prop, receiver) {
+      if (prop === "connect") {
+        return (...args: unknown[]) => {
+          connectCount += 1;
+          return Reflect.apply(target.connect, target, args);
+        };
+      }
+      const value = Reflect.get(target, prop, receiver);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+  const resolved = await ensureWorkspaceForUser(trackedPool, owner.user);
+  assert.equal(resolved.workspace.id, owner.workspace.id);
+  assert.equal(connectCount, 0);
+
+  // H-08 delivery catch block: max=1 pool must not self-deadlock on error.
+  const originalError = console.error;
+  console.error = () => undefined;
+
+  try {
+    const { lead, conversationId } = await createLeadWithConversation(
+      {},
+      { providerTimestamp: new Date() },
+    );
+    const draft = await createSavedDraftPayload(lead.id);
+    const approval = await approveSavedDraft(lead.id, draft.id, {
+      status: "approved",
+      sendPolicy: "approve_and_send",
+      conversationId,
+    });
+    assert.equal(approval.status, 200);
+    const outbound = (await readJson<ReplyDraftApprovalPayload>(approval))
+      .outboundMessage;
+    assert.ok(outbound);
+
+    const wamid = `wamid.h08-${randomUUID()}`;
+    await pool.query(
+      "UPDATE outbound_messages SET status = 'sent', provider_message_id = $2, sent_at = now() WHERE id = $1",
+      [outbound.id, wamid],
+    );
+
+    await pool.query(`
+      CREATE FUNCTION replypilot_test_h08_db_fault()
+      RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN
+        IF NEW.provider_status_at IS NOT NULL THEN
+          RAISE EXCEPTION 'h08_single_conn_fault';
+        END IF;
+        RETURN NEW;
+      END
+      $$
+    `);
+    await pool.query(`
+      CREATE TRIGGER replypilot_test_h08_db_fault
+      BEFORE UPDATE ON outbound_messages
+      FOR EACH ROW EXECUTE FUNCTION replypilot_test_h08_db_fault()
+    `);
+
+    const singleConnPool = new Pool({
+      connectionString: testDatabaseUrl,
+      max: 1,
+      connectionTimeoutMillis: 1_500,
+    });
+
+    try {
+      await assert.rejects(
+        () =>
+          processOutboundDeliveryEvent(
+            singleConnPool,
+            owner.workspace.id,
+            {
+              providerMessageId: wamid,
+              phoneNumberId: TEST_WHATSAPP_PHONE_NUMBER_ID,
+              status: "delivered",
+              providerTimestamp: new Date(),
+              errorDescription: null,
+            },
+            null,
+          ),
+        /h08_single_conn_fault/,
+      );
+
+      const eventsRes = await fetch(
+        `${baseUrl}/api/whatsapp/delivery-events?limit=10`,
+      );
+      assert.equal(eventsRes.status, 200);
+      const eventsPayload = await readJson<{
+        events: Array<{ processingOutcome: string; failureReason: string | null }>;
+      }>(eventsRes);
+      assert.equal(eventsPayload.events[0]?.processingOutcome, "failed");
+    } finally {
+      await singleConnPool.end();
+      await pool.query(
+        "DROP TRIGGER IF EXISTS replypilot_test_h08_db_fault ON outbound_messages",
+      );
+      await pool.query("DROP FUNCTION IF EXISTS replypilot_test_h08_db_fault()");
+    }
+  } finally {
+    console.error = originalError;
+  }
+});
+
+test("M-05 crafted cursor with out-of-range negative microseconds returns HTTP 400", async () => {
+  const { conversationId } = await createLeadWithConversation(
+    { name: "M-05 Cursor Target" },
+    { providerTimestamp: new Date() },
+  );
+
+  const badCursor = encodeMessageCursor({
+    providerTimestampUs: "-999999999999999999",
+    createdAtUs: "1700000000000000",
+    id: randomUUID(),
+  });
+
+  const response = await fetch(
+    `${baseUrl}/api/conversations/${conversationId}/messages?limit=10&cursor=${encodeURIComponent(badCursor)}`,
+  );
+  assert.equal(response.status, 400);
+  const payload = await readJson<{
+    error: string;
+    details: Array<{ field: string; message: string }>;
+  }>(response);
+  assert.equal(payload.details[0]?.field, "cursor");
+});
+
+test("L-01 AAD-bound ciphertext swap across workspaces fails decryption while legacy pre-AAD ciphertexts remain readable", async () => {
+  const ownerA = requireSession();
+  const ownerB = await registerUser({
+    email: `l01-b-${randomUUID()}@example.test`,
+    name: "L01 Workspace B",
+  });
+
+  await withCredentialEncryption(async () => {
+    // Legacy ciphertext encrypted without AAD still decrypts with AAD passed.
+    const legacyToken = "EAABc0LegacyTokenWithoutAadMustStillWork1234";
+    const legacyEncrypted = encryptWhatsAppToken(legacyToken, process.env);
+    assert.equal(
+      decryptWhatsAppToken(
+        legacyEncrypted,
+        process.env,
+        whatsappCredentialAad(ownerA.workspace.id, "106540000000911"),
+      ),
+      legacyToken,
+    );
+
+    // Direct AAD mismatch check (including empty AAD against AAD-bound record).
+    const aadToken = "EAABc0AadBoundTokenMustRejectWrongTenant1234";
+    const aadEncrypted = encryptWhatsAppToken(
+      aadToken,
+      process.env,
+      whatsappCredentialAad(ownerB.workspace.id, "106540000000912"),
+    );
+    assert.throws(
+      () =>
+        decryptWhatsAppToken(
+          aadEncrypted,
+          process.env,
+          whatsappCredentialAad(ownerA.workspace.id, "106540000000911"),
+        ),
+      WhatsAppCredentialError,
+    );
+    assert.throws(
+      () => decryptWhatsAppToken(aadEncrypted, process.env),
+      WhatsAppCredentialError,
+    );
+
+    // End-to-end DB swap attack: copy Workspace B's encrypted token columns into Workspace A's row.
+    const connAId = await registerTestConnection({
+      workspaceId: ownerA.workspace.id,
+      phoneNumberId: "106540000000911",
+      accessToken: "EAABc0WorkspaceATokenOriginalSecretValue123",
+    });
+    const connBId = await registerTestConnection({
+      workspaceId: ownerB.workspace.id,
+      phoneNumberId: "106540000000912",
+      accessToken: "EAABc0WorkspaceBTokenStolenSecretValue456",
+    });
+
+    await pool.query(
+      `
+        UPDATE whatsapp_connections AS dst
+        SET access_token_ciphertext = src.access_token_ciphertext,
+            access_token_iv = src.access_token_iv,
+            access_token_auth_tag = src.access_token_auth_tag,
+            credential_key_version = src.credential_key_version
+        FROM whatsapp_connections AS src
+        WHERE dst.id = $1
+          AND src.id = $2
+      `,
+      [connAId, connBId],
+    );
+
+    const now = new Date();
+    const { conversationId: convA } = await createLeadWithConversation(
+      { name: "L01 Customer A" },
+      {
+        phoneNumberId: "106540000000911",
+        senderWaId: "16505559111",
+        senderPhoneNumber: "16505559111",
+        providerTimestamp: now,
+      },
+    );
+
+    let fetchCalls = 0;
+    const provider = new ConnectionAwareMetaProvider(pool, {
+      enabled: true,
+      environment: process.env,
+      now: () => now,
+      fetchImplementation: async () => {
+        fetchCalls += 1;
+        return new Response("{}", { status: 200 });
+      },
+    });
+
+    await assert.rejects(
+      () =>
+        provider.send({
+          workspaceId: ownerA.workspace.id,
+          conversationId: convA,
+          content: "Should fail GCM AAD check",
+          idempotencyKey: `l01-${randomUUID()}`,
+          recipientPhone: "+16505559111",
+        }),
+      (error: unknown) =>
+        error instanceof OutboundProviderError &&
+        /credentials could not be decrypted/i.test(error.message),
+    );
+    assert.equal(fetchCalls, 0);
+  });
 });

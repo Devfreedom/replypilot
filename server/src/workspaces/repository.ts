@@ -61,10 +61,10 @@ function mapContextRow(row: ContextRow): WorkspaceContext {
 }
 
 async function selectDefaultMembership(
-  client: PoolClient,
+  queryable: Pool | PoolClient,
   userId: string,
 ): Promise<WorkspaceContext | null> {
-  const result = await client.query<ContextRow>(
+  const result = await queryable.query<ContextRow>(
     `
       ${CONTEXT_SELECT}
       WHERE membership.user_id = $1
@@ -93,6 +93,12 @@ export async function ensureWorkspaceForUser(
   pool: Pool,
   user: WorkspaceUser,
 ): Promise<WorkspaceContext> {
+  const fastExisting = await selectDefaultMembership(pool, user.id);
+
+  if (fastExisting) {
+    return fastExisting;
+  }
+
   const client = await pool.connect();
 
   try {

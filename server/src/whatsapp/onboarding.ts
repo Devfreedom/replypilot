@@ -28,7 +28,10 @@ import {
   type WhatsAppConnectionSummary,
 } from "./connections.js";
 import { WhatsAppPhoneNumberOwnedByAnotherWorkspaceError } from "./repository.js";
-import { decryptWhatsAppToken } from "./credentials.js";
+import {
+  decryptWhatsAppToken,
+  whatsappCredentialAad,
+} from "./credentials.js";
 import {
   createMetaGraphClient,
   MetaGraphError,
@@ -790,6 +793,7 @@ export async function verifyWhatsAppConnection(
     accessToken = decryptWhatsAppToken(
       stored.encryptedToken,
       input.environment ?? process.env,
+      whatsappCredentialAad(input.workspaceId, stored.phoneNumberId),
     );
   } catch {
     return recordFailure(
