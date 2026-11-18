@@ -314,3 +314,80 @@ test("Connect is owner-only, configuration-gated, and duplicate-click safe", () 
   assert.equal(canStartEmbeddedSignup({ ...base, configLoading: true }), false);
   assert.equal(canStartEmbeddedSignup({ ...base, connecting: true }), false);
 });
+
+test("H-05 parses JSON-string serialized WA_EMBEDDED_SIGNUP postMessage payloads safely", () => {
+  const serializedFinish = JSON.stringify({
+    type: "WA_EMBEDDED_SIGNUP",
+    event: "FINISH",
+    data: {
+      phone_number_id: "106540000000001",
+      waba_id: "102290129340398",
+      business_id: "900000000000001",
+    },
+  });
+
+  assert.deepEqual(parseEmbeddedSignupEventData(serializedFinish), {
+    kind: "success",
+    phoneNumberId: "106540000000001",
+    wabaId: "102290129340398",
+    businessId: "900000000000001",
+  });
+
+  assert.deepEqual(
+    parseEmbeddedSignupEventData(
+      JSON.stringify({ type: "WA_EMBEDDED_SIGNUP", event: "CANCEL" }),
+    ),
+    { kind: "cancelled" },
+  );
+
+  const received: unknown[] = [];
+  const handled = handleEmbeddedSignupMessage(
+    {
+      origin: "https://www.facebook.com",
+      data: serializedFinish,
+    },
+    (event) => received.push(event),
+  );
+  assert.equal(handled, true);
+  assert.deepEqual(received, [
+    {
+      kind: "success",
+      phoneNumberId: "106540000000001",
+      wabaId: "102290129340398",
+      businessId: "900000000000001",
+    },
+  ]);
+
+  // Malformed, non-object, and oversized (> 16_384 char) strings are safely ignored.
+  assert.deepEqual(parseEmbeddedSignupEventData("{not valid json"), {
+    kind: "ignored",
+  });
+  assert.deepEqual(parseEmbeddedSignupEventData("null"), { kind: "ignored" });
+  assert.deepEqual(parseEmbeddedSignupEventData("[]"), { kind: "ignored" });
+  assert.deepEqual(parseEmbeddedSignupEventData("42"), { kind: "ignored" });
+
+  const oversized = JSON.stringify({
+    type: "WA_EMBEDDED_SIGNUP",
+    event: "FINISH",
+    data: {
+      phone_number_id: "106540000000001",
+      waba_id: "102290129340398",
+      padding: "x".repeat(16_400),
+    },
+  });
+  assert.ok(oversized.length > 16_384);
+  assert.deepEqual(parseEmbeddedSignupEventData(oversized), {
+    kind: "ignored",
+  });
+
+  // Untrusted origin with JSON string is still rejected before parsing.
+  const rejected: unknown[] = [];
+  assert.equal(
+    handleEmbeddedSignupMessage(
+      { origin: "https://evil.example", data: serializedFinish },
+      (event) => rejected.push(event),
+    ),
+    false,
+  );
+  assert.deepEqual(rejected, []);
+});

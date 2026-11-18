@@ -10,6 +10,7 @@
     "dev:api": "node --env-file-if-exists=.env --import tsx --watch server/src/index.ts",
     "build:api": "tsc -p server/tsconfig.json",
     "start:api": "node --env-file-if-exists=.env server/dist/index.js",
+    "start:migrate": "node --env-file-if-exists=.env server/dist/db/migrate-cli.js",
     "worker:outbound": "node --env-file-if-exists=.env --import tsx server/src/outbound/worker-cli.ts",
     "start:worker": "node --env-file-if-exists=.env server/dist/outbound/worker-cli.js",
     "typecheck:api": "tsc -p server/tsconfig.test.json",
