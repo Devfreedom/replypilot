@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { Pool } from "pg";
-import { createAuth } from "../src/auth/config.js";
+import {
+  createAuth,
+  createTrustedProxyMatcher,
+  isValidProxyIpOrCidr,
+  normalizeIpAddress,
+} from "../src/auth/config.js";
 import { ConfigError, loadConfig } from "../src/config.js";
 
 const BASE_ENVIRONMENT = {
@@ -314,4 +319,72 @@ test("C1 loadConfig validates RESEND_API_KEY and AUTH_EMAIL_FROM pairing and req
       }),
     /AUTH_EMAIL_FROM/,
   );
+});
+
+test("H-11 loadConfig defaults HOST to loopback and accepts an override", () => {
+  assert.equal(loadConfig(BASE_ENVIRONMENT).host, "127.0.0.1");
+  assert.equal(
+    loadConfig({ ...BASE_ENVIRONMENT, HOST: "  0.0.0.0  " }).host,
+    "0.0.0.0",
+  );
+  assert.throws(
+    () => loadConfig({ ...BASE_ENVIRONMENT, HOST: "   " }),
+    /Invalid server environment:.*HOST/,
+  );
+});
+
+test("H-01 an IPv6 CIDR never matches IPv4 addresses and IPv4 CIDRs never match IPv6", () => {
+  for (const cidr of ["::1/64", "::/64", "::/0"]) {
+    const matcher = createTrustedProxyMatcher([cidr]);
+    assert.equal(matcher("203.0.113.50"), false, `${cidr} must not trust IPv4`);
+    assert.equal(matcher("1.2.3.4"), false);
+    assert.equal(matcher("::ffff:203.0.113.50"), false);
+    assert.equal(matcher("::1"), true);
+  }
+
+  const ipv4 = createTrustedProxyMatcher(["10.0.0.0/8", "192.0.2.10"]);
+  assert.equal(ipv4("10.20.30.40"), true);
+  assert.equal(ipv4("192.0.2.10"), true);
+  assert.equal(ipv4("192.0.2.11"), false);
+  assert.equal(ipv4("::1"), false);
+  assert.equal(ipv4("2001:db8::1"), false);
+});
+
+test("M-01 IPv4-mapped IPv6 CIDRs keep their prefix as an IPv4 prefix and need a prefix of at least 96", () => {
+  const matcher = createTrustedProxyMatcher(["::ffff:10.0.0.0/104"]);
+  assert.equal(matcher("10.0.0.1"), true);
+  assert.equal(matcher("10.255.255.254"), true);
+  assert.equal(matcher("::ffff:10.0.0.254"), true);
+  assert.equal(matcher("::ffff:a00:5"), true);
+  assert.equal(matcher("11.0.0.1"), false);
+
+  assert.equal(isValidProxyIpOrCidr("::ffff:10.0.0.0/104"), true);
+  assert.equal(isValidProxyIpOrCidr("::ffff:10.0.0.0/96"), true);
+  assert.equal(isValidProxyIpOrCidr("::ffff:10.0.0.0/64"), false);
+  assert.equal(isValidProxyIpOrCidr("::ffff:10.0.0.0/95"), false);
+  assert.throws(
+    () => createTrustedProxyMatcher(["::ffff:10.0.0.0/64"]),
+    /Invalid trusted proxy IP or CIDR/,
+  );
+});
+
+test("M-01 zone indices are rejected and every IPv4-mapped spelling normalizes to IPv4", () => {
+  assert.equal(normalizeIpAddress("fe80::1%eth0"), null);
+  assert.equal(normalizeIpAddress("2001:db8::1%1"), null);
+  assert.equal(isValidProxyIpOrCidr("fe80::1%eth0"), false);
+  assert.equal(isValidProxyIpOrCidr("fe80::/64%eth0"), false);
+  assert.throws(
+    () => createTrustedProxyMatcher(["fe80::1%eth0"]),
+    /Invalid trusted proxy IP or CIDR/,
+  );
+
+  assert.equal(normalizeIpAddress("::ffff:127.0.0.1"), "127.0.0.1");
+  assert.equal(normalizeIpAddress("::FFFF:7F00:1"), "127.0.0.1");
+  assert.equal(normalizeIpAddress("::ffff:7f00:1"), "127.0.0.1");
+  assert.equal(normalizeIpAddress("0:0:0:0:0:ffff:127.0.0.1"), "127.0.0.1");
+  assert.equal(normalizeIpAddress("2001:DB8:0:0:0:0:0:1"), "2001:db8::1");
+  assert.equal(normalizeIpAddress("203.0.113.9"), "203.0.113.9");
+  assert.equal(normalizeIpAddress(""), null);
+  assert.equal(normalizeIpAddress("not-an-ip"), null);
+  assert.equal(normalizeIpAddress("0x7f.1"), null);
 });

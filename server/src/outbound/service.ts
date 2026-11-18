@@ -5,6 +5,8 @@ import { resolveOutboundProviderName } from "./meta-config.js";
 import {
   getOutboundMessageForDraft,
   insertQueuedOutboundMessage,
+  isConversationCustomerSuppressed,
+  requeueUnattemptedCancelledOutbound,
   resetFailedOutboundForRetry,
   resolveConversationForLead,
 } from "./repository.js";
@@ -28,6 +30,7 @@ export type QueueManualSendResult =
   | Readonly<{ kind: "conversation-ambiguous" }>
   | Readonly<{ kind: "conversation-not-found" }>
   | Readonly<{ kind: "conversation-mismatch" }>
+  | Readonly<{ kind: "customer-suppressed" }>
   | Readonly<{
       kind: "connection-unusable";
       code: string;
@@ -86,8 +89,13 @@ export async function queueManualSend(
       return { kind: "manual-review" };
     }
 
+    const canRequeueUnattemptedCancelled =
+      existingOutbound?.status === "cancelled" &&
+      existingOutbound.attempts === 0;
+
     if (
       existingOutbound &&
+      !canRequeueUnattemptedCancelled &&
       input.conversationId !== undefined &&
       input.conversationId !== existingOutbound.conversationId
     ) {
@@ -95,25 +103,29 @@ export async function queueManualSend(
       return { kind: "conversation-mismatch" };
     }
 
-    // Never retry a historical snapshot against different approved text. The
-    // one-outbound-per-draft constraint means the owner must start a new draft
-    // for revised content rather than silently sending stale content.
+    // Never retry a historical snapshot against different approved text, except
+    // when an unattempted cancelled row is re-queued before any delivery attempt.
     if (
       existingOutbound &&
+      !canRequeueUnattemptedCancelled &&
       existingOutbound.content !== draft.draft_reply
     ) {
       await client.query("ROLLBACK");
       return { kind: "content-changed" };
     }
 
-    if (existingOutbound?.status === "cancelled") {
+    if (
+      existingOutbound?.status === "cancelled" &&
+      !canRequeueUnattemptedCancelled
+    ) {
       await client.query("ROLLBACK");
       return { kind: "not-retryable" };
     }
 
     if (
       existingOutbound &&
-      existingOutbound.status !== "failed"
+      existingOutbound.status !== "failed" &&
+      !canRequeueUnattemptedCancelled
     ) {
       await client.query("COMMIT");
       return { kind: "ok", outboundMessage: existingOutbound };
@@ -122,8 +134,9 @@ export async function queueManualSend(
     const conversation = await resolveConversationForLead(client, {
       workspaceId: input.workspaceId,
       leadId: draft.lead_id,
-      conversationId:
-        existingOutbound?.conversationId ?? input.conversationId,
+      conversationId: canRequeueUnattemptedCancelled
+        ? input.conversationId
+        : (existingOutbound?.conversationId ?? input.conversationId),
     });
 
     if (conversation.kind !== "ok") {
@@ -155,6 +168,17 @@ export async function queueManualSend(
         kind: "connection-unusable",
         ...describeConnectionRejection(connectionStatus),
       };
+    }
+
+    if (
+      await isConversationCustomerSuppressed(
+        client,
+        input.workspaceId,
+        conversation.conversationId,
+      )
+    ) {
+      await client.query("ROLLBACK");
+      return { kind: "customer-suppressed" };
     }
 
     const resolvedProvider = await resolveOutboundProviderName(
@@ -196,8 +220,25 @@ export async function queueManualSend(
       await client.query("ROLLBACK");
       return { kind: "manual-review" };
     } else if (outboundMessage.status === "cancelled") {
-      await client.query("ROLLBACK");
-      return { kind: "not-retryable" };
+      if (outboundMessage.attempts !== 0) {
+        await client.query("ROLLBACK");
+        return { kind: "not-retryable" };
+      }
+
+      const requeued = await requeueUnattemptedCancelledOutbound(client, {
+        workspaceId: input.workspaceId,
+        outboundMessageId: outboundMessage.id,
+        conversationId: conversation.conversationId,
+        content: draft.draft_reply,
+        provider: resolvedProvider,
+      });
+
+      if (!requeued) {
+        await client.query("ROLLBACK");
+        return { kind: "not-retryable" };
+      }
+
+      outboundMessage = requeued;
     }
 
     await client.query("COMMIT");

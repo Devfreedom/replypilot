@@ -13,6 +13,7 @@
 import type { Pool, PoolClient } from "pg";
 import {
   encryptWhatsAppToken,
+  whatsappCredentialAad,
   type EncryptedWhatsAppToken,
 } from "./credentials.js";
 import { WhatsAppPhoneNumberOwnedByAnotherWorkspaceError } from "./repository.js";
@@ -547,7 +548,11 @@ export async function registerWhatsAppConnection(
   environment: NodeJS.ProcessEnv = process.env,
 ): Promise<WhatsAppConnectionSummary> {
   const encryptedToken = input.accessToken
-    ? encryptWhatsAppToken(input.accessToken, environment)
+    ? encryptWhatsAppToken(
+        input.accessToken,
+        environment,
+        whatsappCredentialAad(input.workspaceId, input.phoneNumberId),
+      )
     : null;
   const status = input.status ?? "pending";
   const activatedAt = status === "active" ? new Date() : null;
@@ -767,104 +772,48 @@ export async function upsertVerifiedWhatsAppConnection(
   const encryptedToken = encryptWhatsAppToken(
     input.accessToken,
     environment,
+    whatsappCredentialAad(input.workspaceId, input.phoneNumberId),
   );
   const verifiedAt = input.verifiedAt ?? new Date();
-  const ownedByOther = await queryable.query<{
-    id: string;
-    workspace_id: string;
-  }>(
-    `
-      SELECT id, workspace_id
-      FROM whatsapp_connections
-      WHERE phone_number_id = $1
-        AND status <> 'disconnected'
-        AND workspace_id <> $2
-      ORDER BY created_at ASC, id ASC
-      LIMIT 1
-    `,
-    [input.phoneNumberId, input.workspaceId],
-  );
-
-  if (ownedByOther.rows[0]) {
-    throw new WhatsAppConnectionConflictError();
-  }
-
-  const existing = await queryable.query<{ id: string }>(
-    `
-      SELECT id
-      FROM whatsapp_connections
-      WHERE workspace_id = $1
-        AND phone_number_id = $2
-      ORDER BY created_at ASC, id ASC
-      LIMIT 1
-    `,
-    [input.workspaceId, input.phoneNumberId],
-  );
-  const existingRow = existing.rows[0];
+  const ownClient: PoolClient | null =
+    "totalCount" in queryable ? await queryable.connect() : null;
+  const client: PoolClient = ownClient ?? (queryable as PoolClient);
 
   try {
-    if (existingRow) {
-      const result = await queryable.query<ConnectionRow>(
-        `
-          UPDATE whatsapp_connections
-          SET display_phone_number = $2,
-              label = COALESCE($3, label),
-              waba_id = $4,
-              status = $5,
-              access_token_ciphertext = $6,
-              access_token_iv = $7,
-              access_token_auth_tag = $8,
-              token_expires_at = $9,
-              credential_key_version = $10,
-              last_verified_at = $11::timestamptz,
-              webhook_subscribed_at = CASE
-                WHEN $12::boolean THEN $11::timestamptz
-                ELSE NULL
-              END,
-              last_error = $13,
-              activated_at = CASE
-                WHEN $5 = 'active' THEN COALESCE(activated_at, $11::timestamptz)
-                ELSE activated_at
-              END,
-              disconnected_at = CASE
-                WHEN $5 = 'active' THEN NULL
-                ELSE disconnected_at
-              END,
-              updated_at = $11
-          WHERE id = $1
-            AND workspace_id = $14
-          RETURNING ${CONNECTION_SUMMARY_COLUMNS}
-        `,
-        [
-          existingRow.id,
-          input.displayPhoneNumber ?? null,
-          input.label ?? null,
-          input.wabaId,
-          input.status,
-          encryptedToken.ciphertext,
-          encryptedToken.iv,
-          encryptedToken.authTag,
-          input.tokenExpiresAt ?? null,
-          encryptedToken.keyVersion,
-          verifiedAt,
-          input.webhookSubscribed,
-          input.lastError ?? null,
-          input.workspaceId,
-        ],
-      );
-
-      const row = result.rows[0];
-
-      if (!row) {
-        throw new Error(
-          "WhatsApp connection update did not return a row for this workspace.",
-        );
-      }
-
-      return mapConnectionSummary(row);
+    if (ownClient) {
+      await ownClient.query("BEGIN");
     }
 
-    const result = await queryable.query<ConnectionRow>(
+    // Serialize concurrent onboardings for the same Meta phone-number ID so
+    // same-workspace upserts never race on the secondary partial unique index
+    // `whatsapp_connections_phone_number_id_uidx` before hitting the
+    // `(workspace_id, phone_number_id)` conflict arbiter.
+    await client.query(
+      "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+      [`whatsapp_connection:${input.phoneNumberId}`],
+    );
+
+    const ownedByOther = await client.query<{
+      id: string;
+      workspace_id: string;
+    }>(
+      `
+        SELECT id, workspace_id
+        FROM whatsapp_connections
+        WHERE phone_number_id = $1
+          AND status <> 'disconnected'
+          AND workspace_id <> $2
+        ORDER BY created_at ASC, id ASC
+        LIMIT 1
+      `,
+      [input.phoneNumberId, input.workspaceId],
+    );
+
+    if (ownedByOther.rows[0]) {
+      throw new WhatsAppConnectionConflictError();
+    }
+
+    const result = await client.query<ConnectionRow>(
       `
         INSERT INTO whatsapp_connections (
           workspace_id,
@@ -881,15 +830,41 @@ export async function upsertVerifiedWhatsAppConnection(
           activated_at,
           last_verified_at,
           webhook_subscribed_at,
-          last_error
+          last_error,
+          updated_at
         )
         VALUES (
           $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
           CASE WHEN $6 = 'active' THEN $12::timestamptz ELSE NULL END,
           $12::timestamptz,
           CASE WHEN $13::boolean THEN $12::timestamptz ELSE NULL END,
-          $14
+          $14,
+          $12::timestamptz
         )
+        ON CONFLICT (workspace_id, phone_number_id)
+        DO UPDATE SET
+          display_phone_number = EXCLUDED.display_phone_number,
+          label = COALESCE(EXCLUDED.label, whatsapp_connections.label),
+          waba_id = EXCLUDED.waba_id,
+          status = EXCLUDED.status,
+          access_token_ciphertext = EXCLUDED.access_token_ciphertext,
+          access_token_iv = EXCLUDED.access_token_iv,
+          access_token_auth_tag = EXCLUDED.access_token_auth_tag,
+          token_expires_at = EXCLUDED.token_expires_at,
+          credential_key_version = EXCLUDED.credential_key_version,
+          last_verified_at = EXCLUDED.last_verified_at,
+          webhook_subscribed_at = EXCLUDED.webhook_subscribed_at,
+          last_error = EXCLUDED.last_error,
+          activated_at = CASE
+            WHEN EXCLUDED.status = 'active'
+              THEN COALESCE(whatsapp_connections.activated_at, EXCLUDED.activated_at)
+            ELSE whatsapp_connections.activated_at
+          END,
+          disconnected_at = CASE
+            WHEN EXCLUDED.status = 'active' THEN NULL
+            ELSE whatsapp_connections.disconnected_at
+          END,
+          updated_at = EXCLUDED.updated_at
         RETURNING ${CONNECTION_SUMMARY_COLUMNS}
       `,
       [
@@ -913,16 +888,30 @@ export async function upsertVerifiedWhatsAppConnection(
     const row = result.rows[0];
 
     if (!row) {
-      throw new Error("WhatsApp connection insert did not return a row.");
+      throw new Error("WhatsApp connection upsert did not return a row.");
+    }
+
+    if (ownClient) {
+      await ownClient.query("COMMIT");
     }
 
     return mapConnectionSummary(row);
   } catch (error) {
+    if (ownClient) {
+      try {
+        await ownClient.query("ROLLBACK");
+      } catch {
+        // Preserve the original failure.
+      }
+    }
+
     if (isPhoneNumberOwnershipConflictError(error)) {
       throw new WhatsAppConnectionConflictError();
     }
 
     throw error;
+  } finally {
+    ownClient?.release();
   }
 }
 
@@ -933,18 +922,29 @@ export type ConnectionVerificationStateInput = Readonly<{
   lastError: string | null;
   webhookSubscribed: boolean;
   verifiedAt?: Date;
+  /**
+   * Snapshot of the encrypted credential columns captured at the start of
+   * verification. When provided (including `null` for credential-less rows),
+   * the update only succeeds if all four credential columns still match,
+   * preventing a slow verification from overwriting a concurrent re-onboarding.
+   */
+  expectedEncryptedToken?: EncryptedWhatsAppToken | null;
 }>;
 
 /**
  * Records the outcome of a re-verification attempt without touching the
- * encrypted token. Only "active" clears the disconnected marker, and a
- * disconnected connection is never updated by verification.
+ * encrypted token. Only "active" clears the disconnected marker, a
+ * disconnected connection is never updated by verification, and when
+ * `expectedEncryptedToken` is supplied a connection whose credentials were
+ * replaced concurrently is left untouched (`null` is returned).
  */
 export async function setWhatsAppConnectionVerificationState(
   queryable: Pool | PoolClient,
   input: ConnectionVerificationStateInput,
 ): Promise<WhatsAppConnectionSummary | null> {
   const verifiedAt = input.verifiedAt ?? new Date();
+  const checkCredentials = input.expectedEncryptedToken !== undefined;
+  const expectedToken = input.expectedEncryptedToken ?? null;
   const result = await queryable.query<ConnectionRow>(
     `
       UPDATE whatsapp_connections
@@ -967,6 +967,15 @@ export async function setWhatsAppConnectionVerificationState(
       WHERE workspace_id = $1
         AND id = $2
         AND status <> 'disconnected'
+        AND (
+          NOT $7::boolean
+          OR (
+            access_token_ciphertext IS NOT DISTINCT FROM $8::text
+            AND access_token_iv IS NOT DISTINCT FROM $9::text
+            AND access_token_auth_tag IS NOT DISTINCT FROM $10::text
+            AND credential_key_version IS NOT DISTINCT FROM $11::text
+          )
+        )
       RETURNING ${CONNECTION_SUMMARY_COLUMNS}
     `,
     [
@@ -976,6 +985,11 @@ export async function setWhatsAppConnectionVerificationState(
       verifiedAt,
       input.webhookSubscribed,
       input.lastError,
+      checkCredentials,
+      expectedToken?.ciphertext ?? null,
+      expectedToken?.iv ?? null,
+      expectedToken?.authTag ?? null,
+      expectedToken?.keyVersion ?? null,
     ],
   );
 

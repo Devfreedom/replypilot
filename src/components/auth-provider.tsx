@@ -1,6 +1,5 @@
 "use client";
 
-import { useRouter } from "next/navigation";
 import {
   createContext,
   useCallback,
@@ -44,19 +43,22 @@ type WorkspaceState = Readonly<{
   loaded: boolean;
 }>;
 
+const INITIAL_WORKSPACE_STATE: WorkspaceState = {
+  userId: null,
+  value: null,
+  role: null,
+  replyDraftProvider: null,
+  error: null,
+  loaded: false,
+};
+
 const AuthContext = createContext<AuthContextValue | null>(null);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const router = useRouter();
-  const { data, isPending, refetch } = authClient.useSession();
-  const [workspaceState, setWorkspaceState] = useState<WorkspaceState>({
-    userId: null,
-    value: null,
-    role: null,
-    replyDraftProvider: null,
-    error: null,
-    loaded: false,
-  });
+  const { data, isPending } = authClient.useSession();
+  const [workspaceState, setWorkspaceState] = useState<WorkspaceState>(
+    INITIAL_WORKSPACE_STATE,
+  );
   const [workspaceAttempt, setWorkspaceAttempt] = useState(0);
   const userId = data?.user.id ?? null;
 
@@ -126,10 +128,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const signOut = useCallback(async () => {
-    await authClient.signOut();
-    await refetch();
-    router.replace("/sign-in");
-  }, [refetch, router]);
+    try {
+      await authClient.signOut();
+    } finally {
+      setWorkspaceState(INITIAL_WORKSPACE_STATE);
+      // eslint-disable-next-line @next/next/no-location-assign-relative-destination -- Full navigation clears cached client component trees on sign-out.
+      window.location.assign("/sign-in");
+    }
+  }, []);
 
   const activeWorkspaceState =
     userId && workspaceState.userId === userId ? workspaceState : null;

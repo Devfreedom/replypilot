@@ -1,6 +1,13 @@
-import type { InboundWhatsAppMessage } from "./types.js";
+import type { DeliveryStatusEvent, InboundWhatsAppMessage } from "./types.js";
 
-const WA_ID_PATTERN = /^\d{5,32}$/;
+export const PHONE_NUMBER_ID_PATTERN = /^\d{5,32}$/;
+export const MAX_WEBHOOK_ENTRIES = 1_000;
+export const MAX_WEBHOOK_CHANGES_PER_ENTRY = 1_000;
+export const MAX_WEBHOOK_MESSAGES_PER_PAYLOAD = 1_000;
+export const MAX_WEBHOOK_STATUSES_PER_PAYLOAD = 1_000;
+export const MAX_WEBHOOK_CONTACTS_PER_CHANGE = 1_000;
+
+const WA_ID_PATTERN = PHONE_NUMBER_ID_PATTERN;
 const WHATSAPP_IDENTIFIER_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{4,255}$/;
 const PROVIDER_MESSAGE_ID_MAX_LENGTH = 512;
 const MESSAGE_TYPE_MAX_LENGTH = 64;
@@ -16,6 +23,102 @@ export class InvalidWhatsAppPayloadError extends Error {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function assertWebhookArrayBound(
+  count: number,
+  max: number,
+  kind: string,
+  errorMessage: string,
+): void {
+  if (count <= max) {
+    return;
+  }
+
+  // Log only numeric counts; never log customer PII, bodies, or tokens.
+  console.warn(`WhatsApp webhook payload exceeded ${kind} limit.`, {
+    kind,
+    count,
+    max,
+  });
+  throw new InvalidWhatsAppPayloadError(errorMessage);
+}
+
+function readPhoneNumberId(metadata: unknown, contextLabel = ""): string {
+  if (!isRecord(metadata) || typeof metadata.phone_number_id !== "string") {
+    throw new InvalidWhatsAppPayloadError(
+      `Missing receiving phone-number ID${contextLabel}`,
+    );
+  }
+
+  if (!PHONE_NUMBER_ID_PATTERN.test(metadata.phone_number_id)) {
+    throw new InvalidWhatsAppPayloadError(
+      `Invalid receiving phone-number ID${contextLabel}`,
+    );
+  }
+
+  return metadata.phone_number_id;
+}
+
+function* iterWhatsAppMessageChanges(
+  payload: unknown,
+): Generator<Record<string, unknown>> {
+  if (!isRecord(payload) || typeof payload.object !== "string") {
+    throw new InvalidWhatsAppPayloadError("Missing webhook object");
+  }
+
+  if (payload.object !== "whatsapp_business_account") {
+    return;
+  }
+
+  if (!Array.isArray(payload.entry)) {
+    throw new InvalidWhatsAppPayloadError("Missing webhook entries");
+  }
+
+  assertWebhookArrayBound(
+    payload.entry.length,
+    MAX_WEBHOOK_ENTRIES,
+    "entries",
+    "Too many webhook entries",
+  );
+
+  for (const entry of payload.entry) {
+    if (!isRecord(entry) || !Array.isArray(entry.changes)) {
+      throw new InvalidWhatsAppPayloadError("Invalid webhook entry");
+    }
+
+    assertWebhookArrayBound(
+      entry.changes.length,
+      MAX_WEBHOOK_CHANGES_PER_ENTRY,
+      "changes",
+      "Too many changes in webhook entry",
+    );
+
+    for (const change of entry.changes) {
+      if (!isRecord(change)) {
+        throw new InvalidWhatsAppPayloadError("Invalid webhook change");
+      }
+
+      if (change.field !== "messages") {
+        continue;
+      }
+
+      const value = change.value;
+
+      if (!isRecord(value)) {
+        throw new InvalidWhatsAppPayloadError("Missing change value");
+      }
+
+      if (
+        typeof value.messaging_product === "string" &&
+        value.messaging_product !== "whatsapp"
+      ) {
+        continue;
+      }
+
+      yield value;
+    }
+  }
 }
 
 function readRequiredString(
@@ -172,93 +275,59 @@ export function parseWhatsAppWebhook(
   payload: unknown,
   configuredPhoneNumberId?: string | null,
 ): InboundWhatsAppMessage[] {
-  if (!isRecord(payload) || typeof payload.object !== "string") {
-    throw new InvalidWhatsAppPayloadError("Missing webhook object");
-  }
-
-  if (payload.object !== "whatsapp_business_account") {
-    return [];
-  }
-
-  if (!Array.isArray(payload.entry)) {
-    throw new InvalidWhatsAppPayloadError("Missing webhook entries");
-  }
-
   const messages: InboundWhatsAppMessage[] = [];
+  let totalMessages = 0;
 
-  for (const entry of payload.entry) {
-    if (!isRecord(entry) || !Array.isArray(entry.changes)) {
-      throw new InvalidWhatsAppPayloadError("Invalid webhook entry");
+  for (const value of iterWhatsAppMessageChanges(payload)) {
+    if (Array.isArray(value.contacts)) {
+      assertWebhookArrayBound(
+        value.contacts.length,
+        MAX_WEBHOOK_CONTACTS_PER_CHANGE,
+        "contacts",
+        "Too many contacts in webhook change",
+      );
     }
 
-    for (const change of entry.changes) {
-      if (!isRecord(change)) {
-        throw new InvalidWhatsAppPayloadError("Invalid webhook change");
-      }
+    if (!("messages" in value)) {
+      // Delivery/read status changes also use field=messages but carry a
+      // statuses array instead of inbound messages.
+      continue;
+    }
 
-      if (change.field !== "messages") {
-        continue;
-      }
+    if (!Array.isArray(value.messages)) {
+      throw new InvalidWhatsAppPayloadError("Invalid messages array");
+    }
 
-      const value = change.value;
+    totalMessages += value.messages.length;
+    assertWebhookArrayBound(
+      totalMessages,
+      MAX_WEBHOOK_MESSAGES_PER_PAYLOAD,
+      "messages",
+      "Too many messages in webhook payload",
+    );
 
-      if (!isRecord(value)) {
-        throw new InvalidWhatsAppPayloadError("Missing change value");
-      }
+    if (value.messages.length === 0) {
+      continue;
+    }
 
-      if (
-        typeof value.messaging_product === "string" &&
-        value.messaging_product !== "whatsapp"
-      ) {
-        continue;
-      }
+    const phoneNumberId = readPhoneNumberId(value.metadata);
 
-      if (!("messages" in value)) {
-        // Delivery/read status changes also use field=messages but carry a
-        // statuses array instead of inbound messages.
-        continue;
-      }
+    if (
+      configuredPhoneNumberId &&
+      phoneNumberId !== configuredPhoneNumberId
+    ) {
+      continue;
+    }
 
-      if (!Array.isArray(value.messages)) {
-        throw new InvalidWhatsAppPayloadError("Invalid messages array");
-      }
+    const names = contactNames(value.contacts);
 
-      if (value.messages.length === 0) {
-        continue;
-      }
-
-      const metadata = value.metadata;
-
-      if (
-        !isRecord(metadata) ||
-        typeof metadata.phone_number_id !== "string"
-      ) {
-        throw new InvalidWhatsAppPayloadError(
-          "Missing receiving phone-number ID",
-        );
-      }
-
-      if (
-        configuredPhoneNumberId &&
-        metadata.phone_number_id !== configuredPhoneNumberId
-      ) {
-        continue;
-      }
-
-      const names = contactNames(value.contacts);
-
-      for (const message of value.messages) {
-        messages.push(
-          parseMessage(message, metadata.phone_number_id, names),
-        );
-      }
+    for (const message of value.messages) {
+      messages.push(parseMessage(message, phoneNumberId, names));
     }
   }
 
   return messages;
 }
-
-import type { DeliveryStatusEvent } from "./types.js";
 
 const WAMID_PATTERN = /^wamid\.[A-Za-z0-9+/=_-]{5,500}$/;
 const DELIVERY_STATUS_MAX_LENGTH = 64;
@@ -373,82 +442,44 @@ export function parseWhatsAppDeliveryStatuses(
   payload: unknown,
   configuredPhoneNumberId?: string | null,
 ): DeliveryStatusEvent[] {
-  if (!isRecord(payload) || typeof payload.object !== "string") {
-    throw new InvalidWhatsAppPayloadError("Missing webhook object");
-  }
-
-  if (payload.object !== "whatsapp_business_account") {
-    return [];
-  }
-
-  if (!Array.isArray(payload.entry)) {
-    throw new InvalidWhatsAppPayloadError("Missing webhook entries");
-  }
-
   const events: DeliveryStatusEvent[] = [];
+  let totalStatuses = 0;
 
-  for (const entry of payload.entry) {
-    if (!isRecord(entry) || !Array.isArray(entry.changes)) {
-      throw new InvalidWhatsAppPayloadError("Invalid webhook entry");
+  for (const changeValue of iterWhatsAppMessageChanges(payload)) {
+    if (!("statuses" in changeValue)) {
+      continue;
     }
 
-    for (const change of entry.changes) {
-      if (!isRecord(change)) {
-        throw new InvalidWhatsAppPayloadError("Invalid webhook change");
-      }
+    if (!Array.isArray(changeValue.statuses)) {
+      throw new InvalidWhatsAppPayloadError("Invalid statuses array");
+    }
 
-      if (change.field !== "messages") {
-        continue;
-      }
+    totalStatuses += changeValue.statuses.length;
+    assertWebhookArrayBound(
+      totalStatuses,
+      MAX_WEBHOOK_STATUSES_PER_PAYLOAD,
+      "statuses",
+      "Too many statuses in webhook payload",
+    );
 
-      const changeValue = change.value;
+    if (changeValue.statuses.length === 0) {
+      continue;
+    }
 
-      if (!isRecord(changeValue)) {
-        throw new InvalidWhatsAppPayloadError("Missing change value");
-      }
+    const phoneNumberId = readPhoneNumberId(
+      changeValue.metadata,
+      " in delivery-status change",
+    );
 
-      if (
-        typeof changeValue.messaging_product === "string" &&
-        changeValue.messaging_product !== "whatsapp"
-      ) {
-        continue;
-      }
+    if (
+      configuredPhoneNumberId &&
+      phoneNumberId !== configuredPhoneNumberId
+    ) {
+      continue;
+    }
 
-      if (!("statuses" in changeValue)) {
-        continue;
-      }
-
-      if (!Array.isArray(changeValue.statuses)) {
-        throw new InvalidWhatsAppPayloadError("Invalid statuses array");
-      }
-
-      if (changeValue.statuses.length === 0) {
-        continue;
-      }
-
-      const metadata = changeValue.metadata;
-
-      if (
-        !isRecord(metadata) ||
-        typeof metadata.phone_number_id !== "string"
-      ) {
-        throw new InvalidWhatsAppPayloadError(
-          "Missing receiving phone-number ID in delivery-status change",
-        );
-      }
-
-      if (
-        configuredPhoneNumberId &&
-        metadata.phone_number_id !== configuredPhoneNumberId
-      ) {
-        continue;
-      }
-
-      for (const statusEntry of changeValue.statuses) {
-        events.push(
-          parseDeliveryStatus(statusEntry, metadata.phone_number_id),
-        );
-      }
+    for (const statusEntry of changeValue.statuses) {
+      events.push(parseDeliveryStatus(statusEntry, phoneNumberId));
     }
   }
 

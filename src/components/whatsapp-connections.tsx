@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useAuth } from "./auth-provider";
 import { Alert } from "./ui";
 import {
@@ -76,6 +76,18 @@ export function WhatsAppConnections() {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [reloadToken, setReloadToken] = useState(0);
+  const mountedRef = useRef(true);
+  const activeConnectCleanupRef = useRef<(() => void) | null>(null);
+
+  useEffect(() => {
+    mountedRef.current = true;
+
+    return () => {
+      mountedRef.current = false;
+      activeConnectCleanupRef.current?.();
+      activeConnectCleanupRef.current = null;
+    };
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -228,6 +240,28 @@ export function WhatsAppConnections() {
 
     let removeMessageListener: (() => void) | null = null;
     let timeout: number | null = null;
+    let cancelPendingConnect: (() => void) | null = null;
+
+    const cleanupConnectResources = () => {
+      if (timeout !== null) {
+        window.clearTimeout(timeout);
+        timeout = null;
+      }
+
+      removeMessageListener?.();
+      removeMessageListener = null;
+
+      if (activeConnectCleanupRef.current === unmountCleanup) {
+        activeConnectCleanupRef.current = null;
+      }
+    };
+
+    const unmountCleanup = () => {
+      cleanupConnectResources();
+      cancelPendingConnect?.();
+    };
+
+    activeConnectCleanupRef.current = unmountCleanup;
 
     try {
       const sessionResponse = await fetch("/api/whatsapp/onboarding/sessions", {
@@ -236,6 +270,10 @@ export function WhatsAppConnections() {
         body: "{}",
       });
       const sessionData = await readJson(sessionResponse);
+
+      if (!mountedRef.current) {
+        return;
+      }
 
       if (!sessionResponse.ok) {
         throw new Error(
@@ -256,6 +294,10 @@ export function WhatsAppConnections() {
         version: effectiveConfig.graphApiVersion,
       });
 
+      if (!mountedRef.current) {
+        return;
+      }
+
       let authCode: string | null = null;
       let signup: Readonly<{ phoneNumberId: string; wabaId: string }> | null =
         null;
@@ -270,6 +312,10 @@ export function WhatsAppConnections() {
 
         settled = true;
         resolveOutcome?.(outcome);
+      };
+
+      cancelPendingConnect = () => {
+        finish({ kind: "cancelled" });
       };
 
       const outcomePromise = new Promise<ConnectOutcome>((resolve) => {
@@ -396,6 +442,10 @@ export function WhatsAppConnections() {
 
       const outcome = await outcomePromise;
 
+      if (!mountedRef.current) {
+        return;
+      }
+
       if (outcome.kind === "success") {
         mergeConnection(outcome.result.connection);
         setReloadToken((value) => value + 1);
@@ -415,18 +465,18 @@ export function WhatsAppConnections() {
         setError(outcome.message);
       }
     } catch (requestError) {
-      setError(
-        requestError instanceof Error
-          ? requestError.message
-          : "Unable to complete WhatsApp onboarding.",
-      );
-    } finally {
-      if (timeout !== null) {
-        window.clearTimeout(timeout);
+      if (mountedRef.current) {
+        setError(
+          requestError instanceof Error
+            ? requestError.message
+            : "Unable to complete WhatsApp onboarding.",
+        );
       }
-
-      removeMessageListener?.();
-      setConnecting(false);
+    } finally {
+      cleanupConnectResources();
+      if (mountedRef.current) {
+        setConnecting(false);
+      }
     }
   }
 

@@ -7,6 +7,7 @@ import {
   getAuthContext,
 } from "../auth/middleware.js";
 import {
+  isMetaOutboundEnabled,
   isWorkspaceAllowedForMetaSending,
   loadMetaOutboundConfig,
   resolveOutboundProviderName,
@@ -235,6 +236,7 @@ export function createWhatsAppOperationsRouter({
       ]);
 
     const runtime = process.env.NODE_ENV ?? "development";
+    const metaOutboundEnabled = isMetaOutboundEnabled();
     const workspaceAllowlistedForMeta =
       metaConfig !== null &&
       isWorkspaceAllowedForMetaSending(metaConfig, workspace.id);
@@ -249,7 +251,7 @@ export function createWhatsAppOperationsRouter({
       defaultApprovalSendPolicy: settings.defaultApprovalSendPolicy,
       connections,
       meta: {
-        enabled: metaConfig !== null,
+        enabled: metaOutboundEnabled,
         senderConfigured: workspaceAllowlistedForMeta,
         senderPhoneNumberId: workspaceAllowlistedForMeta
           ? (metaConfig?.senderPhoneNumberId ?? null)
@@ -259,15 +261,14 @@ export function createWhatsAppOperationsRouter({
           : 0,
         testWorkspaceConfigured: metaConfig !== null,
         workspaceAllowlistedForMeta,
-        productionBlocked: runtime === "production",
-        productionProtection:
-          runtime === "production"
-            ? "Meta sending is rejected because the API is running in production."
-            : metaConfig === null
-              ? providerForWorkspace === "whatsapp"
-                ? "Meta sending is disabled (META_OUTBOUND_ENABLED=false). WhatsApp outbound records fail closed without calling Meta."
-                : "Meta sending is disabled. The mock provider handles outbound records."
-              : "Meta sending is limited to the configured test workspace, sender, and recipient allowlist.",
+        productionBlocked: runtime === "production" && !metaOutboundEnabled,
+        productionProtection: !metaOutboundEnabled
+          ? providerForWorkspace === "whatsapp"
+            ? "Meta sending is disabled (META_OUTBOUND_ENABLED=false). WhatsApp outbound records fail closed without calling Meta."
+            : "Meta sending is disabled. The mock provider handles outbound records."
+          : metaConfig === null
+            ? "Meta sending is enabled only through each workspace's own verified WhatsApp connection."
+            : "Meta sending is limited to the configured test workspace, sender, and recipient allowlist.",
       },
       inboundWebhook: {
         configured: whatsapp !== null,

@@ -67,8 +67,10 @@ export type EmbeddedSignupEvent =
   | Readonly<{ kind: "incomplete"; event: string }>
   | Readonly<{ kind: "ignored" }>;
 
+const MAX_EMBEDDED_SIGNUP_MESSAGE_LENGTH = 16_384;
+
 function asRecord(value: unknown): Record<string, unknown> | null {
-  return typeof value === "object" && value !== null
+  return typeof value === "object" && value !== null && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : null;
 }
@@ -255,7 +257,21 @@ export function isAllowedMetaOrigin(origin: string): boolean {
 export function parseEmbeddedSignupEventData(
   data: unknown,
 ): EmbeddedSignupEvent {
-  const record = asRecord(data);
+  let parsedData: unknown = data;
+
+  if (typeof data === "string") {
+    if (data.length > MAX_EMBEDDED_SIGNUP_MESSAGE_LENGTH) {
+      return { kind: "ignored" };
+    }
+
+    try {
+      parsedData = JSON.parse(data) as unknown;
+    } catch {
+      return { kind: "ignored" };
+    }
+  }
+
+  const record = asRecord(parsedData);
 
   if (!record || record.type !== "WA_EMBEDDED_SIGNUP") {
     return { kind: "ignored" };

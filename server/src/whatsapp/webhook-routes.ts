@@ -23,9 +23,30 @@ import type {
 // is kept small. Meta's message and status batches fit comfortably inside it.
 const WEBHOOK_BODY_LIMIT = "3mb";
 const CHALLENGE_MAX_LENGTH = 2_048;
+const SIGNATURE_HEADER_PATTERN = /^sha256=[0-9a-f]{64}$/i;
 
 function queryString(value: unknown): string | null {
   return typeof value === "string" ? value : null;
+}
+
+function rejectInvalidSignature(response: Response): void {
+  response.status(401).json({ error: "Invalid webhook signature" });
+}
+
+function requireSignatureHeader(
+  request: Request,
+  response: Response,
+  next: NextFunction,
+): void {
+  const signatureHeader = request.header("x-hub-signature-256");
+
+  if (!signatureHeader || !SIGNATURE_HEADER_PATTERN.test(signatureHeader)) {
+    response.setHeader("Connection", "close");
+    rejectInvalidSignature(response);
+    return;
+  }
+
+  next();
 }
 
 export function createWhatsAppWebhookRouter({
@@ -73,6 +94,7 @@ export function createWhatsAppWebhookRouter({
 
   router.post(
     "/",
+    requireSignatureHeader,
     express.raw({ type: "application/json", limit: WEBHOOK_BODY_LIMIT }),
     async (request: Request, response: Response, next: NextFunction) => {
       const rawBody = request.body;
@@ -85,7 +107,7 @@ export function createWhatsAppWebhookRouter({
           config.appSecret,
         )
       ) {
-        response.status(401).json({ error: "Invalid webhook signature" });
+        rejectInvalidSignature(response);
         return;
       }
 

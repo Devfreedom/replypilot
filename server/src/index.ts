@@ -51,9 +51,9 @@ async function start(): Promise<void> {
     );
   }
 
-  const server = app.listen(config.port, "127.0.0.1", () => {
+  const server = app.listen(config.port, config.host, () => {
     console.log(
-      `ReplyPilot API listening on http://127.0.0.1:${config.port}`,
+      `ReplyPilot API listening on http://${config.host}:${config.port}`,
     );
   });
 

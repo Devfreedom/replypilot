@@ -43,12 +43,6 @@ function log(
   );
 }
 
-function sleep(milliseconds: number): Promise<void> {
-  return new Promise((resolve) => {
-    setTimeout(resolve, milliseconds);
-  });
-}
-
 /**
  * Local-only controlled-failure controls for the mock provider. They let a
  * developer demonstrate bounded retries, permanent failure, and manual review
@@ -166,6 +160,25 @@ async function main(): Promise<void> {
   }
 
   let stopping = false;
+  let wakeSleep: (() => void) | null = null;
+
+  function sleep(milliseconds: number): Promise<void> {
+    if (stopping) {
+      return Promise.resolve();
+    }
+
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        wakeSleep = null;
+        resolve();
+      }, milliseconds);
+      wakeSleep = () => {
+        clearTimeout(timer);
+        wakeSleep = null;
+        resolve();
+      };
+    });
+  }
 
   function requestStop(signal: string): void {
     if (stopping) {
@@ -174,6 +187,7 @@ async function main(): Promise<void> {
 
     stopping = true;
     log("outbound_worker_stopping", { signal });
+    wakeSleep?.();
   }
 
   process.on("SIGINT", () => requestStop("SIGINT"));
@@ -189,6 +203,10 @@ async function main(): Promise<void> {
   try {
     while (!stopping) {
       for (const { provider } of providers) {
+        if (stopping) {
+          break;
+        }
+
         let lastTick: OutboundWorkerResult | Readonly<{ error: string }>;
 
         try {

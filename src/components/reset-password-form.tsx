@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { authClient } from "@/lib/auth-client";
 import {
   AUTH_PASSWORD_MAX_LENGTH,
@@ -20,9 +20,15 @@ import { Alert } from "./ui";
 
 export function ResetPasswordForm() {
   const searchParams = useSearchParams();
-  const token = searchParams.get("token")?.trim() ?? "";
-  const urlError = searchParams.get("error")?.trim() ?? "";
+  const [token] = useState(() => searchParams.get("token")?.trim() ?? "");
+  const [urlError] = useState(() => searchParams.get("error")?.trim() ?? "");
   const hasInvalidTokenFromUrl = Boolean(urlError) || token.length === 0;
+
+  useEffect(() => {
+    if (typeof window !== "undefined" && window.location.search.length > 0) {
+      window.history.replaceState(null, "", "/reset-password");
+    }
+  }, []);
 
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");

@@ -43,6 +43,13 @@ export const WHATSAPP_CONNECTION_MISSING_CODE = "WHATSAPP_CONNECTION_MISSING";
 export const WHATSAPP_CONNECTION_MISSING_MESSAGE =
   "This conversation has no WhatsApp connection in this workspace.";
 
+/** Stable machine-readable code for a suppressed customer opt-out/block. */
+export const WHATSAPP_CUSTOMER_SUPPRESSED_CODE = "customer_suppressed";
+
+/** User-facing message paired with {@link WHATSAPP_CUSTOMER_SUPPRESSED_CODE}. */
+export const WHATSAPP_CUSTOMER_SUPPRESSED_MESSAGE =
+  "Customer is suppressed and cannot receive outbound messages.";
+
 /**
  * The connection states that must not be queued for delivery.
  *

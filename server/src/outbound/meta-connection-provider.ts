@@ -43,11 +43,16 @@ import {
   resolveConversationConnection,
   type ConversationConnection,
 } from "../whatsapp/connections.js";
-import { decryptWhatsAppToken } from "../whatsapp/credentials.js";
+import {
+  decryptWhatsAppToken,
+  whatsappCredentialAad,
+} from "../whatsapp/credentials.js";
 import { checkServiceWindow } from "../whatsapp/service-window.js";
 import { isCustomerSuppressed } from "../whatsapp/suppression.js";
 
 const META_API_TIMEOUT_MS = 10_000;
+const GRAPH_PHONE_NUMBER_ID_PATTERN = /^\d{5,32}$/;
+const GRAPH_API_VERSION_PATTERN = /^v\d{1,3}\.\d{1,3}$/;
 const MAX_PROVIDER_ERROR_LENGTH = 500;
 
 type CustomerInfo = Readonly<{
@@ -247,6 +252,21 @@ export class ConnectionAwareMetaProvider implements OutboundMessageProvider {
       );
     }
 
+    // These values are interpolated into the request path. Validate them here
+    // too so a malformed stored phone-number ID or version can never rewrite
+    // the path or carry a query string to graph.facebook.com.
+    if (!GRAPH_PHONE_NUMBER_ID_PATTERN.test(connection.phoneNumberId)) {
+      throw new OutboundProviderError(
+        "Outbound send rejected: the connection has an invalid Meta phone-number ID.",
+      );
+    }
+
+    if (!GRAPH_API_VERSION_PATTERN.test(credentials.graphApiVersion)) {
+      throw new OutboundProviderError(
+        "Outbound send rejected: the Graph API version is invalid.",
+      );
+    }
+
     const toNumber = resolvedPhone.startsWith("+")
       ? resolvedPhone.slice(1)
       : resolvedPhone;
@@ -368,6 +388,7 @@ export class ConnectionAwareMetaProvider implements OutboundMessageProvider {
         accessToken = decryptWhatsAppToken(
           connection.encryptedToken,
           this.#environment,
+          whatsappCredentialAad(workspaceId, connection.phoneNumberId),
         );
       } catch {
         // Never include the underlying encryption error: it may name

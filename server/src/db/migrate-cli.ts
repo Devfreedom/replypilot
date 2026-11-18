@@ -4,7 +4,10 @@ import { createPool } from "./pool.js";
 
 async function main(): Promise<void> {
   const config = loadConfig();
-  const pool = createPool(config.databaseUrl);
+  const pool = createPool(config.databaseUrl, {
+    statementTimeoutMs: 0,
+    idleInTransactionSessionTimeoutMs: 0,
+  });
 
   try {
     const applied = await runMigrations(pool);

@@ -5,11 +5,49 @@ import type { Pool } from "pg";
 import { ensureWorkspaceForUser } from "../workspaces/repository.js";
 
 /**
+ * Canonicalizes an IPv6 literal through the WHATWG URL parser, which expands
+ * every textual form (`0:0:0:0:0:ffff:127.0.0.1`, `::FFFF:7F00:1`) into one
+ * compressed lowercase representation. Returns null if it cannot be parsed.
+ */
+function canonicalizeIpv6(value: string): string | null {
+  try {
+    const hostname = new URL(`http://[${value}]/`).hostname;
+    return hostname.startsWith("[") && hostname.endsWith("]")
+      ? hostname.slice(1, -1)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Converts any IPv4-mapped IPv6 spelling (`::ffff:a.b.c.d` or
+ * `::ffff:xxxx:yyyy`) to dotted-quad IPv4. Returns null for other addresses.
+ */
+function ipv4FromMappedIpv6(value: string): string | null {
+  const canonical = canonicalizeIpv6(value);
+  const match = canonical
+    ? /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(canonical)
+    : null;
+
+  if (!match) {
+    return null;
+  }
+
+  const high = Number.parseInt(match[1] as string, 16);
+  const low = Number.parseInt(match[2] as string, 16);
+
+  return `${high >> 8}.${high & 0xff}.${low >> 8}.${low & 0xff}`;
+}
+
+/**
  * Validates that an entry is a syntactically valid IPv4/IPv6 address or CIDR
- * block (`ip/prefix` with `0..32` for IPv4 or `0..128` for IPv6).
+ * block (`ip/prefix` with `0..32` for IPv4 or `0..128` for IPv6). IPv6 zone
+ * indices (`%eth0`) are rejected, and an IPv4-mapped IPv6 CIDR must use a
+ * prefix of at least 96 so its length can be expressed as an IPv4 prefix.
  */
 export function isValidProxyIpOrCidr(entry: string): boolean {
-  if (!entry) {
+  if (!entry || entry.includes("%")) {
     return false;
   }
 
@@ -43,12 +81,18 @@ export function isValidProxyIpOrCidr(entry: string): boolean {
     return prefix >= 0 && prefix <= 32;
   }
 
+  if (ipv4FromMappedIpv6(ip) !== null) {
+    return prefix >= 96 && prefix <= 128;
+  }
+
   return prefix >= 0 && prefix <= 128;
 }
 
 /**
- * Normalizes an IPv4, IPv6, or IPv4-mapped IPv6 (`::ffff:a.b.c.d`) address.
- * Returns null if the input is empty or not a valid IP address.
+ * Normalizes an IPv4, IPv6, or IPv4-mapped IPv6 address. Every IPv4-mapped
+ * spelling becomes dotted-quad IPv4 and other IPv6 addresses are canonical
+ * lowercase. Returns null if the input is empty, carries an IPv6 zone index,
+ * or is not a valid IP address.
  */
 export function normalizeIpAddress(
   value: string | null | undefined,
@@ -59,28 +103,39 @@ export function normalizeIpAddress(
 
   const trimmed = value.trim();
 
-  if (!trimmed || isIP(trimmed) === 0) {
+  if (!trimmed || trimmed.includes("%")) {
     return null;
   }
 
-  if (trimmed.toLowerCase().startsWith("::ffff:")) {
-    const ipv4 = trimmed.slice(7);
-    if (isIP(ipv4) === 4) {
-      return ipv4;
-    }
+  const family = isIP(trimmed);
+
+  if (family === 0) {
+    return null;
   }
 
-  return trimmed.toLowerCase();
+  if (family === 4) {
+    return trimmed;
+  }
+
+  return (
+    ipv4FromMappedIpv6(trimmed) ??
+    canonicalizeIpv6(trimmed) ??
+    trimmed.toLowerCase()
+  );
 }
 
 /**
- * Compiles validated IP/CIDR entries into an IP-matching predicate backed by
- * Node's `net.BlockList`. Fails closed on any malformed entry.
+ * Compiles validated IP/CIDR entries into an IP-matching predicate. IPv4 and
+ * IPv6 rules live in separate `net.BlockList` instances: Node maps an IPv4
+ * candidate into IPv4-mapped IPv6 when it is checked against a mixed list, so
+ * a single list would let an IPv6 CIDR such as `::1/64` trust every IPv4
+ * address. Fails closed on any malformed entry.
  */
 export function createTrustedProxyMatcher(
   entries: readonly string[],
 ): (ip: string) => boolean {
-  const blockList = new BlockList();
+  const ipv4BlockList = new BlockList();
+  const ipv6BlockList = new BlockList();
 
   for (const rawEntry of entries) {
     const entry = rawEntry.trim();
@@ -96,21 +151,7 @@ export function createTrustedProxyMatcher(
     }
 
     const slashIndex = entry.indexOf("/");
-
-    if (slashIndex === -1) {
-      const normalized = normalizeIpAddress(entry);
-      if (!normalized) {
-        throw new Error(
-          `Invalid trusted proxy IP or CIDR in auth config: ${entry}`,
-        );
-      }
-      const family = isIP(normalized) === 4 ? "ipv4" : "ipv6";
-      blockList.addAddress(normalized, family);
-      continue;
-    }
-
-    const ip = entry.slice(0, slashIndex);
-    const prefix = Number(entry.slice(slashIndex + 1));
+    const ip = slashIndex === -1 ? entry : entry.slice(0, slashIndex);
     const normalized = normalizeIpAddress(ip);
 
     if (!normalized) {
@@ -120,12 +161,24 @@ export function createTrustedProxyMatcher(
     }
 
     const family = isIP(normalized) === 4 ? "ipv4" : "ipv6";
-    // If an IPv4-mapped CIDR was normalized to IPv4, only valid IPv4 prefixes apply;
-    // isValidProxyIpOrCidr already validated prefix against the raw address family.
-    if (isIP(ip) === 6 && family === "ipv4") {
-      blockList.addAddress(normalized, "ipv4");
+
+    if (slashIndex === -1) {
+      (family === "ipv4" ? ipv4BlockList : ipv6BlockList).addAddress(
+        normalized,
+        family,
+      );
+      continue;
+    }
+
+    const prefix = Number(entry.slice(slashIndex + 1));
+
+    if (family === "ipv4") {
+      // A mapped IPv6 CIDR (`::ffff:a.b.c.d/96..128`) keeps its length as an
+      // IPv4 prefix of `prefix - 96`; a native IPv4 CIDR is used as written.
+      const ipv4Prefix = isIP(ip) === 6 ? prefix - 96 : prefix;
+      ipv4BlockList.addSubnet(normalized, ipv4Prefix, "ipv4");
     } else {
-      blockList.addSubnet(normalized, prefix, family);
+      ipv6BlockList.addSubnet(normalized, prefix, "ipv6");
     }
   }
 
@@ -136,8 +189,9 @@ export function createTrustedProxyMatcher(
       return false;
     }
 
-    const family = isIP(normalized) === 4 ? "ipv4" : "ipv6";
-    return blockList.check(normalized, family);
+    return isIP(normalized) === 4
+      ? ipv4BlockList.check(normalized, "ipv4")
+      : ipv6BlockList.check(normalized, "ipv6");
   };
 }
 
@@ -226,11 +280,19 @@ export function createAuth({
       revokeSessionsOnPasswordReset: true,
       sendResetPassword: async ({ user, url, token }) => {
         if (sendResetPasswordEmail) {
-          await sendResetPasswordEmail({
-            user: { id: user.id, email: user.email, name: user.name },
-            url,
-            token,
-          });
+          try {
+            await sendResetPasswordEmail({
+              user: { id: user.id, email: user.email, name: user.name },
+              url,
+              token,
+            });
+          } catch {
+            // Better Auth only invokes this hook for existing accounts, so a
+            // delivery failure that propagated would turn the endpoint into a
+            // 500-vs-200 account-existence oracle. The delivery adapter logs
+            // its own sanitized failure; never log the error, URL, or token.
+            console.error("Password reset email delivery hook failed.");
+          }
           return;
         }
 

@@ -1209,3 +1209,239 @@ test("GeminiReplyDraftProvider skips duplicate fallback call when GEMINI_FALLBAC
   );
   assert.equal(fetchCount, 1);
 });
+
+// ─── Unit tests: H-10 grounding retention & missing-info hardening ───────────
+
+test("H-10 retains long knowledge title+answer entries by truncating combined fact <= 700 chars", async () => {
+  const longTitle = `Policy-${"T".repeat(93)}`; // 100 chars
+  const longAnswer = `Coverage details: ${"A".repeat(632)}`; // 650 chars (<= 700, combined > 700)
+  assert.equal(longTitle.length, 100);
+  assert.equal(longAnswer.length, 650);
+
+  const longPolicy = makeKnowledgeEntry({
+    title: longTitle,
+    answer: longAnswer,
+    entryType: "policy",
+  });
+
+  let capturedPrompt = "";
+  const geminiProvider = new GeminiReplyDraftProvider({
+    apiKey: SAMPLE_API_KEY,
+    fetchImplementation: async (_input, init) => {
+      const body = JSON.parse(String(init?.body)) as {
+        contents: Array<{ parts: Array<{ text: string }> }>;
+      };
+      capturedPrompt = body.contents[0]?.parts[0]?.text ?? "";
+
+      return geminiSuccessResponse({
+        intent: "service-details",
+        summary: "Customer asked about long policy details.",
+        missingInformation: ["Preferred date"],
+        draftReply: "Hi Adaeze, please see our policy details.",
+        citedFactIds: ["know:0"],
+      });
+    },
+  });
+
+  const geminiDraft = await geminiProvider.draftReply(
+    makeLead({ lastMessage: "Tell me about your wedding policy details" }),
+    makeContext({ catalogue: [], knowledge: [longPolicy] }),
+  );
+
+  const factLine = capturedPrompt
+    .split("\n")
+    .find((line) => line.startsWith("[know:0] "));
+  assert.ok(factLine, "Expected [know:0] fact line to be retained in prompt");
+  const factBody = factLine.slice("[know:0] ".length);
+  assert.ok(
+    factBody.length <= 700,
+    `Expected formatted fact <= 700 chars, got ${factBody.length}`,
+  );
+  assert.ok(factBody.startsWith(`Approved policy — ${longTitle}:`));
+  assert.ok(factBody.endsWith("…"));
+  assert.equal(geminiDraft.sources.length, 1);
+  assert.equal(geminiDraft.sources[0]?.id, longPolicy.id);
+
+  // MockReplyDraftProvider also retains and truncates the combined fact <= 700 chars.
+  const mockDraft = await new MockReplyDraftProvider().draftReply(
+    makeLead({ lastMessage: "Tell me about your wedding policy details" }),
+    makeContext({ catalogue: [], knowledge: [longPolicy] }),
+  );
+  assert.equal(mockDraft.sources.length, 1);
+  assert.ok(mockDraft.draftReply.includes(`Approved policy — ${longTitle}:`));
+  assert.ok(mockDraft.draftReply.includes("…"));
+
+  // Answers strictly > 700 chars still defer to manual confirmation.
+  const overlongAnswerPolicy = makeKnowledgeEntry({
+    title: "Refund policy",
+    answer: `Refund details: ${"R".repeat(800)}`,
+    entryType: "policy",
+  });
+  const overlongMockDraft = await new MockReplyDraftProvider().draftReply(
+    makeLead({ lastMessage: "What is your refund policy?" }),
+    makeContext({ catalogue: [], knowledge: [overlongAnswerPolicy] }),
+  );
+  assert.match(
+    overlongMockDraft.draftReply,
+    /full approved text needs confirmation/i,
+  );
+});
+
+test("H-10 filters placeholder missingInformation strings case-insensitively", async () => {
+  const placeholderOnlyProvider = new GeminiReplyDraftProvider({
+    apiKey: SAMPLE_API_KEY,
+    fetchImplementation: async () =>
+      geminiSuccessResponse({
+        intent: "service-details",
+        summary: "Customer asked for service details.",
+        missingInformation: [
+          "  None ",
+          "N/A",
+          "no missing information",
+          "Nothing missing.",
+          "  -  ",
+        ],
+        draftReply: "Hi Adaeze, thanks for reaching out!",
+        citedFactIds: [],
+      }),
+  });
+
+  const fallbackDraft = await placeholderOnlyProvider.draftReply(
+    makeLead({ lastMessage: "Tell me about your services" }),
+    makeContext(),
+  );
+  assert.deepEqual(fallbackDraft.missingInformation, [
+    "What the customer needs",
+    "Preferred date",
+  ]);
+
+  const mixedProvider = new GeminiReplyDraftProvider({
+    apiKey: SAMPLE_API_KEY,
+    fetchImplementation: async () =>
+      geminiSuccessResponse({
+        intent: "service-details",
+        summary: "Customer asked for service details.",
+        missingInformation: ["NONE", "  Event venue  ", "n/a", "No missing info"],
+        draftReply: "Hi Adaeze, could you share your venue?",
+        citedFactIds: [],
+      }),
+  });
+
+  const mixedDraft = await mixedProvider.draftReply(
+    makeLead({ lastMessage: "Tell me about your services" }),
+    makeContext(),
+  );
+  assert.deepEqual(mixedDraft.missingInformation, ["Event venue"]);
+});
+
+test("H-10 enforces pricing regex, missing policy when only FAQs exist, and actionable base missing info", async () => {
+  const faqOnly = makeKnowledgeEntry({
+    title: "Travel FAQ",
+    answer: "We cover venues across the city.",
+    entryType: "faq",
+  });
+
+  const providerForIntent = (intent: "booking" | "availability" | "pricing") =>
+    new GeminiReplyDraftProvider({
+      apiKey: SAMPLE_API_KEY,
+      fetchImplementation: async () =>
+        geminiSuccessResponse({
+          intent,
+          summary: "Customer asked about booking, pricing, and cancellation.",
+          missingInformation: ["None", "N/A"],
+          draftReply:
+            "Hi Adaeze, please share your date and location so the owner can confirm availability, pricing, and policy details.",
+          citedFactIds: [],
+        }),
+    });
+
+  // Message contains "available" (which makes getIntent return "availability", not "pricing")
+  // plus "how much" / "quote" and "cancellation", while model classifies "booking".
+  const multiIntentLead = makeLead({
+    lastMessage:
+      "Are you available to book next month, how much is a quote, and what is your cancellation policy?",
+  });
+  const faqAndUnpricedContext = makeContext({
+    catalogue: [makeCatalogueEntry({ priceMinor: null })],
+    knowledge: [faqOnly],
+  });
+
+  const bookingDraft = await providerForIntent("booking").draftReply(
+    multiIntentLead,
+    faqAndUnpricedContext,
+  );
+  assert.deepEqual(bookingDraft.missingInformation, [
+    "An approved price for the requested service",
+    "An approved cancellation policy",
+    "Preferred date and time",
+    "Event location",
+  ]);
+
+  const availabilityDraft = await providerForIntent("availability").draftReply(
+    multiIntentLead,
+    faqAndUnpricedContext,
+  );
+  assert.deepEqual(availabilityDraft.missingInformation, [
+    "An approved price for the requested service",
+    "An approved cancellation policy",
+    "Preferred date and time",
+    "Event location",
+  ]);
+
+  // Pricing query regex triggers directly from lastMessage even on general-enquiry intent.
+  const generalPricingDraft = await new GeminiReplyDraftProvider({
+    apiKey: SAMPLE_API_KEY,
+    fetchImplementation: async () =>
+      geminiSuccessResponse({
+        intent: "general-enquiry",
+        summary: "Customer asked about package cost.",
+        missingInformation: ["Event location"],
+        draftReply: "Hi Adaeze, the owner will confirm package pricing.",
+        citedFactIds: [],
+      }),
+  }).draftReply(
+    makeLead({ lastMessage: "Are you free Saturday and what does a package cost?" }),
+    makeContext({ catalogue: [], knowledge: [faqOnly] }),
+  );
+  assert.deepEqual(generalPricingDraft.missingInformation, [
+    "An approved price for the requested service",
+    "Event location",
+  ]);
+
+  // When an active policy entry exists and catalogue has a price, neither mandatory item is added.
+  const satisfiedDraft = await providerForIntent("pricing").draftReply(
+    makeLead({ lastMessage: "How much is wedding photography and what is your refund policy?" }),
+    makeContext({
+      catalogue: [makeCatalogueEntry({ priceMinor: 150_000 })],
+      knowledge: [
+        faqOnly,
+        makeKnowledgeEntry({
+          title: "Refund policy",
+          answer: "Deposits are refundable within 14 days.",
+          entryType: "policy",
+        }),
+      ],
+    }),
+  );
+  assert.deepEqual(satisfiedDraft.missingInformation, [
+    "Event date",
+    "Event location",
+    "What the customer needs",
+  ]);
+
+  // MockReplyDraftProvider also detects multi-intent pricing and missing policy when only FAQs exist.
+  const mockMultiDraft = await new MockReplyDraftProvider().draftReply(
+    multiIntentLead,
+    faqAndUnpricedContext,
+  );
+  assert.ok(
+    mockMultiDraft.missingInformation.includes(
+      "An approved price for the requested service",
+    ),
+  );
+  assert.ok(
+    mockMultiDraft.missingInformation.includes(
+      "An approved cancellation policy",
+    ),
+  );
+});

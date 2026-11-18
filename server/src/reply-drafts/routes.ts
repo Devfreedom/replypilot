@@ -8,6 +8,10 @@ import {
 } from "../auth/middleware.js";
 import { queueManualSend } from "../outbound/service.js";
 import {
+  WHATSAPP_CUSTOMER_SUPPRESSED_CODE,
+  WHATSAPP_CUSTOMER_SUPPRESSED_MESSAGE,
+} from "../outbound/errors.js";
+import {
   WHATSAPP_CONVERSATION_REQUIRED_CODE,
   WHATSAPP_CONVERSATION_REQUIRED_MESSAGE,
 } from "../leads/errors.js";
@@ -139,6 +143,14 @@ export function createReplyDraftsRouter({
       response.status(409).json({
         error: result.message,
         code: result.code,
+      });
+      return;
+    }
+
+    if (result.kind === "customer-suppressed") {
+      response.status(409).json({
+        error: WHATSAPP_CUSTOMER_SUPPRESSED_MESSAGE,
+        code: WHATSAPP_CUSTOMER_SUPPRESSED_CODE,
       });
       return;
     }

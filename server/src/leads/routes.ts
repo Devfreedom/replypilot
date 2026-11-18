@@ -17,9 +17,14 @@ import {
   getReplyDraftForLead,
   listReplyDraftsForLead,
   replaceGeneratedReplyDraft,
+  type ReplyDraftMutationResult,
   returnReplyDraftToDraft,
   updateReplyDraftText,
 } from "../reply-drafts/repository.js";
+import {
+  WHATSAPP_CUSTOMER_SUPPRESSED_CODE,
+  WHATSAPP_CUSTOMER_SUPPRESSED_MESSAGE,
+} from "../outbound/errors.js";
 import {
   createReplyDraftSchema,
   replyDraftIdSchema,
@@ -108,6 +113,35 @@ function handleDraftGenerationError(
   }
 
   response.status(500).json({ error: "Internal server error" });
+}
+
+function handleReplyDraftMutationOutcome(
+  response: Response,
+  result: ReplyDraftMutationResult,
+): result is Exclude<ReplyDraftMutationResult, { kind: "updated" }> {
+  if (result.kind === "not-found") {
+    response.status(404).json({ error: "Reply draft not found" });
+    return true;
+  }
+
+  if (result.kind === "send-in-progress") {
+    response.status(409).json({
+      error:
+        "This reply is currently being sent. Wait for the provider outcome before changing it.",
+    });
+    return true;
+  }
+
+  if (result.kind === "outbound-in-progress") {
+    response.status(409).json({
+      error:
+        "This reply already has a sent or unresolved outbound message and cannot be edited or unapproved.",
+      code: "outbound_in_progress",
+    });
+    return true;
+  }
+
+  return false;
 }
 
 function sendValidationError(
@@ -468,16 +502,7 @@ export function createLeadsRouter({
           generated,
         );
 
-        if (result.kind === "not-found") {
-          response.status(404).json({ error: "Reply draft not found" });
-          return;
-        }
-
-        if (result.kind === "send-in-progress") {
-          response.status(409).json({
-            error:
-              "This reply is currently being sent. Wait for the provider outcome before changing it.",
-          });
+        if (handleReplyDraftMutationOutcome(response, result)) {
           return;
         }
 
@@ -537,16 +562,7 @@ export function createLeadsRouter({
           parsed.data.draftReply,
         );
 
-        if (result.kind === "not-found") {
-          response.status(404).json({ error: "Reply draft not found" });
-          return;
-        }
-
-        if (result.kind === "send-in-progress") {
-          response.status(409).json({
-            error:
-              "This reply is currently being sent. Wait for the provider outcome before changing it.",
-          });
+        if (handleReplyDraftMutationOutcome(response, result)) {
           return;
         }
 
@@ -562,16 +578,7 @@ export function createLeadsRouter({
           draftId.data,
         );
 
-        if (result.kind === "not-found") {
-          response.status(404).json({ error: "Reply draft not found" });
-          return;
-        }
-
-        if (result.kind === "send-in-progress") {
-          response.status(409).json({
-            error:
-              "This reply is currently being sent. Wait for the provider outcome before changing it.",
-          });
+        if (handleReplyDraftMutationOutcome(response, result)) {
           return;
         }
 
@@ -634,6 +641,14 @@ export function createLeadsRouter({
         response.status(409).json({
           error: result.message,
           code: result.code,
+        });
+        return;
+      }
+
+      if (result.kind === "customer-suppressed") {
+        response.status(409).json({
+          error: WHATSAPP_CUSTOMER_SUPPRESSED_MESSAGE,
+          code: WHATSAPP_CUSTOMER_SUPPRESSED_CODE,
         });
         return;
       }
