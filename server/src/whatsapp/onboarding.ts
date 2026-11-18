@@ -695,6 +695,7 @@ export type VerifyConnectionResult = Readonly<{
   connection: WhatsAppConnectionSummary;
   verification: "active" | "pending" | "error";
   error: string | null;
+  superseded?: boolean;
 }>;
 
 /**
@@ -719,6 +720,8 @@ export async function verifyWhatsAppConnection(
     );
   }
 
+  const expectedEncryptedToken = stored.encryptedToken;
+
   const current = await getWhatsAppConnection(
     input.pool,
     input.workspaceId,
@@ -739,21 +742,33 @@ export async function verifyWhatsAppConnection(
     );
   }
 
-  async function failMissingOrDisconnected(): Promise<never> {
+  async function resolveMissingDisconnectedOrSuperseded(): Promise<VerifyConnectionResult> {
     const latest = await getWhatsAppConnection(
       input.pool,
       input.workspaceId,
       input.connectionId,
     );
 
-    if (latest?.status === "disconnected") {
+    if (!latest) {
+      throw new OnboardingError("connection_not_found", "Connection not found.");
+    }
+
+    if (latest.status === "disconnected") {
       throw new OnboardingError(
         "connection_disconnected",
         "This WhatsApp connection has been disconnected and cannot be verified. Connect the number again.",
       );
     }
 
-    throw new OnboardingError("connection_not_found", "Connection not found.");
+    // Credentials changed while verification was in flight (e.g. a concurrent
+    // re-onboarding replaced the token). Return the current authoritative
+    // connection state without overwriting it or throwing a confusing 404.
+    return {
+      connection: latest,
+      verification: latest.status,
+      error: latest.lastError,
+      superseded: true,
+    };
   }
 
   async function recordFailure(
@@ -767,10 +782,11 @@ export async function verifyWhatsAppConnection(
       lastError: message,
       webhookSubscribed: false,
       verifiedAt: now,
+      expectedEncryptedToken,
     });
 
     if (!updated) {
-      return failMissingOrDisconnected();
+      return resolveMissingDisconnectedOrSuperseded();
     }
 
     return {
@@ -842,10 +858,11 @@ export async function verifyWhatsAppConnection(
     lastError: null,
     webhookSubscribed: true,
     verifiedAt: now,
+    expectedEncryptedToken: stored.encryptedToken,
   });
 
   if (!updated) {
-    return failMissingOrDisconnected();
+    return resolveMissingDisconnectedOrSuperseded();
   }
 
   return {

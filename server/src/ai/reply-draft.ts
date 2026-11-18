@@ -55,6 +55,15 @@ export interface ReplyDraftProvider {
 }
 
 const MAX_REPLY_LENGTH = 1_900;
+const MAX_FACT_LENGTH = 700;
+const PRICING_QUERY_PATTERN = /price|pricing|cost|package|quote|how much/i;
+const ACTIONABLE_INTENTS = new Set<ReplyDraft["intent"]>([
+  "booking",
+  "pricing",
+  "availability",
+]);
+const PLACEHOLDER_MISSING_ITEM_PATTERN =
+  /^(?:-+|—+|none|n\/a|n\.a\.|na|nil|nothing|nothing missing|no missing (?:information|info|details?)|none (?:missing|needed|required))$/i;
 export const DEFAULT_GEMINI_MODEL = "gemini-3.8-flash";
 export const DEFAULT_GEMINI_FALLBACK_MODEL = "gemini-3.1-flash-lite";
 export const DEFAULT_GEMINI_TIMEOUT_MS = 45_000;
@@ -156,7 +165,7 @@ function getIntent(message: string | null | undefined): ReplyDraft["intent"] {
     return "availability";
   }
 
-  if (/price|pricing|cost|package|quote|how much/.test(normalized)) {
+  if (PRICING_QUERY_PATTERN.test(normalized)) {
     return "pricing";
   }
 
@@ -213,18 +222,27 @@ function summaryFor(lead: Lead): string {
   return summary.length <= 500 ? summary : `${summary.slice(0, 497)}...`;
 }
 
+function truncateFactText(text: string): string {
+  if (text.length <= MAX_FACT_LENGTH) {
+    return text;
+  }
+
+  return `${text.slice(0, MAX_FACT_LENGTH - 1).trimEnd()}…`;
+}
+
 function catalogueFact(entry: CatalogueEntry): string {
   const entryName = safeTrim(entry.name) || "Service";
   const name = `Our approved catalogue lists ${entryName}`;
 
   if (entry.priceMinor === null) {
-    return `${name}, but no price is set, so the price needs confirmation.`;
+    return truncateFactText(
+      `${name}, but no price is set, so the price needs confirmation.`,
+    );
   }
 
-  return `${name} at ${formatMinorUnits(
-    entry.priceMinor,
-    entry.currencyCode,
-  )}.`;
+  return truncateFactText(
+    `${name} at ${formatMinorUnits(entry.priceMinor, entry.currencyCode)}.`,
+  );
 }
 
 function knowledgeFact(entry: KnowledgeEntry): string {
@@ -232,11 +250,13 @@ function knowledgeFact(entry: KnowledgeEntry): string {
   const title = safeTrim(entry.title) || "Approved entry";
   const answer = safeTrim(entry.answer).replace(/\s+/g, " ");
 
-  if (answer.length > 700) {
-    return `Approved ${label} — ${title}: the full approved text needs confirmation before it is quoted.`;
+  if (answer.length > MAX_FACT_LENGTH) {
+    return truncateFactText(
+      `Approved ${label} — ${title}: the full approved text needs confirmation before it is quoted.`,
+    );
   }
 
-  return `Approved ${label} — ${title}: ${answer}`;
+  return truncateFactText(`Approved ${label} — ${title}: ${answer}`);
 }
 
 type GroundedFact = {
@@ -266,7 +286,7 @@ function groundedFacts(lead: Lead, context?: ReplyContext): GroundedFact[] {
     })),
   ]
     .slice(0, MAX_SOURCES)
-    .filter((fact) => fact.text.length <= 700);
+    .filter((fact) => fact.text.length <= MAX_FACT_LENGTH);
 }
 
 function appendFacts(
@@ -303,29 +323,55 @@ function policyTopic(message: string | null | undefined): string | null {
   return null;
 }
 
+function isPlaceholderMissingItem(item: string): boolean {
+  const normalized = item.trim().replace(/[.!]+$/, "").trim();
+  return !normalized || PLACEHOLDER_MISSING_ITEM_PATTERN.test(normalized);
+}
+
+function mandatoryMissingInformationFor(
+  intent: ReplyDraft["intent"],
+  lead: Lead,
+  context?: ReplyContext,
+): string[] {
+  const catalogue = context?.catalogue ?? [];
+  const knowledge = context?.knowledge ?? [];
+  const mandatory: string[] = [];
+
+  if (
+    (intent === "pricing" ||
+      PRICING_QUERY_PATTERN.test(safeTrim(lead.lastMessage))) &&
+    !catalogue.some(
+      (entry) => entry.priceMinor !== null && entry.isActive !== false,
+    )
+  ) {
+    mandatory.push("An approved price for the requested service");
+  }
+
+  const topic = policyTopic(lead.lastMessage);
+
+  if (
+    topic &&
+    !knowledge.some(
+      (entry) => entry.entryType === "policy" && entry.isActive !== false,
+    )
+  ) {
+    mandatory.push(`An approved ${topic} policy`);
+  }
+
+  return mandatory;
+}
+
 function missingInformationFor(
   intent: ReplyDraft["intent"],
   lead: Lead,
   context?: ReplyContext,
 ): string[] {
-  const missing = baseMissingInformationFor(intent);
-  const catalogue = context?.catalogue ?? [];
-  const knowledge = context?.knowledge ?? [];
-
-  if (
-    intent === "pricing" &&
-    !catalogue.some((entry) => entry.priceMinor !== null)
-  ) {
-    missing.push("An approved price for the requested service");
-  }
-
-  const topic = policyTopic(lead.lastMessage);
-
-  if (topic && knowledge.length === 0) {
-    missing.push(`An approved ${topic} policy`);
-  }
-
-  return [...new Set(missing)].slice(0, 10);
+  return [
+    ...new Set([
+      ...baseMissingInformationFor(intent),
+      ...mandatoryMissingInformationFor(intent, lead, context),
+    ]),
+  ].slice(0, 10);
 }
 
 export class MockReplyDraftProvider implements ReplyDraftProvider {
@@ -444,26 +490,20 @@ function mergeMandatoryMissingInfo(
   lead: Lead,
   context?: ReplyContext,
 ): string[] {
-  const catalogue = context?.catalogue ?? [];
-  const knowledge = context?.knowledge ?? [];
-  const mandatory: string[] = [];
+  const mandatory = mandatoryMissingInformationFor(intent, lead, context);
+  const cleanedModelMissing = modelMissing
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0 && !isPlaceholderMissingItem(item));
 
-  if (
-    (intent === "pricing" || getIntent(lead.lastMessage) === "pricing") &&
-    !catalogue.some((entry) => entry.priceMinor !== null)
-  ) {
-    mandatory.push("An approved price for the requested service");
-  }
+  const baseFallback =
+    cleanedModelMissing.length === 0 &&
+    (mandatory.length === 0 || ACTIONABLE_INTENTS.has(intent))
+      ? baseMissingInformationFor(intent)
+      : [];
 
-  const topic = policyTopic(lead.lastMessage);
-  if (topic && knowledge.length === 0) {
-    mandatory.push(`An approved ${topic} policy`);
-  }
-
-  const combined = [...mandatory, ...modelMissing];
-  return combined.length > 0
-    ? [...new Set(combined)].slice(0, 10)
-    : baseMissingInformationFor(intent);
+  return [
+    ...new Set([...mandatory, ...cleanedModelMissing, ...baseFallback]),
+  ].slice(0, 10);
 }
 
 export type GeminiReplyDraftProviderOptions = Readonly<{

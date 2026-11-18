@@ -44,7 +44,9 @@ import {
   markOutboundSent,
   markOutboundSentWhileConnectionActive,
   processOutboundDeliveryEvent,
+  resolveConversationForLead,
 } from "../src/outbound/repository.js";
+import { linkConversationToLead } from "../src/leads/linking.js";
 import { updateReplyDraftText } from "../src/reply-drafts/repository.js";
 import { recordWorkerHeartbeat } from "../src/outbound/worker-status.js";
 import {
@@ -80,9 +82,11 @@ import {
   WhatsAppPhoneNumberOwnedByAnotherWorkspaceError,
 } from "../src/whatsapp/repository.js";
 import {
+  loadWhatsAppConnectionForVerification,
   registerWhatsAppConnection,
   resolveActiveConnectionByPhoneNumberId,
   setWhatsAppConnectionVerificationState,
+  upsertVerifiedWhatsAppConnection,
 } from "../src/whatsapp/connections.js";
 import { ConnectionAwareMetaProvider } from "../src/outbound/meta-connection-provider.js";
 import {
@@ -865,6 +869,27 @@ async function conversationIdsForLead(leadId: string): Promise<string[]> {
   );
 
   return result.rows.map((row) => row.id);
+}
+
+/**
+ * Attaches unlinked conversations created in test setup to `leadId` to simulate
+ * pre-M-04 / legacy multi-conversation lead states when testing ambiguity and
+ * multi-thread lookup paths.
+ */
+async function linkUnlinkedConversationsForLegacyTestSetup(
+  leadId: string,
+  options: Readonly<{ archive?: boolean }> = {},
+): Promise<void> {
+  await pool.query(
+    `
+      UPDATE whatsapp_conversations
+      SET lead_id = $2,
+          status = CASE WHEN $3::boolean THEN 'archived' ELSE status END
+      WHERE workspace_id = $1
+        AND lead_id IS NULL
+    `,
+    [requireSession().workspace.id, leadId, options.archive ?? false],
+  );
 }
 
 async function createSavedDraftPayload(leadId: string): Promise<SavedReplyDraftPayload> {
@@ -8920,6 +8945,7 @@ test("ambiguous conversations require an explicit validated conversationId", asy
     ],
   );
   assert.equal(stored.stored, 1);
+  await linkUnlinkedConversationsForLegacyTestSetup(lead.id);
 
   const conversationIds = await conversationIdsForLead(lead.id);
   assert.equal(conversationIds.length, 2);
@@ -8977,6 +9003,7 @@ test("manual queueing requires an explicit target when a lead has multiple conve
       }),
     ],
   );
+  await linkUnlinkedConversationsForLegacyTestSetup(lead.id);
   const conversationIds = await conversationIdsForLead(lead.id);
   assert.equal(conversationIds.length, 2);
 
@@ -9013,6 +9040,7 @@ test("manual retry cannot retarget an existing outbound message", async () => {
       }),
     ],
   );
+  await linkUnlinkedConversationsForLegacyTestSetup(lead.id);
   const conversationIds = await conversationIdsForLead(lead.id);
   assert.equal(conversationIds.length, 2);
 
@@ -9076,6 +9104,7 @@ test("lead-scoped conversation lookup returns all matching conversations", async
     additionalMessages,
   );
   assert.equal(stored.stored, 105);
+  await linkUnlinkedConversationsForLegacyTestSetup(lead.id, { archive: true });
 
   const response = await fetch(
     `${baseUrl}/api/conversations/by-lead/${lead.id}`,
@@ -15123,6 +15152,7 @@ test("H2 re-approving a draft with an existing failed, sent, or mismatched outbo
       senderPhoneNumber: TEST_WHATSAPP_CUSTOMER_WA_ID,
     }),
   ]);
+  await linkUnlinkedConversationsForLegacyTestSetup(lead.id);
   const conversationIds = await conversationIdsForLead(lead.id);
   const otherConversationId = conversationIds.find((id) => id !== conversationId);
   assert.ok(otherConversationId);
@@ -17620,5 +17650,744 @@ test("H-07 refreshes started_at on claim authorization and reconciles same-attem
     assert.equal(reconciled2.message.providerMessageId, "wamid.h07.sent.2");
     assert.equal(reconciled2.message.failureReason, null);
     assert.ok(reconciled2.message.sentAt);
+  }
+});
+
+// ─── Batch 2C Hardening Regression & Concurrency Tests (M-04, M-06) ──────────
+
+function createDeferred<T = void>(): {
+  promise: Promise<T>;
+  resolve: (value: T | PromiseLike<T>) => void;
+  reject: (reason?: unknown) => void;
+} {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+async function waitForLeadLockWaiters(
+  expectedCount: number,
+  timeoutMs = 5_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() < deadline) {
+    const result = await pool.query<{ count: number }>(
+      `
+        SELECT count(*)::int AS count
+        FROM pg_stat_activity
+        WHERE datname = current_database()
+          AND pid <> pg_backend_pid()
+          AND state = 'active'
+          AND wait_event_type = 'Lock'
+          AND query LIKE '%FROM leads%'
+          AND query LIKE '%FOR UPDATE%'
+      `,
+    );
+
+    if ((result.rows[0]?.count ?? 0) >= expectedCount) {
+      return;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 15));
+  }
+
+  throw new Error(
+    `Timed out waiting for ${expectedCount} lead row lock waiter(s).`,
+  );
+}
+
+test("M-04 inbound auto-linking enforces single active conversation per lead and keeps resolveConversationForLead unambiguous", async () => {
+  const workspaceId = requireSession().workspace.id;
+  const phoneDigits = "16505554101";
+  const firstConnectionPhoneId = "106540352242931";
+  const secondConnectionPhoneId = "106540352242932";
+  const thirdConnectionPhoneId = "106540352242933";
+
+  const lead = await createDraftLead({
+    name: "M-04 Single Active Lead",
+    whatsappNumber: `+${phoneDigits}`,
+  });
+
+  const firstInbound = await persistInboundMessages(pool, workspaceId, [
+    inboundMessage({
+      phoneNumberId: firstConnectionPhoneId,
+      senderWaId: phoneDigits,
+      senderPhoneNumber: phoneDigits,
+      text: "First connection enquiry",
+    }),
+  ]);
+  assert.deepEqual(firstInbound, { stored: 1, duplicates: 0 });
+
+  const afterFirst = await conversationIdsForLead(lead.id);
+  assert.equal(afterFirst.length, 1);
+  const firstConversationId = afterFirst[0]!;
+
+  // A second inbound message from the same phone number on another connection
+  // must create an unlinked conversation rather than attaching a second active
+  // conversation to the lead.
+  const secondInbound = await persistInboundMessages(pool, workspaceId, [
+    inboundMessage({
+      phoneNumberId: secondConnectionPhoneId,
+      senderWaId: phoneDigits,
+      senderPhoneNumber: phoneDigits,
+      text: "Second connection enquiry",
+    }),
+  ]);
+  assert.deepEqual(secondInbound, { stored: 1, duplicates: 0 });
+
+  const allWorkspaceConversations = await pool.query<{
+    id: string;
+    phone_number_id: string;
+    lead_id: string | null;
+    status: string;
+  }>(
+    `
+      SELECT id, phone_number_id, lead_id, status
+      FROM whatsapp_conversations
+      WHERE workspace_id = $1
+      ORDER BY created_at ASC, id ASC
+    `,
+    [workspaceId],
+  );
+  assert.equal(allWorkspaceConversations.rows.length, 2);
+  assert.equal(allWorkspaceConversations.rows[0]?.id, firstConversationId);
+  assert.equal(allWorkspaceConversations.rows[0]?.lead_id, lead.id);
+  assert.equal(allWorkspaceConversations.rows[1]?.phone_number_id, secondConnectionPhoneId);
+  assert.equal(allWorkspaceConversations.rows[1]?.lead_id, null);
+
+  const resolved = await resolveConversationForLead(pool, {
+    workspaceId,
+    leadId: lead.id,
+  });
+  assert.deepEqual(resolved, { kind: "ok", conversationId: firstConversationId });
+
+  const draft = await createSavedDraftPayload(lead.id);
+  const approved = await approveSavedDraft(lead.id, draft.id, {
+    status: "approved",
+    sendPolicy: "approve_and_send",
+  });
+  assert.equal(approved.status, 200);
+  const approvedPayload = await readJson<ReplyDraftApprovalPayload>(approved);
+  assert.equal(approvedPayload.outboundMessage?.conversationId, firstConversationId);
+
+  // Archiving the active conversation frees the lead so a subsequent inbound
+  // message can auto-link a new active conversation while still keeping at most
+  // one active conversation per lead.
+  await pool.query(
+    `
+      UPDATE whatsapp_conversations
+      SET status = 'archived'
+      WHERE workspace_id = $1
+        AND id = $2
+    `,
+    [workspaceId, firstConversationId],
+  );
+
+  const thirdInbound = await persistInboundMessages(pool, workspaceId, [
+    inboundMessage({
+      phoneNumberId: thirdConnectionPhoneId,
+      senderWaId: phoneDigits,
+      senderPhoneNumber: phoneDigits,
+      text: "Post-archive enquiry",
+    }),
+  ]);
+  assert.deepEqual(thirdInbound, { stored: 1, duplicates: 0 });
+
+  const activeForLead = await pool.query<{ id: string }>(
+    `
+      SELECT id
+      FROM whatsapp_conversations
+      WHERE workspace_id = $1
+        AND lead_id = $2
+        AND status IN ('open', 'closed')
+    `,
+    [workspaceId, lead.id],
+  );
+  assert.equal(activeForLead.rows.length, 1);
+  assert.notEqual(activeForLead.rows[0]?.id, firstConversationId);
+
+  // A single multi-message batch targeting the same unlinked lead across two
+  // connections must also link at most one active conversation.
+  const batchPhoneDigits = "16505554104";
+  const batchLead = await createDraftLead({
+    name: "M-04 Single Batch Lead",
+    whatsappNumber: `+${batchPhoneDigits}`,
+  });
+  const batchResult = await persistInboundMessages(pool, workspaceId, [
+    inboundMessage({
+      phoneNumberId: "106540352242941",
+      senderWaId: batchPhoneDigits,
+      senderPhoneNumber: batchPhoneDigits,
+      text: "Batch message 1",
+    }),
+    inboundMessage({
+      phoneNumberId: "106540352242942",
+      senderWaId: batchPhoneDigits,
+      senderPhoneNumber: batchPhoneDigits,
+      text: "Batch message 2",
+    }),
+  ]);
+  assert.deepEqual(batchResult, { stored: 2, duplicates: 0 });
+  const batchActive = await pool.query<{ id: string }>(
+    `
+      SELECT id
+      FROM whatsapp_conversations
+      WHERE workspace_id = $1
+        AND lead_id = $2
+        AND status IN ('open', 'closed')
+    `,
+    [workspaceId, batchLead.id],
+  );
+  assert.equal(batchActive.rows.length, 1);
+});
+
+test("M-04 concurrent inbound webhooks and manual linking serialize cleanly with at most one active conversation and zero deadlocks", async () => {
+  const owner = requireSession();
+  const workspaceId = owner.workspace.id;
+
+  // Part A: Two concurrent inbound transactions for the same unlinked lead,
+  // deterministically interleaved behind an active FOR UPDATE lock on the lead.
+  const concurrentDigits = "16505554102";
+  const concurrentLead = await createDraftLead({
+    name: "M-04 Concurrent Webhook Lead",
+    whatsappNumber: `+${concurrentDigits}`,
+  });
+
+  const blockerA = await pool.connect();
+  let concurrentInboundResults: [
+    { stored: number; duplicates: number },
+    { stored: number; duplicates: number },
+  ];
+
+  try {
+    await blockerA.query("BEGIN");
+    await blockerA.query(
+      "SELECT id FROM leads WHERE workspace_id = $1 AND id = $2 FOR UPDATE",
+      [workspaceId, concurrentLead.id],
+    );
+
+    const pendingPair = Promise.all([
+      persistInboundMessages(pool, workspaceId, [
+        inboundMessage({
+          phoneNumberId: "106540352242934",
+          senderWaId: concurrentDigits,
+          senderPhoneNumber: concurrentDigits,
+          text: "Concurrent inbound A",
+        }),
+      ]),
+      persistInboundMessages(pool, workspaceId, [
+        inboundMessage({
+          phoneNumberId: "106540352242935",
+          senderWaId: concurrentDigits,
+          senderPhoneNumber: concurrentDigits,
+          text: "Concurrent inbound B",
+        }),
+      ]),
+    ]);
+
+    await waitForLeadLockWaiters(2);
+    await blockerA.query("COMMIT");
+    concurrentInboundResults = await pendingPair;
+  } finally {
+    await blockerA.query("ROLLBACK").catch(() => undefined);
+    blockerA.release();
+  }
+
+  assert.deepEqual(concurrentInboundResults, [
+    { stored: 1, duplicates: 0 },
+    { stored: 1, duplicates: 0 },
+  ]);
+
+  const partAConvs = await pool.query<{
+    id: string;
+    lead_id: string | null;
+    status: string;
+  }>(
+    `
+      SELECT conversation.id, conversation.lead_id, conversation.status
+      FROM whatsapp_conversations AS conversation
+      JOIN customers AS customer
+        ON customer.id = conversation.customer_id
+       AND customer.workspace_id = conversation.workspace_id
+      WHERE conversation.workspace_id = $1
+        AND customer.phone_e164 = $2
+    `,
+    [workspaceId, `+${concurrentDigits}`],
+  );
+  assert.equal(partAConvs.rows.length, 2);
+  assert.equal(
+    partAConvs.rows.filter(
+      (row) =>
+        row.lead_id === concurrentLead.id &&
+        (row.status === "open" || row.status === "closed"),
+    ).length,
+    1,
+    "Concurrent inbound webhooks must auto-link at most one active conversation to a lead",
+  );
+
+  // Part B: Concurrent inbound webhook on an existing unlinked conversation +
+  // manual linkConversationToLead on the same lead must share the leads->conversations
+  // lock order and finish with zero deadlocks and one active linked conversation.
+  const interleaveDigits = "16505554103";
+  await persistInboundMessages(pool, workspaceId, [
+    inboundMessage({
+      phoneNumberId: "106540352242936",
+      senderWaId: interleaveDigits,
+      senderPhoneNumber: interleaveDigits,
+      text: "Pre-existing unlinked thread",
+    }),
+  ]);
+  const existingConvRes = await pool.query<{ id: string }>(
+    `
+      SELECT id
+      FROM whatsapp_conversations
+      WHERE workspace_id = $1
+        AND phone_number_id = '106540352242936'
+      LIMIT 1
+    `,
+    [workspaceId],
+  );
+  const existingConvId = existingConvRes.rows[0]?.id;
+  assert.ok(existingConvId);
+
+  const interleaveLead = await createDraftLead({
+    name: "M-04 Interleaved Link Lead",
+    whatsappNumber: `+${interleaveDigits}`,
+  });
+
+  const blockerB = await pool.connect();
+
+  try {
+    await blockerB.query("BEGIN");
+    await blockerB.query(
+      "SELECT id FROM leads WHERE workspace_id = $1 AND id = $2 FOR UPDATE",
+      [workspaceId, interleaveLead.id],
+    );
+
+    const racing = Promise.all([
+      persistInboundMessages(pool, workspaceId, [
+        inboundMessage({
+          phoneNumberId: "106540352242937",
+          senderWaId: interleaveDigits,
+          senderPhoneNumber: interleaveDigits,
+          text: "Inbound racing manual link",
+        }),
+      ]),
+      linkConversationToLead(pool, {
+        workspaceId,
+        userId: owner.user.id,
+        leadId: interleaveLead.id,
+        conversationId: existingConvId,
+      }),
+    ]);
+
+    await waitForLeadLockWaiters(2);
+    await blockerB.query("COMMIT");
+    const [inboundOutcome, linkOutcome] = await racing;
+    assert.deepEqual(inboundOutcome, { stored: 1, duplicates: 0 });
+    assert.ok(
+      linkOutcome.kind === "ok" || linkOutcome.kind === "lead-already-linked",
+      `Unexpected link outcome: ${linkOutcome.kind}`,
+    );
+  } finally {
+    await blockerB.query("ROLLBACK").catch(() => undefined);
+    blockerB.release();
+  }
+
+  const partBLinked = await pool.query<{ count: number }>(
+    `
+      SELECT count(*)::int AS count
+      FROM whatsapp_conversations
+      WHERE workspace_id = $1
+        AND lead_id = $2
+        AND status IN ('open', 'closed')
+    `,
+    [workspaceId, interleaveLead.id],
+  );
+  assert.equal(partBLinked.rows[0]?.count, 1);
+});
+
+test("M-06 concurrent same-workspace onboarding converges deterministically while preserving M2 cross-workspace 409", async () => {
+  const owner = requireSession();
+  const other = await registerUser({
+    email: `m06-other-${randomUUID()}@example.test`,
+    name: "M-06 Cross-Workspace Owner",
+  });
+
+  await withCredentialEncryption(async () => {
+    const sharedPhoneNumberId = "106540000000902";
+    const metaState: FakeMetaState = {
+      phoneNumbers: [
+        {
+          id: sharedPhoneNumberId,
+          display_phone_number: "15550783902",
+          verified_name: "M06 Concurrent Studio",
+        },
+      ],
+    };
+    const fake = createFakeMetaFetch(metaState);
+    let subscribeReadsArrived = 0;
+    const bothReadyToUpsert = createDeferred();
+    let gateSameWorkspaceBatch = true;
+
+    const synchronizedMetaFetch: typeof fetch = async (input, init) => {
+      const url = new URL(typeof input === "string" ? input : String(input));
+      const method = (init?.method ?? "GET").toUpperCase();
+
+      if (
+        gateSameWorkspaceBatch &&
+        method === "GET" &&
+        url.pathname === `/${TEST_META_GRAPH_VERSION}/${TEST_META_WABA_ID}/subscribed_apps`
+      ) {
+        const response = await fake.fetchImplementation(input, init);
+        subscribeReadsArrived += 1;
+
+        if (subscribeReadsArrived >= 2) {
+          bothReadyToUpsert.resolve();
+        }
+
+        await bothReadyToUpsert.promise;
+        return response;
+      }
+
+      return fake.fetchImplementation(input, init);
+    };
+
+    const started = await startServer(
+      pool,
+      undefined,
+      {},
+      null,
+      testEmbeddedSignupConfig(),
+      synchronizedMetaFetch,
+    );
+
+    try {
+      const [session1, session2] = await Promise.all([
+        createOnboardingState(started, owner),
+        createOnboardingState(started, owner),
+      ]);
+
+      const [res1, res2] = await Promise.all([
+        completeOnboarding(started, owner, session1.state, {
+          phoneNumberId: sharedPhoneNumberId,
+        }),
+        completeOnboarding(started, owner, session2.state, {
+          phoneNumberId: sharedPhoneNumberId,
+        }),
+      ]);
+
+      assert.equal(res1.status, 200);
+      assert.equal(res2.status, 200);
+
+      const payload1 = await readJson<OnboardingCompletePayload>(res1);
+      const payload2 = await readJson<OnboardingCompletePayload>(res2);
+      assert.equal(payload1.connection.id, payload2.connection.id);
+      assert.equal(payload1.connection.status, "active");
+      assert.equal(payload2.connection.status, "active");
+
+      const rows = await pool.query<{ id: string; status: string }>(
+        `
+          SELECT id, status
+          FROM whatsapp_connections
+          WHERE workspace_id = $1
+            AND phone_number_id = $2
+        `,
+        [owner.workspace.id, sharedPhoneNumberId],
+      );
+      assert.equal(rows.rows.length, 1);
+      assert.equal(rows.rows[0]?.id, payload1.connection.id);
+      assert.equal(rows.rows[0]?.status, "active");
+
+      // M2 invariant preserved: another workspace attempting to claim the same
+      // active number still receives HTTP 409 phone_number_unavailable.
+      gateSameWorkspaceBatch = false;
+      const otherSession = await createOnboardingState(started, other);
+      const conflictRes = await completeOnboarding(started, other, otherSession.state, {
+        phoneNumberId: sharedPhoneNumberId,
+      });
+      assert.equal(conflictRes.status, 409);
+      const conflictPayload = await readJson<OnboardingErrorPayload>(conflictRes);
+      assert.equal(conflictPayload.code, "phone_number_unavailable");
+
+      // Direct concurrent upsertVerifiedWhatsAppConnection calls in the same
+      // workspace on a brand-new phone number also converge cleanly.
+      const directPhoneNumberId = "106540000000903";
+      const [directA, directB] = await Promise.all([
+        upsertVerifiedWhatsAppConnection(pool, {
+          workspaceId: owner.workspace.id,
+          phoneNumberId: directPhoneNumberId,
+          wabaId: TEST_META_WABA_ID,
+          status: "active",
+          accessToken: "EAABc0M06DirectConcurrentTokenA1234567890",
+          webhookSubscribed: true,
+        }),
+        upsertVerifiedWhatsAppConnection(pool, {
+          workspaceId: owner.workspace.id,
+          phoneNumberId: directPhoneNumberId,
+          wabaId: TEST_META_WABA_ID,
+          status: "active",
+          accessToken: "EAABc0M06DirectConcurrentTokenB1234567890",
+          webhookSubscribed: true,
+        }),
+      ]);
+      assert.equal(directA.id, directB.id);
+      assert.equal(directA.status, "active");
+      assert.equal(directB.status, "active");
+    } finally {
+      await stopServer(started.server);
+    }
+  });
+});
+
+test("M-06 slow failing verifyWhatsAppConnection cannot overwrite a concurrent re-onboarding token or active state", async () => {
+  const owner = requireSession();
+
+  await withCredentialEncryption(async () => {
+    const initialToken = "EAABc0M06InitialTokenBeforeReonboardingSecret12";
+    const newerToken = "EAABc0M06NewerTokenFromReonboardingSecret5678";
+    const metaState: FakeMetaState = {
+      accessToken: initialToken,
+    };
+    const fake = createFakeMetaFetch(metaState);
+
+    let trapSlowVerify = false;
+    const verifyInFlight = createDeferred();
+    const releaseSlowVerify = createDeferred();
+
+    const gatedMetaFetch: typeof fetch = async (input, init) => {
+      const url = new URL(typeof input === "string" ? input : String(input));
+
+      if (
+        trapSlowVerify &&
+        url.pathname === `/${TEST_META_GRAPH_VERSION}/debug_token` &&
+        url.searchParams.get("input_token") === initialToken
+      ) {
+        verifyInFlight.resolve();
+        await releaseSlowVerify.promise;
+        return fakeJson({
+          data: {
+            app_id: TEST_META_APP_ID,
+            type: "USER",
+            is_valid: false,
+            scopes: [],
+            expires_at: 0,
+          },
+        });
+      }
+
+      return fake.fetchImplementation(input, init);
+    };
+
+    const started = await startServer(
+      pool,
+      undefined,
+      {},
+      null,
+      testEmbeddedSignupConfig(),
+      gatedMetaFetch,
+    );
+
+    try {
+      const initialSession = await createOnboardingState(started, owner);
+      const initialOnboard = await completeOnboarding(
+        started,
+        owner,
+        initialSession.state,
+      );
+      assert.equal(initialOnboard.status, 200);
+      const initialPayload =
+        await readJson<OnboardingCompletePayload>(initialOnboard);
+      const connectionId = initialPayload.connection.id;
+      assert.equal(initialPayload.connection.status, "active");
+
+      // Enable the slow failing verify trap and start /verify.
+      trapSlowVerify = true;
+      const verifyPromise = requestOn(
+        started,
+        owner,
+        `/api/whatsapp/connections/${connectionId}/verify`,
+        "POST",
+        {},
+      );
+      await verifyInFlight.promise;
+
+      // While verify is in-flight with initialToken, complete a concurrent
+      // re-onboarding with newerToken in the same workspace.
+      metaState.accessToken = newerToken;
+      const reonboardSession = await createOnboardingState(started, owner);
+      const reonboardRes = await completeOnboarding(
+        started,
+        owner,
+        reonboardSession.state,
+      );
+      assert.equal(reonboardRes.status, 200);
+      const reonboardPayload =
+        await readJson<OnboardingCompletePayload>(reonboardRes);
+      assert.equal(reonboardPayload.connection.id, connectionId);
+      assert.equal(reonboardPayload.connection.status, "active");
+      assert.equal(reonboardPayload.connection.lastError, null);
+
+      const expectedCreds = await loadWhatsAppConnectionForVerification(
+        pool,
+        owner.workspace.id,
+        connectionId,
+      );
+      assert.ok(expectedCreds?.encryptedToken);
+
+      // Release the slow failing verify request.
+      releaseSlowVerify.resolve();
+      const verifyRes = await verifyPromise;
+      assert.equal(
+        verifyRes.status,
+        200,
+        "Superseded verification should return the latest state cleanly instead of a confusing 404",
+      );
+      const verifyPayload = await readJson<{
+        connection: OnboardingConnectionPayload;
+        verification: string;
+        error: string | null;
+        superseded?: boolean;
+      }>(verifyRes);
+      assert.equal(verifyPayload.superseded, true);
+      assert.equal(verifyPayload.verification, "active");
+      assert.equal(verifyPayload.error, null);
+      assert.equal(verifyPayload.connection.id, connectionId);
+      assert.equal(verifyPayload.connection.status, "active");
+      assert.equal(verifyPayload.connection.lastError, null);
+
+      // Confirm the DB row still holds newerToken and active status.
+      const dbAfter = await pool.query<{
+        status: string;
+        last_error: string | null;
+        webhook_subscribed_at: Date | null;
+        access_token_ciphertext: string | null;
+        access_token_iv: string | null;
+        access_token_auth_tag: string | null;
+        credential_key_version: string | null;
+      }>(
+        `
+          SELECT
+            status,
+            last_error,
+            webhook_subscribed_at,
+            access_token_ciphertext,
+            access_token_iv,
+            access_token_auth_tag,
+            credential_key_version
+          FROM whatsapp_connections
+          WHERE id = $1
+        `,
+        [connectionId],
+      );
+      const rowAfter = dbAfter.rows[0];
+      assert.ok(rowAfter);
+      assert.equal(rowAfter.status, "active");
+      assert.equal(rowAfter.last_error, null);
+      assert.ok(rowAfter.webhook_subscribed_at);
+      assert.equal(
+        rowAfter.access_token_ciphertext,
+        expectedCreds.encryptedToken.ciphertext,
+      );
+      assert.equal(rowAfter.access_token_iv, expectedCreds.encryptedToken.iv);
+      assert.equal(
+        rowAfter.access_token_auth_tag,
+        expectedCreds.encryptedToken.authTag,
+      );
+      assert.equal(
+        rowAfter.credential_key_version,
+        expectedCreds.encryptedToken.keyVersion,
+      );
+      assert.equal(
+        decryptWhatsAppToken(
+          expectedCreds.encryptedToken,
+          process.env,
+          whatsappCredentialAad(owner.workspace.id, TEST_META_PHONE_NUMBER_ID),
+        ),
+        newerToken,
+      );
+
+      // Direct verification guard rejects stale credential snapshots (both
+      // mismatched ciphertext/iv/tag/version and null).
+      assert.equal(
+        await setWhatsAppConnectionVerificationState(pool, {
+          workspaceId: owner.workspace.id,
+          connectionId,
+          status: "error",
+          lastError: "Stale error should not overwrite",
+          webhookSubscribed: false,
+          expectedEncryptedToken: {
+            ...expectedCreds.encryptedToken,
+            iv: "stale-iv-value",
+          },
+        }),
+        null,
+      );
+      assert.equal(
+        await setWhatsAppConnectionVerificationState(pool, {
+          workspaceId: owner.workspace.id,
+          connectionId,
+          status: "error",
+          lastError: "Null credential snapshot should not overwrite",
+          webhookSubscribed: false,
+          expectedEncryptedToken: null,
+        }),
+        null,
+      );
+    } finally {
+      releaseSlowVerify.resolve();
+      await stopServer(started.server);
+    }
+  });
+});
+
+test("H-09 & L-03-webhook enforces pre-buffer signature checks, 1000-item bounds, and phone_number_id format on /api/webhooks/whatsapp", async () => {
+  const app = await startWhatsAppServer();
+
+  try {
+    const oversizedUnsigned = JSON.stringify({
+      object: "whatsapp_business_account",
+      entry: [{ id: "waba", changes: [{ value: { padding: "x".repeat(3_500_000) } }] }],
+    });
+
+    for (const signature of [null, "sha256=not-hex"]) {
+      const response = await postWhatsApp(app, oversizedUnsigned, { signature });
+      assert.equal(response.status, 401);
+      assert.deepEqual(await readJson(response), {
+        error: "Invalid webhook signature",
+      });
+    }
+
+    const overBoundMessages = whatsappEnvelope([
+      whatsappChange({
+        messages: Array.from({ length: 1_001 }, () => textWhatsAppMessage()),
+      }),
+    ]);
+    const overBoundRes = await postWhatsApp(app, overBoundMessages);
+    assert.equal(overBoundRes.status, 400);
+    assert.deepEqual(await readJson(overBoundRes), {
+      error: "Invalid webhook payload",
+    });
+
+    const invalidPhoneIdRes = await postWhatsApp(
+      app,
+      whatsappEnvelope([
+        whatsappChange({
+          phoneNumberId: "not-numeric",
+          messages: [textWhatsAppMessage()],
+        }),
+      ]),
+    );
+    assert.equal(invalidPhoneIdRes.status, 400);
+    assert.deepEqual(await readJson(invalidPhoneIdRes), {
+      error: "Invalid webhook payload",
+    });
+  } finally {
+    await stopServer(app.server);
   }
 });

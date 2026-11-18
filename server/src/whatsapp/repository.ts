@@ -521,11 +521,13 @@ async function insertInboundMessage(
   return result.rows[0]?.id ?? null;
 }
 
-async function findLeadIdForSender(
-  client: PoolClient,
-  workspaceId: string,
-  senderPhoneNumber: string,
-): Promise<string | null> {
+function resolveEligibleSenderE164(
+  senderPhoneNumber: string | null,
+): string | null {
+  if (!senderPhoneNumber) {
+    return null;
+  }
+
   // Both sides must have a verified international E.164 identity. A Meta `from`
   // value is international digits without a leading "+", so normalize it to E.164
   // and verify it via describeLeadNumber; a bare legacy lead number without a
@@ -539,18 +541,84 @@ async function findLeadIdForSender(
     return null;
   }
 
+  return senderIdentity.e164;
+}
+
+/**
+ * Acquires lead row locks in deterministic ID order before any conversation or
+ * message locks when a single inbound batch carries messages for multiple
+ * distinct candidate leads, preventing lock-order inversion across concurrent
+ * batches or `linkConversationToLead`.
+ */
+async function lockCandidateLeadsForInboundBatch(
+  client: PoolClient,
+  workspaceId: string,
+  messages: readonly InboundWhatsAppMessage[],
+): Promise<void> {
+  const candidateNumbers = Array.from(
+    new Set(
+      messages
+        .map((message) => resolveEligibleSenderE164(message.senderPhoneNumber))
+        .filter((number): number is string => number !== null),
+    ),
+  );
+
+  if (candidateNumbers.length <= 1) {
+    return;
+  }
+
+  await client.query(
+    `
+      SELECT leads.id
+      FROM leads
+      WHERE leads.workspace_id = $1
+        AND leads.whatsapp_number = ANY($2::text[])
+        AND NOT EXISTS (
+          SELECT 1
+          FROM whatsapp_conversations AS active
+          WHERE active.workspace_id = $1
+            AND active.lead_id = leads.id
+            AND active.status IN ('open', 'closed')
+        )
+      ORDER BY leads.id ASC
+      FOR UPDATE OF leads
+    `,
+    [workspaceId, candidateNumbers],
+  );
+}
+
+async function findLeadIdForSender(
+  client: PoolClient,
+  workspaceId: string,
+  senderPhoneNumber: string,
+): Promise<string | null> {
+  const senderE164 = resolveEligibleSenderE164(senderPhoneNumber);
+
+  if (!senderE164) {
+    return null;
+  }
+
   const result = await client.query<{
     id: string;
     whatsapp_number: string | null;
   }>(
     `
-      SELECT id, whatsapp_number
+      SELECT leads.id, leads.whatsapp_number
       FROM leads
-      WHERE workspace_id = $1
-        AND whatsapp_number = $2
+      WHERE leads.workspace_id = $1
+        AND leads.whatsapp_number = $2
+        AND NOT EXISTS (
+          SELECT 1
+          FROM whatsapp_conversations AS active
+          WHERE active.workspace_id = $1
+            AND active.lead_id = leads.id
+            AND active.status IN ('open', 'closed')
+        )
+      ORDER BY leads.created_at ASC, leads.id ASC
       LIMIT 1
+      FOR UPDATE OF leads
     `,
-    [workspaceId, senderIdentity.e164],
+    [workspaceId, senderE164],
   );
 
   const row = result.rows[0];
@@ -561,7 +629,30 @@ async function findLeadIdForSender(
 
   const leadIdentity = describeLeadNumber(row.whatsapp_number);
 
-  if (!leadIdentity.resolved || leadIdentity.e164 !== senderIdentity.e164) {
+  if (!leadIdentity.resolved || leadIdentity.e164 !== senderE164) {
+    return null;
+  }
+
+  // Under PostgreSQL READ COMMITTED, if two transactions entered the query
+  // above while the lead had no active conversation, the loser waits on
+  // `FOR UPDATE OF leads`. Because the winner updates `whatsapp_conversations`
+  // without modifying `leads`, LockRows returns the unchanged `leads` tuple
+  // without re-evaluating the `NOT EXISTS` subquery. Re-checking in a new
+  // statement after acquiring `FOR UPDATE OF leads` observes both any
+  // concurrent winner's committed link and any link made earlier in this tx.
+  const activeConversation = await client.query(
+    `
+      SELECT 1
+      FROM whatsapp_conversations AS active
+      WHERE active.workspace_id = $1
+        AND active.lead_id = $2
+        AND active.status IN ('open', 'closed')
+      LIMIT 1
+    `,
+    [workspaceId, row.id],
+  );
+
+  if (activeConversation.rows.length > 0) {
     return null;
   }
 
@@ -677,6 +768,8 @@ export async function persistInboundMessages(
       throw new WhatsAppWorkspaceNotFoundError();
     }
 
+    await lockCandidateLeadsForInboundBatch(client, workspaceId, messages);
+
     let stored = 0;
     let duplicates = 0;
 
@@ -703,6 +796,25 @@ export async function persistInboundMessages(
         workspaceId,
         message.phoneNumberId,
       );
+
+      // Lock ordering invariant (shared with `linkConversationToLead` in
+      // `server/src/leads/linking.ts`):
+      //   1. `leads` (`FOR UPDATE OF leads`, only when an unlinked matching lead exists)
+      //   2. `whatsapp_conversations` (insert / `FOR KEY SHARE` from
+      //      `whatsapp_messages` FK / `FOR NO KEY UPDATE` on activity update)
+      //
+      // Resolving and locking the candidate lead before touching
+      // `whatsapp_conversations` or `whatsapp_messages` avoids lock-order
+      // inversion against `linkConversationToLead` (which locks `leads`
+      // `FOR UPDATE` then `whatsapp_conversations` `FOR UPDATE OF conversation`,
+      // conflicting with `whatsapp_messages`'s `FOR KEY SHARE` FK lock).
+      const candidateLeadId = message.senderPhoneNumber
+        ? await findLeadIdForSender(
+            client,
+            workspaceId,
+            message.senderPhoneNumber,
+          )
+        : null;
 
       // Only an actual sender phone number may become a customer's E.164
       // identity. `senderWaId` can be a business-scoped user ID (BSUID) or
@@ -744,15 +856,7 @@ export async function persistInboundMessages(
         continue;
       }
 
-      const leadId =
-        conversation.leadId ??
-        (message.senderPhoneNumber
-          ? await findLeadIdForSender(
-              client,
-              workspaceId,
-              message.senderPhoneNumber,
-            )
-          : null);
+      const leadId = conversation.leadId ?? candidateLeadId;
 
       await updateConversationAfterMessage(client, {
         workspaceId,
