@@ -92,7 +92,7 @@ export type ConnectionAwareMetaProviderOptions = Readonly<{
   legacyConfig?: MetaOutboundConfig | null;
   /**
    * Global kill switch for real Meta outbound sending (`META_OUTBOUND_ENABLED`).
-   * Must be true (or enabled via a non-production environment) before any
+   * Must be true (or enabled via `META_OUTBOUND_ENABLED=true`) before any
    * connection-backed Meta HTTP call is attempted.
    */
   enabled?: boolean;
@@ -122,11 +122,9 @@ export class ConnectionAwareMetaProvider implements OutboundMessageProvider {
     this.#environment = options.environment ?? process.env;
     this.#now = options.now ?? (() => new Date());
     this.#enabled =
-      this.#environment["NODE_ENV"] === "production"
-        ? false
-        : (options.enabled ??
-          this.#environment["META_OUTBOUND_ENABLED"]?.trim().toLowerCase() ===
-            "true");
+      options.enabled ??
+      this.#environment["META_OUTBOUND_ENABLED"]?.trim().toLowerCase() ===
+        "true";
   }
 
   async send(

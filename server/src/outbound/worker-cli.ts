@@ -108,6 +108,8 @@ async function main(): Promise<void> {
   // Load Meta outbound configuration. Fails closed for production and invalid
   // enabled configurations.
   const metaConfig = loadMetaOutboundConfig();
+  const metaOutboundEnabled =
+    process.env.META_OUTBOUND_ENABLED?.trim().toLowerCase() === "true";
 
   const providers: Array<
     Readonly<{ provider: OutboundMessageProvider; label: string }>
@@ -124,7 +126,7 @@ async function main(): Promise<void> {
   // "whatsapp" rows fail closed instead of falling back to mock delivery.
   providers.push({
     provider: new ConnectionAwareMetaProvider(pool, {
-      enabled: metaConfig !== null,
+      enabled: metaOutboundEnabled,
       legacyConfig: metaConfig,
     }),
     label: "whatsapp",
@@ -138,7 +140,7 @@ async function main(): Promise<void> {
     // Never log the access token or any credential. Only log non-secret
     // identifiers for operational visibility.
     log("outbound_worker_provider_meta", {
-      enabled: true,
+      enabled: metaOutboundEnabled,
       senderPhoneNumberId: metaConfig.senderPhoneNumberId,
       testWorkspaceId: metaConfig.testWorkspaceId,
       graphApiVersion: metaConfig.graphApiVersion,
@@ -146,7 +148,7 @@ async function main(): Promise<void> {
     });
   } else {
     log("outbound_worker_provider_meta", {
-      enabled: false,
+      enabled: metaOutboundEnabled,
       legacyConfigured: false,
     });
   }

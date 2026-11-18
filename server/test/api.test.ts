@@ -16316,6 +16316,88 @@ test("C2 META_OUTBOUND_ENABLED=false blocks active whatsapp_connections from cal
         [mockOutboundId],
       );
       assert.equal(mockRow.rows[0]?.status, "sent");
+
+      // In NODE_ENV=production, unset META_OUTBOUND_ENABLED remains blocked, while
+      // META_OUTBOUND_ENABLED="true" (without legacy single-tenant config) or
+      // explicit options.enabled allows onboarded connection sending.
+      const prodUnsetProvider = new ConnectionAwareMetaProvider(pool, {
+        environment: {
+          ...process.env,
+          NODE_ENV: "production",
+          META_OUTBOUND_ENABLED: undefined,
+        },
+        now: () => now,
+        fetchImplementation: async () => {
+          fetchCalls += 1;
+          return new Response("{}", { status: 200 });
+        },
+      });
+      await assert.rejects(
+        () =>
+          prodUnsetProvider.send({
+            workspaceId: owner.workspace.id,
+            conversationId,
+            content: "Blocked when unset in production",
+            idempotencyKey: `c2-prod-unset-${randomUUID()}`,
+            recipientPhone: "+16505553801",
+          }),
+        (error: unknown) =>
+          error instanceof OutboundProviderError &&
+          /META_OUTBOUND_ENABLED=false/.test(error.message),
+      );
+      assert.equal(fetchCalls, 0);
+
+      const prodEnabledEnvProvider = new ConnectionAwareMetaProvider(pool, {
+        environment: {
+          ...process.env,
+          NODE_ENV: "production",
+          META_OUTBOUND_ENABLED: "true",
+        },
+        now: () => now,
+        fetchImplementation: async () => {
+          fetchCalls += 1;
+          return new Response(
+            JSON.stringify({ messages: [{ id: `wamid.c2-prod-${randomUUID()}` }] }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          );
+        },
+      });
+      const prodEnvSent = await prodEnabledEnvProvider.send({
+        workspaceId: owner.workspace.id,
+        conversationId,
+        content: "Allowed in production via META_OUTBOUND_ENABLED=true",
+        idempotencyKey: `c2-prod-env-${randomUUID()}`,
+        recipientPhone: "+16505553801",
+      });
+      assert.match(prodEnvSent.providerMessageId, /^wamid\.c2-prod-/);
+      assert.equal(fetchCalls, 1);
+
+      const prodEnabledOptProvider = new ConnectionAwareMetaProvider(pool, {
+        enabled: true,
+        legacyConfig: null,
+        environment: {
+          ...process.env,
+          NODE_ENV: "production",
+          META_OUTBOUND_ENABLED: "false",
+        },
+        now: () => now,
+        fetchImplementation: async () => {
+          fetchCalls += 1;
+          return new Response(
+            JSON.stringify({ messages: [{ id: `wamid.c2-opt-${randomUUID()}` }] }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          );
+        },
+      });
+      const prodOptSent = await prodEnabledOptProvider.send({
+        workspaceId: owner.workspace.id,
+        conversationId,
+        content: "Allowed in production via options.enabled",
+        idempotencyKey: `c2-prod-opt-${randomUUID()}`,
+        recipientPhone: "+16505553801",
+      });
+      assert.match(prodOptSent.providerMessageId, /^wamid\.c2-opt-/);
+      assert.equal(fetchCalls, 2);
     });
   } finally {
     if (previousEnabled === undefined) {
