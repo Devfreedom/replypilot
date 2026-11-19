@@ -5,6 +5,7 @@ import path from "node:path";
 import { after, before, beforeEach, test } from "node:test";
 import type { Pool } from "pg";
 import {
+  ABSTAIN_HANDOFF_NOTE,
   DEFAULT_GEMINI_FALLBACK_MODEL,
   DEFAULT_GEMINI_MODEL,
   DEFAULT_GEMINI_TIMEOUT_MS,
@@ -481,6 +482,7 @@ test("mapReplyDraftRow accepts valid gemini/mock metadata and rejects invalid co
     id: randomUUID(),
     lead_id: randomUUID(),
     intent: "pricing",
+    decision: "reply",
     summary: "Customer requested wedding photography pricing.",
     missing_information: ["Event date"],
     draft_reply: "Hi Adaeze, our package is £1,500.00.",
@@ -499,14 +501,26 @@ test("mapReplyDraftRow accepts valid gemini/mock metadata and rejects invalid co
   const validGemini = mapReplyDraftRow(baseRow);
   assert.equal(validGemini.provider, "gemini");
   assert.equal(validGemini.isDemo, false);
+  assert.equal(validGemini.decision, "reply");
 
   const validMock = mapReplyDraftRow({
     ...baseRow,
+    decision: "abstain",
     provider: "mock",
     is_demo: true,
   });
   assert.equal(validMock.provider, "mock");
   assert.equal(validMock.isDemo, true);
+  assert.equal(validMock.decision, "abstain");
+
+  assert.throws(
+    () =>
+      mapReplyDraftRow({
+        ...baseRow,
+        decision: "invalid" as ReplyDraftRow["decision"],
+      }),
+    /unsupported decision metadata/,
+  );
 
   assert.throws(
     () => mapReplyDraftRow({ ...baseRow, provider: "gemini", is_demo: true }),
@@ -1311,9 +1325,10 @@ test("H-10 filters placeholder missingInformation strings case-insensitively", a
     makeContext(),
   );
   assert.deepEqual(fallbackDraft.missingInformation, [
-    "What the customer needs",
-    "Preferred date",
+    "Specific booking, order, or service details",
+    "Preferred date or schedule",
   ]);
+  assert.equal(fallbackDraft.decision, "clarify");
 
   const mixedProvider = new GeminiReplyDraftProvider({
     apiKey: SAMPLE_API_KEY,
@@ -1373,9 +1388,10 @@ test("H-10 enforces pricing regex, missing policy when only FAQs exist, and acti
   assert.deepEqual(bookingDraft.missingInformation, [
     "An approved price for the requested service",
     "An approved cancellation policy",
-    "Preferred date and time",
-    "Event location",
+    "Preferred date or schedule",
+    "Specific booking, order, or service details",
   ]);
+  assert.equal(bookingDraft.decision, "clarify");
 
   const availabilityDraft = await providerForIntent("availability").draftReply(
     multiIntentLead,
@@ -1384,9 +1400,10 @@ test("H-10 enforces pricing regex, missing policy when only FAQs exist, and acti
   assert.deepEqual(availabilityDraft.missingInformation, [
     "An approved price for the requested service",
     "An approved cancellation policy",
-    "Preferred date and time",
-    "Event location",
+    "Preferred date or schedule",
+    "Preferred time or availability window",
   ]);
+  assert.equal(availabilityDraft.decision, "clarify");
 
   // Pricing query regex triggers directly from lastMessage even on general-enquiry intent.
   const generalPricingDraft = await new GeminiReplyDraftProvider({
@@ -1395,7 +1412,7 @@ test("H-10 enforces pricing regex, missing policy when only FAQs exist, and acti
       geminiSuccessResponse({
         intent: "general-enquiry",
         summary: "Customer asked about package cost.",
-        missingInformation: ["Event location"],
+        missingInformation: ["Order quantity"],
         draftReply: "Hi Adaeze, the owner will confirm package pricing.",
         citedFactIds: [],
       }),
@@ -1405,7 +1422,7 @@ test("H-10 enforces pricing regex, missing policy when only FAQs exist, and acti
   );
   assert.deepEqual(generalPricingDraft.missingInformation, [
     "An approved price for the requested service",
-    "Event location",
+    "Order quantity",
   ]);
 
   // When an active policy entry exists and catalogue has a price, neither mandatory item is added.
@@ -1424,9 +1441,8 @@ test("H-10 enforces pricing regex, missing policy when only FAQs exist, and acti
     }),
   );
   assert.deepEqual(satisfiedDraft.missingInformation, [
-    "Event date",
-    "Event location",
-    "What the customer needs",
+    "Specific booking, order, or service details",
+    "Preferred date or schedule",
   ]);
 
   // MockReplyDraftProvider also detects multi-intent pricing and missing policy when only FAQs exist.
@@ -1444,4 +1460,187 @@ test("H-10 enforces pricing regex, missing policy when only FAQs exist, and acti
       "An approved cancellation policy",
     ),
   );
+});
+
+// ─── Step 2: P0 Draft Guardrails tests ───────────────────────────────────────
+
+test("Step 2 uses domain-neutral missing info across hotel, course, and retail workspaces with H-10 intact", async () => {
+  const mockProvider = new MockReplyDraftProvider();
+
+  const hotelDraft = await mockProvider.draftReply(
+    makeLead({
+      name: "Tunde",
+      service: "Deluxe Suite Stay",
+      lastMessage: "Are rooms available next Friday and what is the cancellation policy?",
+    }),
+    makeContext({
+      catalogue: [
+        makeCatalogueEntry({
+          name: "Deluxe Suite",
+          description: "King bed suite with breakfast.",
+          priceMinor: 85_000,
+          currencyCode: "NGN",
+        }),
+      ],
+      knowledge: [
+        makeKnowledgeEntry({
+          title: "Check-in hours",
+          answer: "Check-in starts at 2pm.",
+          entryType: "faq",
+        }),
+      ],
+    }),
+  );
+  assert.equal(hotelDraft.decision, "clarify");
+  assert.ok(
+    hotelDraft.missingInformation.every((item) => !/event date|event location/i.test(item)),
+  );
+  assert.ok(
+    hotelDraft.missingInformation.includes("An approved cancellation policy"),
+  );
+  assert.ok(
+    hotelDraft.missingInformation.includes("Preferred date or schedule"),
+  );
+  assert.match(hotelDraft.draftReply, /\?$/);
+  assert.doesNotMatch(
+    hotelDraft.draftReply,
+    /please let us know if you would like to proceed/i,
+  );
+
+  const courseDraft = await mockProvider.draftReply(
+    makeLead({
+      name: "Ngozi",
+      service: "Data Analytics Bootcamp",
+      lastMessage: "How much is the cohort and when can I book?",
+    }),
+    makeContext({
+      catalogue: [
+        makeCatalogueEntry({
+          name: "Data Analytics Bootcamp",
+          priceMinor: null,
+        }),
+      ],
+      knowledge: [],
+    }),
+  );
+  assert.equal(courseDraft.decision, "clarify");
+  assert.ok(
+    courseDraft.missingInformation.every((item) => !/event date|event location/i.test(item)),
+  );
+  assert.ok(
+    courseDraft.missingInformation.includes(
+      "An approved price for the requested service",
+    ),
+  );
+
+  const retailLongPolicy = makeKnowledgeEntry({
+    title: "A".repeat(95),
+    answer: "B".repeat(650),
+    entryType: "policy",
+  });
+  const retailDraft = await mockProvider.draftReply(
+    makeLead({
+      name: "Kemi",
+      service: "Custom Ankara Fabrics",
+      lastMessage: "What is your refund policy on custom fabric orders?",
+    }),
+    makeContext({
+      catalogue: [],
+      knowledge: [retailLongPolicy],
+    }),
+  );
+  assert.equal(retailDraft.decision, "clarify");
+  assert.equal(retailDraft.sources.length, 1);
+  assert.ok(
+    retailDraft.missingInformation.every((item) => !/event date|event location/i.test(item)),
+  );
+  assert.ok(
+    !retailDraft.missingInformation.some((item) => /refund policy/i.test(item)),
+  );
+});
+
+test("Step 2 Gemini decision handles reply, clarify, and abstain cleanly and persists via migration 021", async () => {
+  const lead = await createLead(pool, LEGACY_WORKSPACE_ID, {
+    name: "Chidi",
+    service: "Boutique Hotel",
+    channel: "WhatsApp",
+    status: "New",
+    lastMessage: "What time is check-in?",
+    whatsappNumber: null,
+    confirmUnresolvedNumber: false,
+  });
+
+  // 1. Fully grounded non-actionable direct reply keeps decision='reply' and empty missingInformation.
+  const directReplyProvider = new GeminiReplyDraftProvider({
+    apiKey: SAMPLE_API_KEY,
+    fetchImplementation: async () =>
+      geminiSuccessResponse({
+        intent: "service-details",
+        decision: "reply",
+        summary: "Customer asked for check-in time.",
+        missingInformation: [],
+        draftReply: "Hi Chidi, check-in starts at 2:00 PM.",
+        citedFactIds: ["know:0"],
+      }),
+  });
+  const directDraft = await directReplyProvider.draftReply(
+    lead,
+    makeContext({
+      catalogue: [],
+      knowledge: [
+        makeKnowledgeEntry({
+          title: "Check-in time",
+          answer: "Check-in starts at 2:00 PM.",
+          entryType: "faq",
+        }),
+      ],
+    }),
+  );
+  assert.equal(directDraft.decision, "reply");
+  assert.deepEqual(directDraft.missingInformation, []);
+  assert.equal(directDraft.sources.length, 1);
+
+  // 2. Out-of-domain abstain normalizes draftReply to ABSTAIN_HANDOFF_NOTE, clears sources, and persists.
+  const abstainProvider = new GeminiReplyDraftProvider({
+    apiKey: SAMPLE_API_KEY,
+    fetchImplementation: async () =>
+      geminiSuccessResponse({
+        intent: "general-enquiry",
+        decision: "abstain",
+        summary: "Customer asked for clinical medication dosage advice.",
+        missingInformation: ["Medical advice is outside business scope"],
+        draftReply: "Take 500mg twice daily.",
+        citedFactIds: ["know:0"],
+      }),
+  });
+  const abstained = await abstainProvider.draftReply(
+    makeLead({
+      name: "Chidi",
+      service: "Boutique Hotel",
+      lastMessage: "What antibiotic dosage should I take for chest pain?",
+    }),
+    makeContext(),
+  );
+  assert.equal(abstained.decision, "abstain");
+  assert.equal(abstained.draftReply, ABSTAIN_HANDOFF_NOTE);
+  assert.deepEqual(abstained.sources, []);
+  assert.deepEqual(abstained.missingInformation, [
+    "Medical advice is outside business scope",
+  ]);
+
+  const persisted = await createReplyDraft(
+    pool,
+    LEGACY_WORKSPACE_ID,
+    lead.id,
+    abstained,
+  );
+  assert.equal(persisted.decision, "abstain");
+  const reloaded = await getReplyDraftForLead(
+    pool,
+    LEGACY_WORKSPACE_ID,
+    lead.id,
+    persisted.id,
+  );
+  assert.equal(reloaded?.decision, "abstain");
+  assert.equal(reloaded?.draftReply, ABSTAIN_HANDOFF_NOTE);
 });

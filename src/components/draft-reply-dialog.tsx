@@ -16,16 +16,23 @@ import {
   validateDraftReplyText,
 } from "@/lib/lead-validation";
 import {
+  isDraftApprovalBlockedByAbstention,
   parseReplyDraftApprovalResponse,
   parseReplyDraftsResponse,
   parseSavedReplyDraftResponse,
   parseSendReplyDraftResponse,
+  resolveDraftAbstentionNotice,
   resolveDraftReplyBanner,
   type Lead,
   type ReplyDraftSource,
   type ReplyDraft,
   type SavedReplyDraft,
 } from "@/lib/leads";
+import {
+  CustomerMessageQuote,
+  DraftAbstentionBanner,
+  DraftApproveButton,
+} from "./draft-reply-guardrails";
 import {
   APPROVAL_SEND_POLICIES,
   APPROVAL_SEND_POLICY_LABELS,
@@ -248,9 +255,12 @@ export function DraftReplyDialog({
   const [activeTab, setActiveTab] = useState<"compose" | "context" | "history">(
     "compose",
   );
+  const [customerMessageExpanded, setCustomerMessageExpanded] = useState(false);
 
   const selectedDraft =
     drafts.find((draft) => draft.id === selectedDraftId) ?? null;
+  const isDraftAbstained = isDraftApprovalBlockedByAbstention(selectedDraft);
+  const abstentionNotice = resolveDraftAbstentionNotice(selectedDraft);
   const outboundMessage =
     lead &&
     selectedDraft &&
@@ -649,6 +659,7 @@ export function DraftReplyDialog({
       setSelectedLinkableConversationId("");
       setLinkingError(null);
       setActiveTab("compose");
+      setCustomerMessageExpanded(false);
       setOutboundForLead(selectedLead.id, null);
       setOutboundLoadError(null);
       setOutboundLoading(false);
@@ -755,6 +766,7 @@ export function DraftReplyDialog({
     setSelectedLinkableConversationId("");
     setLinkingError(null);
     setActiveTab("compose");
+    setCustomerMessageExpanded(false);
   }, [invalidateLeadRequests]);
 
   function handleDialogClose() {
@@ -861,6 +873,14 @@ export function DraftReplyDialog({
 
   async function updateStatus(status: "draft" | "approved") {
     if (!lead || !selectedDraft) return;
+
+    if (status === "approved" && isDraftAbstained) {
+      setActionError(
+        abstentionNotice ??
+          "AI abstained from answering this enquiry. Edit the draft with a manual reply before approving or sending.",
+      );
+      return;
+    }
 
     if (status === "approved" && effectiveSendPolicy === "approve_and_send") {
       if (approvalContextLoading || approvalContextError) {
@@ -976,6 +996,14 @@ export function DraftReplyDialog({
 
   async function queueApprovedSend() {
     if (!lead || !selectedDraft) return;
+
+    if (isDraftAbstained) {
+      setActionError(
+        abstentionNotice ??
+          "AI abstained from answering this enquiry. Edit the draft with a manual reply before approving or sending.",
+      );
+      return;
+    }
 
     if (outboundLoading || outboundLoadError) {
       setActionError(
@@ -1332,6 +1360,9 @@ export function DraftReplyDialog({
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="flex flex-wrap items-center gap-2">
               <StatusBadge status={selectedDraft.status} />
+              {isDraftAbstained ? (
+                <span className="badge badge-draft">AI abstained</span>
+              ) : null}
               <span className="badge badge-neutral">
                 {intentLabels[selectedDraft.intent]}
               </span>
@@ -1408,6 +1439,18 @@ export function DraftReplyDialog({
               aria-labelledby="draft-tab-compose"
               className="space-y-5"
             >
+              {lead ? (
+                <CustomerMessageQuote
+                  message={lead.lastMessage}
+                  expanded={customerMessageExpanded}
+                  onToggle={() =>
+                    setCustomerMessageExpanded((expanded) => !expanded)
+                  }
+                />
+              ) : null}
+
+              <DraftAbstentionBanner notice={abstentionNotice} />
+
               {selectedDraft.missingInformation.length > 0 ? (
                 <div className="rounded-xl border border-[color-mix(in_oklab,var(--rp-warning)_32%,transparent)] bg-warning-soft px-4 py-3 text-xs leading-5 text-warning-ink sm:text-sm">
                   <p className="font-semibold">
@@ -1540,6 +1583,7 @@ export function DraftReplyDialog({
                       onClick={() => void queueApprovedSend()}
                       disabled={
                         isBusy ||
+                        isDraftAbstained ||
                         outboundLoading ||
                         approvalContextLoading ||
                         Boolean(outboundLoadError) ||
@@ -1584,26 +1628,25 @@ export function DraftReplyDialog({
                     </button>
                   </>
                 ) : (
-                  <button
-                    type="button"
-                    onClick={() => void updateStatus("approved")}
-                    disabled={isBusy || hasUnsavedChanges}
-                    className="btn btn-primary"
-                  >
-                    {pendingAction === "approve"
-                      ? effectiveSendPolicy === "approve_and_send"
-                        ? "Approving and queueing…"
-                        : "Approving…"
-                      : effectiveSendPolicy === "approve_and_send"
-                        ? "Approve and queue"
-                        : "Approve draft"}
-                  </button>
+                  <DraftApproveButton
+                    draft={selectedDraft}
+                    isBusy={isBusy}
+                    hasUnsavedChanges={hasUnsavedChanges}
+                    pendingApprove={pendingAction === "approve"}
+                    effectiveSendPolicy={effectiveSendPolicy}
+                    onApprove={() => void updateStatus("approved")}
+                  />
                 )}
               </div>
 
               {hasUnsavedChanges ? (
                 <p className="text-right text-xs text-ink-soft">
                   Save your edits before approving this draft.
+                </p>
+              ) : isDraftAbstained ? (
+                <p className="text-right text-xs text-warning-ink">
+                  Edit and save a manual reply before approving or sending this
+                  draft.
                 </p>
               ) : null}
 

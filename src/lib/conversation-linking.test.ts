@@ -4,8 +4,10 @@ import {
   apiErrorMessage,
   isConversationLinkable,
   linkableConversationLabel,
+  OUTBOUND_IN_PROGRESS_CODE,
   parseApiError,
   parseLinkableConversations,
+  REPLY_DRAFT_ABSTAINED_CODE,
   WHATSAPP_CONVERSATION_ALREADY_LINKED_CODE,
   WHATSAPP_CONVERSATION_LEAD_ALREADY_LINKED_CODE,
   WHATSAPP_CONVERSATION_LEAD_NUMBER_UNKNOWN_CODE,
@@ -13,6 +15,7 @@ import {
   WHATSAPP_CONVERSATION_PHONE_MISMATCH_CODE,
   WHATSAPP_CONVERSATION_REQUIRED_CODE,
   WHATSAPP_CONNECTION_DISCONNECTED_CODE,
+  WHATSAPP_CUSTOMER_SUPPRESSED_CODE,
   type LinkableConversation,
 } from "./conversation-linking.js";
 
@@ -92,6 +95,25 @@ test("the fallback is used when there is neither a message nor a known code", ()
     "fallback",
   );
   assert.equal(apiErrorMessage(null, "fallback"), "fallback");
+});
+
+test("draft_abstained, customer_suppressed, and outbound_in_progress render human-readable messages", () => {
+  for (const [code, pattern] of [
+    [REPLY_DRAFT_ABSTAINED_CODE, /abstained/i],
+    [WHATSAPP_CUSTOMER_SUPPRESSED_CODE, /suppressed/i],
+    [OUTBOUND_IN_PROGRESS_CODE, /cannot be edited/i],
+  ] as const) {
+    // Server human-readable error wins
+    assert.equal(
+      apiErrorMessage({ error: `Server detail for ${code}`, code }, "fallback"),
+      `Server detail for ${code}`,
+    );
+
+    // Code-only fallback guidance is also human-readable
+    const fallbackGuided = apiErrorMessage({ error: "", code }, "fallback");
+    assert.match(fallbackGuided, pattern);
+    assert.notEqual(fallbackGuided, "fallback");
+  }
 });
 
 test("each linkage situation has its own guidance", () => {

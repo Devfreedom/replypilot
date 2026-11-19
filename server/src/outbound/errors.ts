@@ -50,6 +50,13 @@ export const WHATSAPP_CUSTOMER_SUPPRESSED_CODE = "customer_suppressed";
 export const WHATSAPP_CUSTOMER_SUPPRESSED_MESSAGE =
   "Customer is suppressed and cannot receive outbound messages.";
 
+/** Stable machine-readable code for a draft where the AI abstained from replying. */
+export const REPLY_DRAFT_ABSTAINED_CODE = "draft_abstained";
+
+/** User-facing message paired with {@link REPLY_DRAFT_ABSTAINED_CODE}. */
+export const REPLY_DRAFT_ABSTAINED_MESSAGE =
+  "AI abstained from answering this enquiry. Edit the draft with a manual reply before approving or sending.";
+
 /**
  * The connection states that must not be queued for delivery.
  *
