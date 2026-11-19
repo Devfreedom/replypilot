@@ -50,6 +50,15 @@ export const WHATSAPP_CONNECTION_ERROR_CODE = "WHATSAPP_CONNECTION_ERROR";
 /** Stable machine-readable code for a conversation with no WhatsApp connection. */
 export const WHATSAPP_CONNECTION_MISSING_CODE = "WHATSAPP_CONNECTION_MISSING";
 
+/** Stable machine-readable code for an AI-abstained reply draft. */
+export const REPLY_DRAFT_ABSTAINED_CODE = "draft_abstained";
+
+/** Stable machine-readable code for a suppressed customer opt-out/block. */
+export const WHATSAPP_CUSTOMER_SUPPRESSED_CODE = "customer_suppressed";
+
+/** Stable machine-readable code for a draft locked by an existing sent/unresolved outbound message. */
+export const OUTBOUND_IN_PROGRESS_CODE = "outbound_in_progress";
+
 /**
  * The guidance shown for each stable error code.
  *
@@ -77,6 +86,12 @@ export const WHATSAPP_ERROR_GUIDANCE: Readonly<Record<string, string>> = {
     "The WhatsApp connection for this conversation needs attention. Verify it before sending.",
   [WHATSAPP_CONNECTION_MISSING_CODE]:
     "This conversation has no WhatsApp connection in this workspace.",
+  [REPLY_DRAFT_ABSTAINED_CODE]:
+    "AI abstained from answering this enquiry. Edit the draft with a manual reply before approving or sending.",
+  [WHATSAPP_CUSTOMER_SUPPRESSED_CODE]:
+    "Customer is suppressed and cannot receive outbound messages.",
+  [OUTBOUND_IN_PROGRESS_CODE]:
+    "This reply already has a sent or unresolved outbound message and cannot be edited or unapproved.",
 };
 
 /** The error payload the API returns for a rejected request. */

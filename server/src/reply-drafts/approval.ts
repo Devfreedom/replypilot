@@ -34,6 +34,7 @@ export type ApproveReplyDraftResult =
       outboundMessage: OutboundMessageRecord | null;
     }>
   | Readonly<{ kind: "not-found" }>
+  | Readonly<{ kind: "draft-abstained" }>
   | Readonly<{ kind: "conversation-required" }>
   | Readonly<{ kind: "conversation-ambiguous" }>
   | Readonly<{ kind: "conversation-not-found" }>
@@ -79,6 +80,11 @@ export async function approveReplyDraft(
     if (!current) {
       await client.query("ROLLBACK");
       return { kind: "not-found" };
+    }
+
+    if (current.decision === "abstain") {
+      await client.query("ROLLBACK");
+      return { kind: "draft-abstained" };
     }
 
     // Repeated approval is idempotent. It never changes the previous approval

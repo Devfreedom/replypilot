@@ -22,6 +22,8 @@ import {
   updateReplyDraftText,
 } from "../reply-drafts/repository.js";
 import {
+  REPLY_DRAFT_ABSTAINED_CODE,
+  REPLY_DRAFT_ABSTAINED_MESSAGE,
   WHATSAPP_CUSTOMER_SUPPRESSED_CODE,
   WHATSAPP_CUSTOMER_SUPPRESSED_MESSAGE,
 } from "../outbound/errors.js";
@@ -610,6 +612,14 @@ export function createLeadsRouter({
 
       if (result.kind === "not-found") {
         response.status(404).json({ error: "Reply draft not found" });
+        return;
+      }
+
+      if (result.kind === "draft-abstained") {
+        response.status(409).json({
+          error: REPLY_DRAFT_ABSTAINED_MESSAGE,
+          code: REPLY_DRAFT_ABSTAINED_CODE,
+        });
         return;
       }
 

@@ -1,12 +1,22 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import {
+  CustomerMessageQuote,
+  DraftAbstentionBanner,
+  DraftApproveButton,
+} from "../components/draft-reply-guardrails.js";
 import {
   dashboardViewHref,
+  isDraftApprovalBlockedByAbstention,
   parseDashboardView,
   parseLeadCreationError,
   parseReplyDraftResponse,
   parseSavedReplyDraftResponse,
+  resolveDraftAbstentionNotice,
   resolveDraftReplyBanner,
+  shouldShowCustomerMessageToggle,
   LeadApiError,
   WHATSAPP_LEAD_DUPLICATE_NUMBER_CODE,
   WHATSAPP_LEAD_NUMBER_UNRESOLVED_CODE,
@@ -255,4 +265,138 @@ test("resolveDraftReplyBanner separates workspace provider from persisted draft 
       /no live AI model is enabled/i,
     );
   }
+});
+
+test("Step 2 parses draft decisions, customer message toggle heuristic, and abstention approval lock", () => {
+  const savedBase = {
+    id: "11111111-1111-4111-8111-111111111111",
+    leadId: "22222222-2222-4222-8222-222222222222",
+    intent: "general-enquiry",
+    summary: "Out-of-domain enquiry.",
+    missingInformation: ["Human review required"],
+    draftReply:
+      "Manual review required: this enquiry falls outside approved business information.",
+    provider: "gemini",
+    isDemo: false,
+    status: "draft",
+    sources: [],
+    approvedAt: null,
+    approvedBy: null,
+    sendPolicyOverride: null,
+    approvalSendPolicy: null,
+    createdAt: "2026-11-16T04:00:00.000Z",
+    updatedAt: "2026-11-16T04:00:00.000Z",
+  };
+
+  // Explicit decisions parse cleanly and omitted legacy decision defaults to 'reply'
+  const abstained = parseSavedReplyDraftResponse({
+    draft: { ...savedBase, decision: "abstain" },
+  });
+  assert.equal(abstained?.decision, "abstain");
+  assert.equal(isDraftApprovalBlockedByAbstention(abstained), true);
+  assert.match(resolveDraftAbstentionNotice(abstained) ?? "", /AI abstained/i);
+
+  const clarifying = parseSavedReplyDraftResponse({
+    draft: { ...savedBase, decision: "clarify" },
+  });
+  assert.equal(clarifying?.decision, "clarify");
+  assert.equal(isDraftApprovalBlockedByAbstention(clarifying), false);
+  assert.equal(resolveDraftAbstentionNotice(clarifying), null);
+
+  const legacyOmitted = parseSavedReplyDraftResponse({ draft: savedBase });
+  assert.equal(legacyOmitted?.decision, "reply");
+  assert.equal(isDraftApprovalBlockedByAbstention(legacyOmitted), false);
+
+  assert.equal(
+    parseSavedReplyDraftResponse({
+      draft: { ...savedBase, decision: "unknown" },
+    }),
+    null,
+  );
+
+  // Customer message clamp toggle heuristic
+  assert.equal(shouldShowCustomerMessageToggle(""), false);
+  assert.equal(shouldShowCustomerMessageToggle("   "), false);
+  assert.equal(
+    shouldShowCustomerMessageToggle("Hi, are rooms available next Friday?"),
+    false,
+  );
+  assert.equal(
+    shouldShowCustomerMessageToggle("Line one\nLine two"),
+    true,
+  );
+  assert.equal(shouldShowCustomerMessageToggle("A".repeat(141)), true);
+});
+
+test("Step 2 renders Compose customer message quote with clamp toggle and abstain disabled approve state", () => {
+  // Short message renders read-only quote without toggle
+  const shortMarkup = renderToStaticMarkup(
+    createElement(CustomerMessageQuote, {
+      message: "Are suites available next Friday?",
+      expanded: false,
+      onToggle: () => undefined,
+    }),
+  );
+  assert.match(shortMarkup, /Customer message/);
+  assert.match(shortMarkup, /Are suites available next Friday\?/);
+  assert.match(shortMarkup, /line-clamp-2/);
+  assert.doesNotMatch(shortMarkup, /Show more/);
+
+  // Long message renders clamped quote with Show more, then unclamped with Show less
+  const longMessage = `${"We would like to book three rooms for our team retreat next month. ".repeat(4)}`;
+  const collapsedMarkup = renderToStaticMarkup(
+    createElement(CustomerMessageQuote, {
+      message: longMessage,
+      expanded: false,
+      onToggle: () => undefined,
+    }),
+  );
+  assert.match(collapsedMarkup, /Show more/);
+  assert.match(collapsedMarkup, /aria-expanded="false"/);
+  assert.match(collapsedMarkup, /line-clamp-2/);
+
+  const expandedMarkup = renderToStaticMarkup(
+    createElement(CustomerMessageQuote, {
+      message: longMessage,
+      expanded: true,
+      onToggle: () => undefined,
+    }),
+  );
+  assert.match(expandedMarkup, /Show less/);
+  assert.match(expandedMarkup, /aria-expanded="true"/);
+  assert.doesNotMatch(expandedMarkup, /line-clamp-2/);
+
+  // Abstention warning banner + disabled Approve / Approve & queue buttons
+  const bannerMarkup = renderToStaticMarkup(
+    createElement(DraftAbstentionBanner, {
+      notice: resolveDraftAbstentionNotice({ decision: "abstain" }),
+    }),
+  );
+  assert.match(bannerMarkup, /role="alert"/);
+  assert.match(bannerMarkup, /AI abstained/);
+
+  const disabledApproveSend = renderToStaticMarkup(
+    createElement(DraftApproveButton, {
+      draft: { decision: "abstain" },
+      isBusy: false,
+      hasUnsavedChanges: false,
+      pendingApprove: false,
+      effectiveSendPolicy: "approve_and_send",
+      onApprove: () => undefined,
+    }),
+  );
+  assert.match(disabledApproveSend, /disabled=""/);
+  assert.match(disabledApproveSend, /Approve and queue/);
+
+  const enabledApproveSend = renderToStaticMarkup(
+    createElement(DraftApproveButton, {
+      draft: { decision: "reply" },
+      isBusy: false,
+      hasUnsavedChanges: false,
+      pendingApprove: false,
+      effectiveSendPolicy: "approve_and_send",
+      onApprove: () => undefined,
+    }),
+  );
+  assert.doesNotMatch(enabledApproveSend, /disabled=""/);
 });

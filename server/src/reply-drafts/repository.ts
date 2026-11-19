@@ -1,5 +1,9 @@
 import type { Pool, PoolClient, QueryResult } from "pg";
-import type { ReplyDraft } from "../ai/reply-draft.js";
+import {
+  REPLY_DRAFT_DECISIONS,
+  type ReplyDraft,
+  type ReplyDraftDecision,
+} from "../ai/reply-draft.js";
 import {
   missingInformationSchema,
   savedReplyDraftSourcesSchema,
@@ -22,10 +26,18 @@ const LOCKED_SENT_OUTBOUND_STATUSES = new Set([
   "manual_review",
 ]);
 
+function isReplyDraftDecision(value: unknown): value is ReplyDraftDecision {
+  return (
+    typeof value === "string" &&
+    (REPLY_DRAFT_DECISIONS as readonly string[]).includes(value)
+  );
+}
+
 export const REPLY_DRAFT_COLUMNS = `
   id,
   lead_id,
   intent,
+  decision,
   summary,
   missing_information,
   draft_reply,
@@ -51,6 +63,10 @@ export function mapReplyDraftRow(row: ReplyDraftRow): SavedReplyDraft {
     throw new Error("Stored reply draft contains invalid snapshot data.");
   }
 
+  if (!isReplyDraftDecision(row.decision)) {
+    throw new Error("Stored reply draft has unsupported decision metadata.");
+  }
+
   const isSupportedMock = row.provider === "mock" && row.is_demo === true;
   const isSupportedGemini = row.provider === "gemini" && row.is_demo === false;
 
@@ -62,6 +78,7 @@ export function mapReplyDraftRow(row: ReplyDraftRow): SavedReplyDraft {
     id: row.id,
     leadId: row.lead_id,
     intent: row.intent,
+    decision: row.decision,
     summary: row.summary,
     missingInformation: missingInformation.data,
     draftReply: row.draft_reply,
@@ -127,6 +144,7 @@ export async function createReplyDraft(
         workspace_id,
         lead_id,
         intent,
+        decision,
         summary,
         missing_information,
         draft_reply,
@@ -139,13 +157,14 @@ export async function createReplyDraft(
         send_policy_override,
         approval_send_policy
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'draft', $9, NULL, NULL, NULL, NULL)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'draft', $10, NULL, NULL, NULL, NULL)
       RETURNING ${REPLY_DRAFT_COLUMNS}
     `,
     [
       workspaceId,
       leadId,
       draft.intent,
+      draft.decision,
       draft.summary,
       JSON.stringify(draft.missingInformation),
       draft.draftReply,
@@ -176,13 +195,14 @@ export async function replaceGeneratedReplyDraft(
       `
         UPDATE reply_drafts
         SET intent = $4,
-            summary = $5,
-            missing_information = $6,
-            draft_reply = $7,
-            provider = $8,
-            is_demo = $9,
+            decision = $5,
+            summary = $6,
+            missing_information = $7,
+            draft_reply = $8,
+            provider = $9,
+            is_demo = $10,
             status = 'draft',
-            sources = $10,
+            sources = $11,
             approved_at = NULL,
             approved_by = NULL,
             send_policy_override = NULL,
@@ -196,6 +216,7 @@ export async function replaceGeneratedReplyDraft(
         draftId,
         leadId,
         draft.intent,
+        draft.decision,
         draft.summary,
         JSON.stringify(draft.missingInformation),
         draft.draftReply,
@@ -219,6 +240,7 @@ export async function updateReplyDraftText(
       `
         UPDATE reply_drafts
         SET draft_reply = $4,
+            decision = CASE WHEN decision = 'abstain' THEN 'reply' ELSE decision END,
             status = 'draft',
             approved_at = NULL,
             approved_by = NULL,

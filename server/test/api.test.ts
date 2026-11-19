@@ -7,6 +7,7 @@ import { after, before, beforeEach, test } from "node:test";
 import { join } from "node:path";
 import { Pool } from "pg";
 import {
+  ABSTAIN_HANDOFF_NOTE,
   GeminiReplyDraftProvider,
   MockReplyDraftProvider,
   formatMinorUnits,
@@ -94,6 +95,7 @@ import {
   resolveOutboundProviderName,
 } from "../src/outbound/meta-config.js";
 import {
+  REPLY_DRAFT_ABSTAINED_CODE,
   WHATSAPP_CONNECTION_DISCONNECTED_CODE,
   WHATSAPP_CONNECTION_DISCONNECTED_MESSAGE,
   WHATSAPP_CONNECTION_ERROR_CODE,
@@ -1554,11 +1556,15 @@ test("POST /api/leads/:id/draft-reply returns a mock draft without persisting it
   assert.equal(response.status, 200);
   assert.deepEqual(await readJson(response), {
     intent: "availability",
+    decision: "clarify",
     summary:
       "Enquiry from Sarah Musa about Wedding photography: Are you available for a wedding in Jos this December?",
-    missingInformation: ["Preferred date and time", "Event location"],
+    missingInformation: [
+      "Preferred date or schedule",
+      "Preferred time or availability window",
+    ],
     draftReply:
-      "Hi Sarah Musa, thanks for reaching out about Wedding photography. Could you please share your preferred date, time, and location so we can understand your enquiry better?",
+      "Hi Sarah Musa, thanks for reaching out about Wedding photography. Could you share your preferred date or schedule?",
     provider: "mock",
     isDemo: true,
   });
@@ -2592,7 +2598,7 @@ test("mock provider does not invent policies or availability", async () => {
     /available|confirmed|opening hours/i,
   );
   assert.ok(
-    availabilityDraft.missingInformation.includes("Preferred date and time"),
+    availabilityDraft.missingInformation.includes("Preferred date or schedule"),
   );
 
   const bookingDraft = await provider.draftReply(
@@ -18390,4 +18396,95 @@ test("H-09 & L-03-webhook enforces pre-buffer signature checks, 1000-item bounds
   } finally {
     await stopServer(app.server);
   }
+});
+
+test("Step 2 abstained draft blocks approve_only, approve_and_send, and manual send with 409 draft_abstained until manually edited", async () => {
+  const { lead, conversationId } = await createLeadWithConversation({
+    name: "Medical Out-Of-Domain Lead",
+    service: "Boutique Hotel",
+    lastMessage: "I have severe chest pain, what antibiotic dosage should I take?",
+  });
+
+  const createdRes = await createSavedDraft(lead.id);
+  assert.equal(createdRes.status, 201);
+  const created = (
+    await readJson<{
+      draft: SavedReplyDraftPayload & { decision: string };
+    }>(createdRes)
+  ).draft;
+  assert.equal(created.decision, "abstain");
+  assert.equal(created.draftReply, ABSTAIN_HANDOFF_NOTE);
+  assert.deepEqual(created.sources, []);
+
+  // approve_only is blocked with 409 draft_abstained
+  const blockedApproveOnly = await approveSavedDraft(lead.id, created.id, {
+    status: "approved",
+    sendPolicy: "approve_only",
+  });
+  assert.equal(blockedApproveOnly.status, 409);
+  const blockedApproveOnlyBody = await readJson<{
+    error: string;
+    code?: string;
+  }>(blockedApproveOnly);
+  assert.equal(blockedApproveOnlyBody.code, REPLY_DRAFT_ABSTAINED_CODE);
+  assert.match(blockedApproveOnlyBody.error, /abstained/i);
+
+  // approve_and_send is blocked with 409 draft_abstained and queues zero outbound rows
+  const blockedApproveAndSend = await approveSavedDraft(lead.id, created.id, {
+    status: "approved",
+    sendPolicy: "approve_and_send",
+    conversationId,
+  });
+  assert.equal(blockedApproveAndSend.status, 409);
+  const blockedApproveAndSendBody = await readJson<{
+    error: string;
+    code?: string;
+  }>(blockedApproveAndSend);
+  assert.equal(blockedApproveAndSendBody.code, REPLY_DRAFT_ABSTAINED_CODE);
+  assert.match(blockedApproveAndSendBody.error, /abstained/i);
+
+  const outboundCountBeforeEdit = await pool.query<{ count: number }>(
+    "SELECT count(*)::int AS count FROM outbound_messages WHERE reply_draft_id = $1",
+    [created.id],
+  );
+  assert.equal(outboundCountBeforeEdit.rows[0]?.count, 0);
+
+  // Direct POST /api/reply-drafts/:id/send is also blocked with 409 draft_abstained
+  const blockedManualSend = await sendSavedDraft(created.id);
+  assert.equal(blockedManualSend.status, 409);
+  const blockedManualSendBody = await readJson<{
+    error: string;
+    code?: string;
+  }>(blockedManualSend);
+  assert.equal(blockedManualSendBody.code, REPLY_DRAFT_ABSTAINED_CODE);
+  assert.match(blockedManualSendBody.error, /abstained/i);
+
+  // Saving a manual edit transitions decision from 'abstain' to 'reply'
+  const editedRes = await patchSavedDraft(lead.id, created.id, {
+    draftReply:
+      "We are a hotel and cannot offer medical advice. Please contact emergency medical services immediately.",
+  });
+  assert.equal(editedRes.status, 200);
+  const edited = (
+    await readJson<{
+      draft: SavedReplyDraftPayload & { decision: string };
+    }>(editedRes)
+  ).draft;
+  assert.equal(edited.decision, "reply");
+  assert.equal(edited.status, "draft");
+
+  // Approval and queuing now succeed cleanly
+  const approvedAfterEdit = await approveSavedDraft(lead.id, created.id, {
+    status: "approved",
+    sendPolicy: "approve_and_send",
+    conversationId,
+  });
+  assert.equal(approvedAfterEdit.status, 200);
+  const approvedBody = await readJson<{
+    draft: SavedReplyDraftPayload & { decision: string };
+    outboundMessage: OutboundMessageRecord | null;
+  }>(approvedAfterEdit);
+  assert.equal(approvedBody.draft.status, "approved");
+  assert.equal(approvedBody.draft.decision, "reply");
+  assert.equal(approvedBody.outboundMessage?.status, "queued");
 });

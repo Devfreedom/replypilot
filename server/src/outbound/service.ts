@@ -23,6 +23,7 @@ export type QueueManualSendInput = Readonly<{
 export type QueueManualSendResult =
   | Readonly<{ kind: "ok"; outboundMessage: OutboundMessageRecord }>
   | Readonly<{ kind: "not-found" }>
+  | Readonly<{ kind: "draft-abstained" }>
   | Readonly<{ kind: "not-approved" }>
   | Readonly<{ kind: "not-retryable" }>
   | Readonly<{ kind: "content-changed" }>
@@ -71,6 +72,11 @@ export async function queueManualSend(
     if (!draft) {
       await client.query("ROLLBACK");
       return { kind: "not-found" };
+    }
+
+    if (draft.decision === "abstain") {
+      await client.query("ROLLBACK");
+      return { kind: "draft-abstained" };
     }
 
     if (draft.status !== "approved") {

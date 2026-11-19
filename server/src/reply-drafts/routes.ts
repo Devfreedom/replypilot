@@ -8,6 +8,8 @@ import {
 } from "../auth/middleware.js";
 import { queueManualSend } from "../outbound/service.js";
 import {
+  REPLY_DRAFT_ABSTAINED_CODE,
+  REPLY_DRAFT_ABSTAINED_MESSAGE,
   WHATSAPP_CUSTOMER_SUPPRESSED_CODE,
   WHATSAPP_CUSTOMER_SUPPRESSED_MESSAGE,
 } from "../outbound/errors.js";
@@ -151,6 +153,14 @@ export function createReplyDraftsRouter({
       response.status(409).json({
         error: WHATSAPP_CUSTOMER_SUPPRESSED_MESSAGE,
         code: WHATSAPP_CUSTOMER_SUPPRESSED_CODE,
+      });
+      return;
+    }
+
+    if (result.kind === "draft-abstained") {
+      response.status(409).json({
+        error: REPLY_DRAFT_ABSTAINED_MESSAGE,
+        code: REPLY_DRAFT_ABSTAINED_CODE,
       });
       return;
     }

@@ -75,6 +75,7 @@ export function legacyReplyDraft(draft: ReplyDraft): Omit<
 > {
   return {
     intent: draft.intent,
+    decision: draft.decision,
     summary: draft.summary,
     missingInformation: draft.missingInformation,
     draftReply: draft.draftReply,

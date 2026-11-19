@@ -1,4 +1,7 @@
-import type { ReplyDraft } from "../ai/reply-draft.js";
+import type {
+  ReplyDraft,
+  ReplyDraftDecision,
+} from "../ai/reply-draft.js";
 import type { ApprovalSendPolicy } from "../messaging/types.js";
 
 export const REPLY_DRAFT_REVIEW_STATUSES = ["draft", "approved"] as const;
@@ -23,6 +26,7 @@ export type ReplyDraftRow = Readonly<{
   id: string;
   lead_id: string;
   intent: ReplyDraft["intent"];
+  decision: ReplyDraftDecision;
   summary: string;
   missing_information: unknown;
   draft_reply: string;

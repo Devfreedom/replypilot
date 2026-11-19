@@ -121,6 +121,8 @@ export const REPLY_DRAFT_INTENTS = [
   "booking",
   "general-enquiry",
 ] as const;
+export const REPLY_DRAFT_DECISIONS = ["reply", "clarify", "abstain"] as const;
+export type ReplyDraftDecision = (typeof REPLY_DRAFT_DECISIONS)[number];
 export const REPLY_DRAFT_REVIEW_STATUSES = ["draft", "approved"] as const;
 export const REPLY_DRAFT_SOURCE_TYPES = ["catalogue", "faq", "policy"] as const;
 
@@ -136,6 +138,7 @@ const replyDraftSourceSchema = z.object({
 
 const replyDraftBaseSchema = z.object({
   intent: z.enum(REPLY_DRAFT_INTENTS),
+  decision: z.enum(REPLY_DRAFT_DECISIONS).default("reply"),
   summary: z.string(),
   missingInformation: z.array(z.string()),
   draftReply: z.string(),
@@ -375,5 +378,46 @@ export function resolveDraftReplyBanner({
         text: `This saved draft is demonstration output from ${brandName}'s mock provider. Approval records your review; nothing sends automatically without your explicit action.`,
       };
   }
+}
+
+export const CUSTOMER_MESSAGE_TOGGLE_LENGTH = 140;
+
+/**
+ * Determines whether the compact 2-line customer message quote in Compose
+ * needs a Show more / Show less toggle.
+ */
+export function shouldShowCustomerMessageToggle(message: string): boolean {
+  const trimmed = message.trim();
+  if (!trimmed) {
+    return false;
+  }
+
+  return (
+    trimmed.length > CUSTOMER_MESSAGE_TOGGLE_LENGTH ||
+    trimmed.includes("\n")
+  );
+}
+
+/**
+ * Returns true when an AI-abstained draft must be manually edited and saved
+ * before Approve / Approve & Send actions can be enabled.
+ */
+export function isDraftApprovalBlockedByAbstention(
+  draft: Pick<SavedReplyDraft, "decision"> | null,
+): boolean {
+  return draft?.decision === "abstain";
+}
+
+/**
+ * Warning copy shown in Compose when the assistant abstained from answering.
+ */
+export function resolveDraftAbstentionNotice(
+  draft: Pick<SavedReplyDraft, "decision"> | null,
+): string | null {
+  if (!isDraftApprovalBlockedByAbstention(draft)) {
+    return null;
+  }
+
+  return "AI abstained from answering this enquiry because it falls outside your approved business information. Edit the draft with a manual reply and save changes before approving or sending.";
 }
 
