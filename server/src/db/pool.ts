@@ -19,10 +19,18 @@ export function createPool(
     options.idleInTransactionSessionTimeoutMs ??
     DEFAULT_IDLE_IN_TRANSACTION_SESSION_TIMEOUT_MS;
 
+  const parsedConnectionTimeoutMs = Number(
+    process.env.DB_CONNECTION_TIMEOUT_MS,
+  );
+  const connectionTimeoutMillis =
+    Number.isFinite(parsedConnectionTimeoutMs) && parsedConnectionTimeoutMs > 0
+      ? parsedConnectionTimeoutMs
+      : 15_000;
+
   const pool = new Pool({
     connectionString: databaseUrl,
     max: 10,
-    connectionTimeoutMillis: 5_000,
+    connectionTimeoutMillis,
     idleTimeoutMillis: 30_000,
     ...(statementTimeoutMs > 0
       ? {

@@ -17153,6 +17153,43 @@ test("C-01 protection summary reports connection-backed sending when the global 
 });
 
 test("H-08 & M-07 createPool enforces PostgreSQL timeouts with 0 override, ensureWorkspaceForUser uses fast-path, and delivery catch avoids max-1 pool deadlock", async () => {
+  type PoolWithOptions = Pool & {
+    options?: { connectionTimeoutMillis?: number };
+  };
+  const previousConnectionTimeoutEnv = process.env.DB_CONNECTION_TIMEOUT_MS;
+  const timeoutTestPools: PoolWithOptions[] = [];
+
+  try {
+    delete process.env.DB_CONNECTION_TIMEOUT_MS;
+    const defaultTimeoutPool = createPool(testDatabaseUrl) as PoolWithOptions;
+    timeoutTestPools.push(defaultTimeoutPool);
+    assert.equal(defaultTimeoutPool.options?.connectionTimeoutMillis, 15_000);
+
+    process.env.DB_CONNECTION_TIMEOUT_MS = "25000";
+    const configuredTimeoutPool = createPool(
+      testDatabaseUrl,
+    ) as PoolWithOptions;
+    timeoutTestPools.push(configuredTimeoutPool);
+    assert.equal(
+      configuredTimeoutPool.options?.connectionTimeoutMillis,
+      25_000,
+    );
+
+    for (const invalidValue of ["0", "-500", "not-a-number"]) {
+      process.env.DB_CONNECTION_TIMEOUT_MS = invalidValue;
+      const fallbackPool = createPool(testDatabaseUrl) as PoolWithOptions;
+      timeoutTestPools.push(fallbackPool);
+      assert.equal(fallbackPool.options?.connectionTimeoutMillis, 15_000);
+    }
+  } finally {
+    if (previousConnectionTimeoutEnv === undefined) {
+      delete process.env.DB_CONNECTION_TIMEOUT_MS;
+    } else {
+      process.env.DB_CONNECTION_TIMEOUT_MS = previousConnectionTimeoutEnv;
+    }
+    await Promise.all(timeoutTestPools.map((testPool) => testPool.end()));
+  }
+
   const defaultPool = createPool(testDatabaseUrl);
   const unlimitedPool = createPool(testDatabaseUrl, {
     statementTimeoutMs: 0,
