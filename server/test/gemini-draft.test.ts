@@ -1644,3 +1644,110 @@ test("Step 2 Gemini decision handles reply, clarify, and abstain cleanly and per
   assert.equal(reloaded?.decision, "abstain");
   assert.equal(reloaded?.draftReply, ABSTAIN_HANDOFF_NOTE);
 });
+
+test("Gemini prompt enforces unverified-availability restriction and preserves catalogue pricing units verbatim", async () => {
+  let capturedSystemInstruction = "";
+  let capturedUserPrompt = "";
+
+  const provider = new GeminiReplyDraftProvider({
+    apiKey: SAMPLE_API_KEY,
+    fetchImplementation: async (_input, init) => {
+      const body = JSON.parse(String(init?.body ?? "{}")) as {
+        systemInstruction?: { parts?: Array<{ text?: string }> };
+        contents?: Array<{ parts?: Array<{ text?: string }> }>;
+      };
+      capturedSystemInstruction =
+        body.systemInstruction?.parts?.[0]?.text ?? "";
+      capturedUserPrompt = body.contents?.[0]?.parts?.[0]?.text ?? "";
+
+      return geminiSuccessResponse({
+        intent: "availability",
+        decision: "clarify",
+        summary: "Customer asked about suite availability and rate.",
+        missingInformation: ["Preferred date or schedule"],
+        draftReply:
+          "Hi Ada, our Deluxe Suite is GBP 180.00 per night. What dates are you looking to stay so we can check availability?",
+        citedFactIds: ["cat:0"],
+      });
+    },
+  });
+
+  await provider.draftReply(
+    makeLead({
+      name: "Ada",
+      service: "Deluxe Suite",
+      lastMessage: "Do you have a Deluxe Suite available?",
+    }),
+    makeContext({
+      catalogue: [
+        makeCatalogueEntry({
+          name: "Deluxe Suite",
+          description: "GBP 180.00 per night, includes breakfast",
+          priceMinor: 18_000,
+          currencyCode: "GBP",
+          availabilityNotes: "Check-in 2 PM; dates subject to confirmation",
+        }),
+        makeCatalogueEntry({
+          id: "33333333-3333-4333-8333-333333333333",
+          name: "Airport Shuttle",
+          description: "Private transfer charged per hour or per session",
+          priceMinor: 4_500,
+          currencyCode: "GBP",
+          availabilityNotes: null,
+        }),
+      ],
+      knowledge: [],
+    }),
+  );
+
+  // System instruction enforces unverified-availability restriction & pricing-unit preservation
+  assert.match(
+    capturedSystemInstruction,
+    /Never state or imply that a room, service, product, or slot is available/i,
+  );
+  assert.match(
+    capturedSystemInstruction,
+    /preserve its exact pricing or billing unit.*per night.*per hour.*per session/i,
+  );
+
+  // User prompt preserves catalogue pricing units/descriptions & availability notes verbatim
+  assert.match(capturedUserPrompt, /GBP 180\.00 per night, includes breakfast/);
+  assert.match(
+    capturedUserPrompt,
+    /Check-in 2 PM; dates subject to confirmation/,
+  );
+  assert.match(
+    capturedUserPrompt,
+    /Private transfer charged per hour or per session/,
+  );
+
+  // Broadened Rule 4: covers any undocumented business detail/feature/amenity without guessing
+  assert.match(
+    capturedSystemInstruction,
+    /any requested price, policy, availability, feature, amenity, or other business detail/i,
+  );
+  assert.match(
+    capturedSystemInstruction,
+    /NEVER guess, estimate, assume, or promise it/i,
+  );
+
+  // Pricing phrasing rule: forbids "is available at" / "available for" and instructs neutral phrasing
+  assert.match(
+    capturedSystemInstruction,
+    /NEVER use the phrases 'is available at', 'available for', or 'is available'/i,
+  );
+  assert.match(
+    capturedSystemInstruction,
+    /Use neutral pricing phrasing such as 'is priced at', 'costs'/i,
+  );
+
+  // Answer-scope tightness rule: keep replies scoped and avoid volunteering unrelated catalogue details
+  assert.match(
+    capturedSystemInstruction,
+    /Keep replies concise and directly scoped to what the customer asked/i,
+  );
+  assert.match(
+    capturedSystemInstruction,
+    /Do not volunteer unrelated operational details from the catalogue description/i,
+  );
+});

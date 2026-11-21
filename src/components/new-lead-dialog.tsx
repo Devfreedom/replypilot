@@ -1,6 +1,13 @@
 "use client";
 
-import { useEffect, useLayoutEffect, useRef, useState, type FormEvent } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type FormEvent,
+  type SyntheticEvent,
+} from "react";
 import { PHONE_COUNTRY_OPTIONS } from "@/lib/countries";
 import {
   LEAD_MESSAGE_MAX_LENGTH,
@@ -246,9 +253,9 @@ export function NewLeadDialog({
     }
   }
 
-  function handleBackdropClick(event: React.MouseEvent<HTMLDialogElement>) {
-    if (event.target === dialogRef.current) {
-      dialogRef.current?.close();
+  function handleDialogCancel(event: SyntheticEvent<HTMLDialogElement>) {
+    if (isSubmitting) {
+      event.preventDefault();
     }
   }
 
@@ -256,7 +263,7 @@ export function NewLeadDialog({
     <dialog
       ref={dialogRef}
       onClose={onClose}
-      onClick={handleBackdropClick}
+      onCancel={handleDialogCancel}
       aria-labelledby="new-lead-title"
       className="m-auto max-h-[90dvh] w-[calc(100%-1.5rem)] max-w-lg overflow-y-auto rounded-2xl border border-line bg-surface p-4 text-ink shadow-2xl sm:p-7"
     >
