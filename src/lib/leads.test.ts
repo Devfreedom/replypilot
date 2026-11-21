@@ -6,6 +6,7 @@ import {
   CustomerMessageQuote,
   DraftAbstentionBanner,
   DraftApproveButton,
+  DraftCopyReplyButton,
 } from "../components/draft-reply-guardrails.js";
 import {
   dashboardViewHref,
@@ -399,4 +400,34 @@ test("Step 2 renders Compose customer message quote with clamp toggle and abstai
     }),
   );
   assert.doesNotMatch(enabledApproveSend, /disabled=""/);
+
+  // Copy reply button is disabled and ignores clicks when decision === "abstain"
+  let copyCalls = 0;
+  const abstainedCopyElement = DraftCopyReplyButton({
+    draft: { decision: "abstain" },
+    editedReply:
+      "Manual review required: this enquiry falls outside approved business information.",
+    isBusy: false,
+    onCopy: () => {
+      copyCalls += 1;
+    },
+  });
+  const disabledCopyMarkup = renderToStaticMarkup(abstainedCopyElement);
+  assert.match(disabledCopyMarkup, /disabled=""/);
+  assert.match(disabledCopyMarkup, /Copy reply/);
+  abstainedCopyElement.props.onClick();
+  assert.equal(copyCalls, 0);
+
+  const enabledCopyElement = DraftCopyReplyButton({
+    draft: { decision: "reply" },
+    editedReply: "Hi Ada, our Deluxe Suite is GBP 180.00 per night.",
+    isBusy: false,
+    onCopy: () => {
+      copyCalls += 1;
+    },
+  });
+  const enabledCopyMarkup = renderToStaticMarkup(enabledCopyElement);
+  assert.doesNotMatch(enabledCopyMarkup, /disabled=""/);
+  enabledCopyElement.props.onClick();
+  assert.equal(copyCalls, 1);
 });

@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  isDraftApprovalBlockedByAbstention,
   shouldShowCustomerMessageToggle,
   type SavedReplyDraft,
 } from "../lib/leads";
@@ -106,6 +107,37 @@ export function DraftApproveButton({
         : effectiveSendPolicy === "approve_and_send"
           ? "Approve and queue"
           : "Approve draft"}
+    </button>
+  );
+}
+
+export function DraftCopyReplyButton({
+  draft,
+  editedReply,
+  isBusy,
+  onCopy,
+}: Readonly<{
+  draft: Pick<SavedReplyDraft, "decision">;
+  editedReply: string;
+  isBusy: boolean;
+  onCopy: () => void;
+}>) {
+  const isAbstained = isDraftApprovalBlockedByAbstention(draft);
+  const isDisabled = !editedReply.trim() || isBusy || isAbstained;
+
+  return (
+    <button
+      type="button"
+      onClick={() => {
+        if (isAbstained) {
+          return;
+        }
+        onCopy();
+      }}
+      disabled={isDisabled}
+      className="btn btn-secondary"
+    >
+      Copy reply
     </button>
   );
 }

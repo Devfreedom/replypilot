@@ -3,6 +3,7 @@
 import {
   Activity,
   type KeyboardEvent,
+  type SyntheticEvent,
   useCallback,
   useEffect,
   useEffectEvent,
@@ -32,6 +33,7 @@ import {
   CustomerMessageQuote,
   DraftAbstentionBanner,
   DraftApproveButton,
+  DraftCopyReplyButton,
 } from "./draft-reply-guardrails";
 import {
   APPROVAL_SEND_POLICIES,
@@ -1221,7 +1223,12 @@ export function DraftReplyDialog({
   }
 
   async function copyReply() {
-    if (!editedReply.trim()) return;
+    if (
+      !editedReply.trim() ||
+      isDraftApprovalBlockedByAbstention(selectedDraft)
+    ) {
+      return;
+    }
 
     setNotice(null);
     setActionError(null);
@@ -1268,9 +1275,9 @@ export function DraftReplyDialog({
     document.getElementById(`draft-tab-${targetTab}`)?.focus();
   }
 
-  function handleBackdropClick(event: React.MouseEvent<HTMLDialogElement>) {
-    if (event.target === dialogRef.current) {
-      dialogRef.current?.close();
+  function handleDialogCancel(event: SyntheticEvent<HTMLDialogElement>) {
+    if (isBusy || linkingConversationId !== null) {
+      event.preventDefault();
     }
   }
 
@@ -1292,7 +1299,7 @@ export function DraftReplyDialog({
     <dialog
       ref={dialogRef}
       onClose={handleDialogClose}
-      onClick={handleBackdropClick}
+      onCancel={handleDialogCancel}
       aria-labelledby="draft-reply-title"
       aria-describedby={draftBanner ? "draft-reply-demo" : undefined}
       className="m-auto max-h-[90dvh] w-[calc(100%-1.5rem)] max-w-3xl overflow-y-auto rounded-2xl border border-line bg-surface p-4 text-ink shadow-2xl sm:p-7"
@@ -1558,14 +1565,12 @@ export function DraftReplyDialog({
                     ? "Regenerating…"
                     : "Regenerate draft"}
                 </button>
-                <button
-                  type="button"
-                  onClick={() => void copyReply()}
-                  disabled={!editedReply.trim() || isBusy}
-                  className="btn btn-secondary"
-                >
-                  Copy reply
-                </button>
+                <DraftCopyReplyButton
+                  draft={selectedDraft}
+                  editedReply={editedReply}
+                  isBusy={isBusy}
+                  onCopy={() => void copyReply()}
+                />
                 <button
                   type="button"
                   onClick={() => void saveReply()}
